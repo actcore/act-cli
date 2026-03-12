@@ -1,61 +1,14 @@
 use act_types::cbor;
+use act_types::jsonrpc::{Request as JsonRpcRequest, Response as JsonRpcResponse};
+use act_types::mcp::{
+    self, CallToolParams, CallToolResult, ContentItem, ImageContent, InitializeResult,
+    ListToolsResult, ServerCapabilities, ServerInfo, TextContent, ToolAnnotations, ToolDefinition,
+};
 use act_types::types::Metadata;
 use crate::runtime;
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-// ── JSON-RPC types ──
-
-#[derive(Deserialize)]
-struct JsonRpcRequest {
-    #[allow(dead_code)]
-    jsonrpc: String,
-    #[serde(default)]
-    id: Option<Value>,
-    method: String,
-    #[serde(default)]
-    params: Option<Value>,
-}
-
-#[derive(Serialize)]
-struct JsonRpcResponse {
-    jsonrpc: String,
-    id: Value,
-    #[serde(flatten)]
-    body: JsonRpcBody,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "lowercase")]
-enum JsonRpcBody {
-    Result(Value),
-    Error(JsonRpcError),
-}
-
-#[derive(Serialize)]
-struct JsonRpcError {
-    code: i32,
-    message: String,
-}
-
-impl JsonRpcResponse {
-    fn success(id: Value, result: Value) -> Self {
-        Self {
-            jsonrpc: "2.0".to_string(),
-            id,
-            body: JsonRpcBody::Result(result),
-        }
-    }
-    fn error(id: Value, code: i32, message: String) -> Self {
-        Self {
-            jsonrpc: "2.0".to_string(),
-            id,
-            body: JsonRpcBody::Error(JsonRpcError { code, message }),
-        }
-    }
-}
 
 // ── Stdio loop ──
 
@@ -136,19 +89,18 @@ fn handle_initialize(
     id: Value,
     info: &runtime::act::core::types::ComponentInfo,
 ) -> JsonRpcResponse {
-    JsonRpcResponse::success(
-        id,
-        serde_json::json!({
-            "protocolVersion": "2025-11-25",
-            "serverInfo": {
-                "name": info.name,
-                "version": info.version,
-            },
-            "capabilities": {
-                "tools": {},
-            },
+    let result = InitializeResult {
+        protocol_version: mcp::PROTOCOL_VERSION.to_string(),
+        server_info: ServerInfo {
+            name: info.name.clone(),
+            version: Some(info.version.clone()),
+        },
+        capabilities: Some(ServerCapabilities {
+            tools: Some(serde_json::json!({})),
+            ..Default::default()
         }),
-    )
+    };
+    JsonRpcResponse::success(id, serde_json::to_value(result).unwrap())
 }
 
 // ── tools/list ──
@@ -165,57 +117,61 @@ async fn handle_tools_list(
     };
 
     if handle.send(request).await.is_err() {
-        return JsonRpcResponse::error(id, -32603, "component actor unavailable".to_string());
+        return JsonRpcResponse::error(id, -32603, "component actor unavailable");
     }
 
     match reply_rx.await {
         Ok(Ok(list_response)) => {
-            let tools: Vec<Value> = list_response
+            let tools: Vec<ToolDefinition> = list_response
                 .tools
                 .iter()
                 .map(|td| {
-                    let description = act_types::types::LocalizedString::from(&td.description).any_text().to_string();
+                    let description = act_types::types::LocalizedString::from(&td.description)
+                        .any_text()
+                        .to_string();
                     let input_schema: Value = serde_json::from_str(&td.parameters_schema)
                         .unwrap_or(serde_json::json!({"type": "object"}));
 
-                    let mut tool = serde_json::json!({
-                        "name": td.name,
-                        "description": description,
-                        "inputSchema": input_schema,
-                    });
-
                     let annotations = build_annotations(&td.metadata);
-                    if !annotations.is_empty() {
-                        tool.as_object_mut()
-                            .expect("tool is a JSON object")
-                            .insert("annotations".to_string(), Value::Object(annotations));
-                    }
 
-                    tool
+                    ToolDefinition {
+                        name: td.name.clone(),
+                        description: Some(description),
+                        input_schema,
+                        annotations,
+                    }
                 })
                 .collect();
 
-            JsonRpcResponse::success(id, serde_json::json!({ "tools": tools }))
+            let result = ListToolsResult {
+                tools,
+                next_cursor: None,
+            };
+            JsonRpcResponse::success(id, serde_json::to_value(result).unwrap())
         }
         Ok(Err(e)) => component_error_to_jsonrpc(id, e),
-        Err(_) => JsonRpcResponse::error(id, -32603, "component actor dropped reply".to_string()),
+        Err(_) => JsonRpcResponse::error(id, -32603, "component actor dropped reply"),
     }
 }
 
-fn build_annotations(metadata: &[(String, Vec<u8>)]) -> serde_json::Map<String, Value> {
+fn build_annotations(metadata: &[(String, Vec<u8>)]) -> Option<ToolAnnotations> {
     use act_types::constants::*;
     let meta = Metadata::from(metadata.to_vec());
-    let mut annotations = serde_json::Map::new();
-    if let Some(v) = meta.get(META_READ_ONLY) {
-        annotations.insert("readOnlyHint".to_string(), v.clone());
+
+    let read_only_hint = meta.get_as::<bool>(META_READ_ONLY);
+    let idempotent_hint = meta.get_as::<bool>(META_IDEMPOTENT);
+    let destructive_hint = meta.get_as::<bool>(META_DESTRUCTIVE);
+
+    if read_only_hint.is_none() && idempotent_hint.is_none() && destructive_hint.is_none() {
+        return None;
     }
-    if let Some(v) = meta.get(META_IDEMPOTENT) {
-        annotations.insert("idempotentHint".to_string(), v.clone());
-    }
-    if let Some(v) = meta.get(META_DESTRUCTIVE) {
-        annotations.insert("destructiveHint".to_string(), v.clone());
-    }
-    annotations
+
+    Some(ToolAnnotations {
+        read_only_hint,
+        idempotent_hint,
+        destructive_hint,
+        open_world_hint: None,
+    })
 }
 
 // ── tools/call ──
@@ -226,23 +182,22 @@ async fn handle_tools_call(
     handle: &runtime::ComponentHandle,
     config: &Option<Vec<u8>>,
 ) -> JsonRpcResponse {
-    let params = req.params.as_ref();
-    let tool_name = params
-        .and_then(|p| p.get("name"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let arguments = params
-        .and_then(|p| p.get("arguments"))
-        .cloned()
-        .unwrap_or(serde_json::json!({}));
+    let call_params: CallToolParams = match req.params.as_ref() {
+        Some(p) => match serde_json::from_value(p.clone()) {
+            Ok(p) => p,
+            Err(_) => return JsonRpcResponse::error(id, -32602, "invalid params"),
+        },
+        None => return JsonRpcResponse::error(id, -32602, "missing params"),
+    };
 
+    let arguments = call_params.arguments.unwrap_or(serde_json::json!({}));
     let cbor_args = match cbor::json_to_cbor(&arguments) {
         Ok(bytes) => bytes,
-        Err(_) => return JsonRpcResponse::error(id, -32602, "invalid arguments".to_string()),
+        Err(_) => return JsonRpcResponse::error(id, -32602, "invalid arguments"),
     };
 
     let tool_call = runtime::act::core::types::ToolCall {
-        name: tool_name.to_string(),
+        name: call_params.name,
         arguments: cbor_args,
         metadata: Vec::new(),
     };
@@ -255,7 +210,7 @@ async fn handle_tools_call(
     };
 
     if handle.send(request).await.is_err() {
-        return JsonRpcResponse::error(id, -32603, "component actor unavailable".to_string());
+        return JsonRpcResponse::error(id, -32603, "component actor unavailable");
     }
 
     match reply_rx.await {
@@ -270,72 +225,64 @@ async fn handle_tools_call(
                     }
                     runtime::act::core::types::StreamEvent::Error(err) => {
                         is_error = true;
-                        let message = act_types::types::LocalizedString::from(&err.message).any_text().to_string();
-                        content.push(serde_json::json!({
-                            "type": "text",
-                            "text": message,
-                        }));
+                        let message = act_types::types::LocalizedString::from(&err.message)
+                            .any_text()
+                            .to_string();
+                        content.push(ContentItem::Text(TextContent { text: message }));
                     }
                 }
             }
 
-            let mut result = serde_json::json!({ "content": content });
-            if is_error {
-                result
-                    .as_object_mut()
-                    .expect("result is a JSON object")
-                    .insert("isError".to_string(), Value::Bool(true));
-            }
-            JsonRpcResponse::success(id, result)
+            let result = CallToolResult {
+                content,
+                is_error: if is_error { Some(true) } else { None },
+            };
+            JsonRpcResponse::success(id, serde_json::to_value(result).unwrap())
         }
         Ok(Err(e)) => component_error_to_jsonrpc(id, e),
-        Err(_) => JsonRpcResponse::error(id, -32603, "component actor dropped reply".to_string()),
+        Err(_) => JsonRpcResponse::error(id, -32603, "component actor dropped reply"),
     }
 }
 
 // ── Content mapping (ACT-MCP.md §2.2) ──
 
-fn map_content_part(part: &runtime::act::core::types::ContentPart) -> Value {
-    use base64::Engine as _;
+fn map_content_part(part: &runtime::act::core::types::ContentPart) -> ContentItem {
     let mime = part.mime_type.as_deref().unwrap_or("");
 
     match mime {
         m if m.starts_with("text/") => {
-            let text = String::from_utf8_lossy(&part.data);
-            serde_json::json!({ "type": "text", "text": text })
+            let text = String::from_utf8_lossy(&part.data).into_owned();
+            ContentItem::Text(TextContent { text })
         }
         m if m.starts_with("image/") => {
-            let b64 = base64::engine::general_purpose::STANDARD.encode(&part.data);
-            serde_json::json!({ "type": "image", "data": b64, "mimeType": m })
+            ContentItem::Image(ImageContent {
+                data: part.data.clone(),
+                mime_type: m.to_string(),
+            })
         }
         _ => {
             let text = match cbor::cbor_to_json(&part.data) {
                 Ok(Value::String(s)) => s,
                 Ok(v) => serde_json::to_string(&v).unwrap_or_default(),
-                Err(_) => base64::engine::general_purpose::STANDARD.encode(&part.data),
+                Err(_) => {
+                    use base64::Engine as _;
+                    base64::engine::general_purpose::STANDARD.encode(&part.data)
+                }
             };
-            serde_json::json!({ "type": "text", "text": text })
+            ContentItem::Text(TextContent { text })
         }
     }
 }
 
 // ── Error mapping ──
 
-fn error_kind_to_jsonrpc_code(kind: &str) -> i32 {
-    use act_types::constants::*;
-    match kind {
-        ERR_NOT_FOUND => -32601,
-        ERR_INVALID_ARGS => -32602,
-        ERR_INTERNAL => -32603,
-        _ => -32000,
-    }
-}
-
 fn component_error_to_jsonrpc(id: Value, err: runtime::ComponentError) -> JsonRpcResponse {
     match err {
         runtime::ComponentError::Tool(te) => {
-            let message = act_types::types::LocalizedString::from(&te.message).any_text().to_string();
-            JsonRpcResponse::error(id, error_kind_to_jsonrpc_code(&te.kind), message)
+            let message = act_types::types::LocalizedString::from(&te.message)
+                .any_text()
+                .to_string();
+            JsonRpcResponse::error(id, mcp::error_kind_to_jsonrpc_code(&te.kind), message)
         }
         runtime::ComponentError::Internal(e) => {
             JsonRpcResponse::error(id, -32603, e.to_string())
