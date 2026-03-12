@@ -206,14 +206,14 @@ fn build_annotations(metadata: &[(String, Vec<u8>)]) -> serde_json::Map<String, 
     use act_types::constants::*;
     let meta = Metadata::from(metadata.to_vec());
     let mut annotations = serde_json::Map::new();
-    if let Some(v) = meta.get::<bool>(META_READ_ONLY) {
-        annotations.insert("readOnlyHint".to_string(), Value::Bool(v));
+    if let Some(v) = meta.get(META_READ_ONLY) {
+        annotations.insert("readOnlyHint".to_string(), v.clone());
     }
-    if let Some(v) = meta.get::<bool>(META_IDEMPOTENT) {
-        annotations.insert("idempotentHint".to_string(), Value::Bool(v));
+    if let Some(v) = meta.get(META_IDEMPOTENT) {
+        annotations.insert("idempotentHint".to_string(), v.clone());
     }
-    if let Some(v) = meta.get::<bool>(META_DESTRUCTIVE) {
-        annotations.insert("destructiveHint".to_string(), Value::Bool(v));
+    if let Some(v) = meta.get(META_DESTRUCTIVE) {
+        annotations.insert("destructiveHint".to_string(), v.clone());
     }
     annotations
 }
