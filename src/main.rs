@@ -323,9 +323,11 @@ mod tests {
     fn parse_cli_config_string_takes_precedence() {
         let mut file = NamedTempFile::new().unwrap();
         write!(file, r#"{{"from":"file"}}"#).unwrap();
-        let result =
-            parse_cli_config(Some(r#"{"from":"arg"}"#.to_string()), Some(file.path().to_path_buf()))
-                .unwrap();
+        let result = parse_cli_config(
+            Some(r#"{"from":"arg"}"#.to_string()),
+            Some(file.path().to_path_buf()),
+        )
+        .unwrap();
         assert_eq!(result, Some(serde_json::json!({"from": "arg"})));
     }
 
