@@ -293,6 +293,48 @@ async fn cli_tools(
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn parse_cli_config_from_string() {
+        let result = parse_cli_config(Some(r#"{"key":"value"}"#.to_string()), None).unwrap();
+        assert_eq!(result, Some(serde_json::json!({"key": "value"})));
+    }
+
+    #[test]
+    fn parse_cli_config_from_file() {
+        let mut file = NamedTempFile::new().unwrap();
+        write!(file, r#"{{"port": 8080}}"#).unwrap();
+        let result = parse_cli_config(None, Some(file.path().to_path_buf())).unwrap();
+        assert_eq!(result, Some(serde_json::json!({"port": 8080})));
+    }
+
+    #[test]
+    fn parse_cli_config_none() {
+        let result = parse_cli_config(None, None).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn parse_cli_config_string_takes_precedence() {
+        let mut file = NamedTempFile::new().unwrap();
+        write!(file, r#"{{"from":"file"}}"#).unwrap();
+        let result =
+            parse_cli_config(Some(r#"{"from":"arg"}"#.to_string()), Some(file.path().to_path_buf()))
+                .unwrap();
+        assert_eq!(result, Some(serde_json::json!({"from": "arg"})));
+    }
+
+    #[test]
+    fn parse_cli_config_invalid_json() {
+        assert!(parse_cli_config(Some("not json".to_string()), None).is_err());
+    }
+}
+
 async fn serve(component_path: PathBuf, addr: SocketAddr) -> Result<()> {
     let engine = runtime::create_engine()?;
     let component = runtime::load_component(&engine, &component_path)?;

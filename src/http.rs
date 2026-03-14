@@ -400,6 +400,37 @@ async fn protocol_version_layer(request: Request, next: Next) -> axum::response:
 
 // ── Router ──
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_kind_maps_not_found() {
+        assert_eq!(error_kind_to_status("std:not-found"), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn error_kind_maps_invalid_args() {
+        assert_eq!(
+            error_kind_to_status("std:invalid-args"),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+
+    #[test]
+    fn error_kind_maps_unknown_to_500() {
+        assert_eq!(
+            error_kind_to_status("something_unknown"),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn query_method_is_valid() {
+        assert_eq!(query_method().as_str(), "QUERY");
+    }
+}
+
 pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/info", get(get_info))

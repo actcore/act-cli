@@ -28,3 +28,7 @@ tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 wasmtime = { version = "42", features = ["component-model", "component-model-async"] }
 wasmtime-wasi = { version = "42", features = ["p3"] }
 wasmtime-wasi-http = { version = "42", features = ["p3"] }
+
+[dev-dependencies]
+tempfile = "3"
+ciborium = "0.2"

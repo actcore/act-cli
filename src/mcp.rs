@@ -274,6 +274,58 @@ fn map_content_part(part: &runtime::act::core::types::ContentPart) -> ContentIte
 
 // ── Error mapping ──
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn map_text_content() {
+        let part = runtime::act::core::types::ContentPart {
+            data: b"hello world".to_vec(),
+            mime_type: Some("text/plain".to_string()),
+            metadata: vec![],
+        };
+        match map_content_part(&part) {
+            ContentItem::Text(tc) => assert_eq!(tc.text, "hello world"),
+            _ => panic!("expected TextContent"),
+        }
+    }
+
+    #[test]
+    fn map_image_content() {
+        let part = runtime::act::core::types::ContentPart {
+            data: vec![0x89, 0x50, 0x4E, 0x47],
+            mime_type: Some("image/png".to_string()),
+            metadata: vec![],
+        };
+        match map_content_part(&part) {
+            ContentItem::Image(ic) => {
+                assert_eq!(ic.mime_type, "image/png");
+                assert_eq!(ic.data, vec![0x89, 0x50, 0x4E, 0x47]);
+            }
+            _ => panic!("expected ImageContent"),
+        }
+    }
+
+    #[test]
+    fn build_annotations_empty_metadata() {
+        assert!(build_annotations(&[]).is_none());
+    }
+
+    #[test]
+    fn build_annotations_with_read_only() {
+        use act_types::constants::META_READ_ONLY;
+        let cbor_true = {
+            let mut buf = Vec::new();
+            ciborium::into_writer(&true, &mut buf).unwrap();
+            buf
+        };
+        let metadata = vec![(META_READ_ONLY.to_string(), cbor_true)];
+        let annotations = build_annotations(&metadata).unwrap();
+        assert_eq!(annotations.read_only_hint, Some(true));
+    }
+}
+
 fn component_error_to_jsonrpc(id: Value, err: runtime::ComponentError) -> JsonRpcResponse {
     match err {
         runtime::ComponentError::Tool(te) => {
