@@ -1,3 +1,4 @@
+use crate::runtime;
 use act_types::cbor;
 use act_types::jsonrpc::{Request as JsonRpcRequest, Response as JsonRpcResponse};
 use act_types::mcp::{
@@ -5,7 +6,6 @@ use act_types::mcp::{
     ListToolsResult, ServerCapabilities, ServerInfo, TextContent, ToolAnnotations, ToolDefinition,
 };
 use act_types::types::Metadata;
-use crate::runtime;
 use anyhow::Result;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -254,12 +254,10 @@ fn map_content_part(part: &runtime::act::core::types::ContentPart) -> ContentIte
             let text = String::from_utf8_lossy(&part.data).into_owned();
             ContentItem::Text(TextContent { text })
         }
-        m if m.starts_with("image/") => {
-            ContentItem::Image(ImageContent {
-                data: part.data.clone(),
-                mime_type: m.to_string(),
-            })
-        }
+        m if m.starts_with("image/") => ContentItem::Image(ImageContent {
+            data: part.data.clone(),
+            mime_type: m.to_string(),
+        }),
         _ => {
             let text = match cbor::cbor_to_json(&part.data) {
                 Ok(Value::String(s)) => s,
@@ -284,8 +282,6 @@ fn component_error_to_jsonrpc(id: Value, err: runtime::ComponentError) -> JsonRp
                 .to_string();
             JsonRpcResponse::error(id, mcp::error_kind_to_jsonrpc_code(&te.kind), message)
         }
-        runtime::ComponentError::Internal(e) => {
-            JsonRpcResponse::error(id, -32603, e.to_string())
-        }
+        runtime::ComponentError::Internal(e) => JsonRpcResponse::error(id, -32603, e.to_string()),
     }
 }

@@ -7,8 +7,8 @@ use tokio::sync::{mpsc, oneshot};
 use wasmtime::component::{Component, Linker, ResourceTable, Source, StreamConsumer, StreamResult};
 use wasmtime::{Config, Engine, Store, StoreContextMut};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
-use wasmtime_wasi_http::p3::{DefaultWasiHttpCtx, WasiHttpCtxView};
 use wasmtime_wasi_http::WasiHttpCtx;
+use wasmtime_wasi_http::p3::{DefaultWasiHttpCtx, WasiHttpCtxView};
 
 // Generated bindings from WIT — fully auto-generated, no manual patching.
 #[path = "bindings/mod.rs"]
@@ -178,7 +178,9 @@ pub async fn instantiate_component(
         .get_export_index(Some(&iface_idx), "get-info")
         .ok_or_else(|| anyhow::anyhow!("no get-info export"))?;
     let pre = linker.instantiate_pre(component)?;
-    let raw_instance = pre.instantiate_async(&mut store).await
+    let raw_instance = pre
+        .instantiate_async(&mut store)
+        .await
         .map_err(|e| anyhow::anyhow!("failed to instantiate (raw): {e}"))?;
     let get_info_func = raw_instance
         .get_typed_func::<(), (act::core::types::ComponentInfo,)>(&mut store, &get_info_idx)
@@ -204,10 +206,7 @@ pub async fn instantiate_component(
 
 /// Spawn the component actor task. Owns the Store and ActWorld.
 /// Returns a handle for sending requests.
-pub fn spawn_component_actor(
-    instance: ActWorld,
-    mut store: Store<HostState>,
-) -> ComponentHandle {
+pub fn spawn_component_actor(instance: ActWorld, mut store: Store<HostState>) -> ComponentHandle {
     let (tx, mut rx) = mpsc::channel::<ComponentRequest>(32);
 
     tokio::spawn(async move {
@@ -223,12 +222,12 @@ pub fn spawn_component_actor(
                     let response = match result {
                         Ok(Ok(Ok(list_response))) => Ok(list_response),
                         Ok(Ok(Err(tool_error))) => Err(ComponentError::Tool(tool_error)),
-                        Ok(Err(e)) => Err(ComponentError::Internal(
-                            anyhow::anyhow!("list-tools failed: {e}"),
-                        )),
-                        Err(e) => Err(ComponentError::Internal(
-                            anyhow::anyhow!("run_concurrent failed: {e}"),
-                        )),
+                        Ok(Err(e)) => Err(ComponentError::Internal(anyhow::anyhow!(
+                            "list-tools failed: {e}"
+                        ))),
+                        Err(e) => Err(ComponentError::Internal(anyhow::anyhow!(
+                            "run_concurrent failed: {e}"
+                        ))),
                     };
                     let _ = reply.send(response);
                 }
@@ -239,17 +238,14 @@ pub fn spawn_component_actor(
                 } => {
                     let provider = instance.act_core_tool_provider().clone();
 
-                    let collected = std::sync::Arc::new(
-                        std::sync::Mutex::new(Vec::new()),
-                    );
+                    let collected = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
                     let collected2 = collected.clone();
                     let (done_tx, done_rx) = oneshot::channel::<()>();
 
                     // call_call_tool now returns StreamReader<StreamEvent> directly
                     let result = store
                         .run_concurrent(async |accessor| {
-                            let stream =
-                                provider.call_call_tool(accessor, config, call).await?;
+                            let stream = provider.call_call_tool(accessor, config, call).await?;
 
                             accessor.with(|access| {
                                 let consumer = CollectingConsumer {
@@ -259,12 +255,9 @@ pub fn spawn_component_actor(
                                 stream.pipe(access, consumer);
                             });
 
-                            if tokio::time::timeout(
-                                std::time::Duration::from_secs(30),
-                                done_rx,
-                            )
-                            .await
-                            .is_err()
+                            if tokio::time::timeout(std::time::Duration::from_secs(30), done_rx)
+                                .await
+                                .is_err()
                             {
                                 tracing::warn!("stream consumption timed out after 30s");
                             }
@@ -275,15 +268,19 @@ pub fn spawn_component_actor(
 
                     let response = match result {
                         Ok(Ok(())) => {
-                            let events = collected2.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect();
+                            let events = collected2
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .drain(..)
+                                .collect();
                             Ok(CallToolResult { events })
                         }
-                        Ok(Err(e)) => Err(ComponentError::Internal(
-                            anyhow::anyhow!("call-tool failed: {e}"),
-                        )),
-                        Err(e) => Err(ComponentError::Internal(
-                            anyhow::anyhow!("run_concurrent failed: {e}"),
-                        )),
+                        Ok(Err(e)) => Err(ComponentError::Internal(anyhow::anyhow!(
+                            "call-tool failed: {e}"
+                        ))),
+                        Err(e) => Err(ComponentError::Internal(anyhow::anyhow!(
+                            "run_concurrent failed: {e}"
+                        ))),
                     };
                     let _ = reply.send(response);
                 }
@@ -297,8 +294,7 @@ pub fn spawn_component_actor(
 
                     let result = store
                         .run_concurrent(async |accessor| {
-                            let stream =
-                                provider.call_call_tool(accessor, config, call).await?;
+                            let stream = provider.call_call_tool(accessor, config, call).await?;
 
                             accessor.with(|access| {
                                 let consumer = ForwardingConsumer {
@@ -316,12 +312,12 @@ pub fn spawn_component_actor(
 
                     let terminal = match result {
                         Ok(Ok(())) => SseEvent::Done,
-                        Ok(Err(e)) => SseEvent::Error(ComponentError::Internal(
-                            anyhow::anyhow!("call-tool failed: {e}"),
-                        )),
-                        Err(e) => SseEvent::Error(ComponentError::Internal(
-                            anyhow::anyhow!("run_concurrent failed: {e}"),
-                        )),
+                        Ok(Err(e)) => SseEvent::Error(ComponentError::Internal(anyhow::anyhow!(
+                            "call-tool failed: {e}"
+                        ))),
+                        Err(e) => SseEvent::Error(ComponentError::Internal(anyhow::anyhow!(
+                            "run_concurrent failed: {e}"
+                        ))),
                     };
                     let _ = event_tx.send(terminal).await;
                 }
@@ -352,7 +348,10 @@ impl StreamConsumer<HostState> for CollectingConsumer {
         source.read(store, &mut buffer)?;
 
         if !buffer.is_empty() {
-            self.collected.lock().unwrap_or_else(|e| e.into_inner()).extend(buffer);
+            self.collected
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(buffer);
         }
 
         if finish {

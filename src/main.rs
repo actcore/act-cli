@@ -116,12 +116,14 @@ fn parse_cli_config(
     config_file: Option<PathBuf>,
 ) -> Result<Option<serde_json::Value>> {
     match (config, config_file) {
-        (Some(json_str), _) => {
-            Ok(Some(serde_json::from_str(&json_str).context("invalid --config JSON")?))
-        }
+        (Some(json_str), _) => Ok(Some(
+            serde_json::from_str(&json_str).context("invalid --config JSON")?,
+        )),
         (_, Some(path)) => {
             let contents = std::fs::read_to_string(&path).context("reading config file")?;
-            Ok(Some(serde_json::from_str(&contents).context("invalid config file JSON")?))
+            Ok(Some(
+                serde_json::from_str(&contents).context("invalid config file JSON")?,
+            ))
         }
         (None, None) => Ok(None),
     }

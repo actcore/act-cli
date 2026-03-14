@@ -3,12 +3,15 @@ use act_types::constants::*;
 use act_types::http as act_http;
 use act_types::types::{Config, Metadata};
 use axum::{
+    Json, Router,
     extract::{Path, Request, State},
     http::{Method, StatusCode},
     middleware::{self, Next},
-    response::{sse::{Event, Sse}, IntoResponse},
+    response::{
+        IntoResponse,
+        sse::{Event, Sse},
+    },
     routing::get,
-    Json, Router,
 };
 use std::sync::Arc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -91,7 +94,10 @@ fn sse_event_to_axum(event: runtime::SseEvent) -> Option<Result<Event, std::conv
                     "data": data,
                     "mime_type": part.mime_type,
                 });
-                Some(Ok(Event::default().event("content").json_data(json).expect("json_data with serde_json::Value is infallible")))
+                Some(Ok(Event::default()
+                    .event("content")
+                    .json_data(json)
+                    .expect("json_data with serde_json::Value is infallible")))
             }
             runtime::act::core::types::StreamEvent::Error(err) => {
                 let ls = act_types::types::LocalizedString::from(&err.message);
@@ -101,22 +107,32 @@ fn sse_event_to_axum(event: runtime::SseEvent) -> Option<Result<Event, std::conv
                     "kind": err.kind,
                     "message": message,
                 });
-                Some(Ok(Event::default().event("error").json_data(json).expect("json_data with serde_json::Value is infallible")))
+                Some(Ok(Event::default()
+                    .event("error")
+                    .json_data(json)
+                    .expect("json_data with serde_json::Value is infallible")))
             }
         },
-        runtime::SseEvent::Done => {
-            Some(Ok(Event::default().event("done").json_data(serde_json::json!({})).expect("infallible")))
-        }
+        runtime::SseEvent::Done => Some(Ok(Event::default()
+            .event("done")
+            .json_data(serde_json::json!({}))
+            .expect("infallible"))),
         runtime::SseEvent::Error(e) => {
             let (kind, message) = match e {
-                runtime::ComponentError::Tool(ref te) => {
-                    (te.kind.clone(), act_types::types::LocalizedString::from(&te.message).any_text().to_string())
-                }
+                runtime::ComponentError::Tool(ref te) => (
+                    te.kind.clone(),
+                    act_types::types::LocalizedString::from(&te.message)
+                        .any_text()
+                        .to_string(),
+                ),
                 runtime::ComponentError::Internal(ref e) => {
                     (ERR_INTERNAL.to_string(), e.to_string())
                 }
             };
-            Some(Ok(Event::default().event("error").json_data(serde_json::json!({"kind": kind, "message": message})).expect("infallible")))
+            Some(Ok(Event::default()
+                .event("error")
+                .json_data(serde_json::json!({"kind": kind, "message": message}))
+                .expect("infallible")))
         }
     }
 }
@@ -175,12 +191,16 @@ async fn list_tools_inner(
                     }
                 })
                 .collect();
-            Json(act_http::ListToolsResponse { tools, metadata: None }).into_response()
+            Json(act_http::ListToolsResponse {
+                tools,
+                metadata: None,
+            })
+            .into_response()
         }
         Ok(Err(e)) => component_error_response(e),
-        Err(_) => component_error_response(runtime::ComponentError::Internal(
-            anyhow::anyhow!("component actor dropped reply"),
-        )),
+        Err(_) => component_error_response(runtime::ComponentError::Internal(anyhow::anyhow!(
+            "component actor dropped reply"
+        ))),
     }
 }
 
@@ -247,9 +267,9 @@ async fn call_tool_buffered(
             .into_response()
         }
         Ok(Err(e)) => component_error_response(e),
-        Err(_) => component_error_response(runtime::ComponentError::Internal(
-            anyhow::anyhow!("component actor dropped reply"),
-        )),
+        Err(_) => component_error_response(runtime::ComponentError::Internal(anyhow::anyhow!(
+            "component actor dropped reply"
+        ))),
     }
 }
 
@@ -273,9 +293,7 @@ async fn call_tool_sse(
     }
 
     let stream = ReceiverStream::new(event_rx);
-    let sse_stream = tokio_stream::StreamExt::filter_map(stream, |event| {
-        sse_event_to_axum(event)
-    });
+    let sse_stream = tokio_stream::StreamExt::filter_map(stream, |event| sse_event_to_axum(event));
 
     Sse::new(sse_stream).into_response()
 }
@@ -373,7 +391,9 @@ async fn protocol_version_layer(request: Request, next: Next) -> axum::response:
     let mut response = next.run(request).await;
     response.headers_mut().insert(
         act_http::HEADER_PROTOCOL_VERSION,
-        act_http::PROTOCOL_VERSION.parse().expect("valid header value"),
+        act_http::PROTOCOL_VERSION
+            .parse()
+            .expect("valid header value"),
     );
     response
 }
