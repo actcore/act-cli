@@ -54,6 +54,9 @@ jobs:
           - name: macos-aarch64
             os: macos-latest
             artifact: act
+          - name: macos-x86_64
+            os: macos-26-intel
+            artifact: act
           - name: windows-x86_64
             os: windows-latest
             artifact: act.exe
@@ -73,30 +76,38 @@ jobs:
           name: act-${{ matrix.name }}
           path: target/release/${{ matrix.artifact }}
 
-  build-cross:
+  build-zigbuild:
     needs: [check, fmt]
-    name: Build (linux-riscv64)
+    name: Build (${{ matrix.name }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - name: linux-x86_64-musl
+            target: x86_64-unknown-linux-musl
+          - name: linux-aarch64-musl
+            target: aarch64-unknown-linux-musl
+          - name: linux-riscv64-gnu
+            target: riscv64gc-unknown-linux-gnu
+          - name: linux-riscv64-musl
+            target: riscv64gc-unknown-linux-musl
     steps:
       - uses: actions/checkout@v6
         with:
           submodules: true
       - uses: dtolnay/rust-toolchain@nightly
         with:
-          targets: riscv64gc-unknown-linux-gnu
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
-          key: riscv64
-      - name: Install cross-compiler
-        run: sudo apt-get update && sudo apt-get install -y gcc-riscv64-linux-gnu
+          key: ${{ matrix.target }}
+      - uses: taiki-e/install-action@cargo-zigbuild
       - name: Build
-        env:
-          CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER: riscv64-linux-gnu-gcc
-        run: cargo build --release --target riscv64gc-unknown-linux-gnu
+        run: cargo zigbuild --release --target ${{ matrix.target }}
       - uses: actions/upload-artifact@v7
         with:
-          name: act-linux-riscv64
-          path: target/riscv64gc-unknown-linux-gnu/release/act
+          name: act-${{ matrix.name }}
+          path: target/${{ matrix.target }}/release/act
 
   fmt:
     name: Format
