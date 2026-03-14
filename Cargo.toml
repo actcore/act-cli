@@ -2,13 +2,19 @@
 name = "act-cli"
 version = "0.1.0"
 edition = "2024"
+description = "CLI host for ACT (Agent Component Tools) WebAssembly components"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/actcore/act-cli"
+homepage = "https://actcore.dev"
+keywords = ["act", "wasm", "component-model", "mcp", "agent"]
+categories = ["command-line-utilities", "wasm"]
 
 [[bin]]
 name = "act"
 path = "src/main.rs"
 
 [dependencies]
-act-types = { path = "../act-sdk-rs/act-types" }
+act-types = "0.1.0"
 anyhow = "1.0.102"
 axum = "0.8.8"
 base64 = "0.22.1"
