@@ -27,6 +27,7 @@ jobs:
 
   test:
     name: Test
+    needs: [check, fmt]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -38,6 +39,7 @@ jobs:
         run: cargo test
 
   build:
+    needs: [check, fmt]
     name: Build (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -66,12 +68,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --release
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: act-${{ matrix.name }}
           path: target/release/${{ matrix.artifact }}
 
   build-cross:
+    needs: [check, fmt]
     name: Build (linux-riscv64)
     runs-on: ubuntu-latest
     steps:
@@ -82,13 +85,15 @@ jobs:
         with:
           targets: riscv64gc-unknown-linux-gnu
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: riscv64
       - name: Install cross-compiler
         run: sudo apt-get update && sudo apt-get install -y gcc-riscv64-linux-gnu
       - name: Build
         env:
           CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER: riscv64-linux-gnu-gcc
         run: cargo build --release --target riscv64gc-unknown-linux-gnu
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: act-linux-riscv64
           path: target/riscv64gc-unknown-linux-gnu/release/act
