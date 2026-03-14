@@ -38,11 +38,26 @@ jobs:
         run: cargo test
 
   build:
-    name: Build (${{ matrix.os }})
+    name: Build (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            artifact: act
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+            artifact: act
+          - name: macos-aarch64
+            os: macos-latest
+            artifact: act
+          - name: windows-x86_64
+            os: windows-latest
+            artifact: act.exe
+          - name: windows-aarch64
+            os: windows-11-arm
+            artifact: act.exe
     steps:
       - uses: actions/checkout@v6
         with:
@@ -51,6 +66,32 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: act-${{ matrix.name }}
+          path: target/release/${{ matrix.artifact }}
+
+  build-cross:
+    name: Build (linux-riscv64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: riscv64gc-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cross-compiler
+        run: sudo apt-get update && sudo apt-get install -y gcc-riscv64-linux-gnu
+      - name: Build
+        env:
+          CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER: riscv64-linux-gnu-gcc
+        run: cargo build --release --target riscv64gc-unknown-linux-gnu
+      - uses: actions/upload-artifact@v4
+        with:
+          name: act-linux-riscv64
+          path: target/riscv64gc-unknown-linux-gnu/release/act
 
   fmt:
     name: Format
