@@ -1,0 +1,87 @@
+name: Build
+
+on:
+  workflow_call:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  native:
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            artifact: act
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+            artifact: act
+          - name: macos-aarch64
+            os: macos-latest
+            artifact: act
+          - name: macos-x86_64
+            os: macos-26-intel
+            artifact: act
+          - name: windows-x86_64
+            os: windows-latest
+            artifact: act.exe
+          - name: windows-aarch64
+            os: windows-11-arm
+            artifact: act.exe
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release
+      - name: Package
+        shell: bash
+        run: |
+          cd target/release
+          tar czf ../../act-${{ matrix.name }}.tar.gz ${{ matrix.artifact }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: act-${{ matrix.name }}
+          path: act-${{ matrix.name }}.tar.gz
+
+  zigbuild:
+    name: Build (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - name: linux-x86_64-musl
+            target: x86_64-unknown-linux-musl
+          - name: linux-aarch64-musl
+            target: aarch64-unknown-linux-musl
+          - name: linux-riscv64-gnu
+            target: riscv64gc-unknown-linux-gnu
+          - name: linux-riscv64-musl
+            target: riscv64gc-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - uses: mlugg/setup-zig@v2
+      - uses: taiki-e/install-action@cargo-zigbuild
+      - name: Build
+        run: cargo zigbuild --release --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../act-${{ matrix.name }}.tar.gz act
+      - uses: actions/upload-artifact@v7
+        with:
+          name: act-${{ matrix.name }}
+          path: act-${{ matrix.name }}.tar.gz

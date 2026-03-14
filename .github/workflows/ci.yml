@@ -25,6 +25,16 @@ jobs:
       - name: Clippy
         run: cargo clippy -- -D warnings
 
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - run: cargo fmt -- --check
+
   test:
     name: Test
     needs: [check, fmt]
@@ -40,82 +50,4 @@ jobs:
 
   build:
     needs: [check, fmt]
-    name: Build (${{ matrix.name }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - name: linux-x86_64
-            os: ubuntu-latest
-            artifact: act
-          - name: linux-aarch64
-            os: ubuntu-24.04-arm
-            artifact: act
-          - name: macos-aarch64
-            os: macos-latest
-            artifact: act
-          - name: macos-x86_64
-            os: macos-26-intel
-            artifact: act
-          - name: windows-x86_64
-            os: windows-latest
-            artifact: act.exe
-          - name: windows-aarch64
-            os: windows-11-arm
-            artifact: act.exe
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          submodules: true
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: Swatinem/rust-cache@v2
-      - name: Build
-        run: cargo build --release
-      - uses: actions/upload-artifact@v7
-        with:
-          name: act-${{ matrix.name }}
-          path: target/release/${{ matrix.artifact }}
-
-  build-zigbuild:
-    needs: [check, fmt]
-    name: Build (${{ matrix.name }})
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - name: linux-x86_64-musl
-            target: x86_64-unknown-linux-musl
-          - name: linux-aarch64-musl
-            target: aarch64-unknown-linux-musl
-          - name: linux-riscv64-gnu
-            target: riscv64gc-unknown-linux-gnu
-          - name: linux-riscv64-musl
-            target: riscv64gc-unknown-linux-musl
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          submodules: true
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
-      - uses: mlugg/setup-zig@v2
-      - uses: taiki-e/install-action@cargo-zigbuild
-      - name: Build
-        run: cargo zigbuild --release --target ${{ matrix.target }}
-      - uses: actions/upload-artifact@v7
-        with:
-          name: act-${{ matrix.name }}
-          path: target/${{ matrix.target }}/release/act
-
-  fmt:
-    name: Format
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rustfmt
-      - run: cargo fmt -- --check
+    uses: ./.github/workflows/build.yml
