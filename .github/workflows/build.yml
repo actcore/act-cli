@@ -19,12 +19,6 @@ jobs:
           - name: linux-aarch64
             os: ubuntu-24.04-arm
             artifact: act
-          - name: macos-aarch64
-            os: macos-latest
-            artifact: act
-          - name: macos-x86_64
-            os: macos-26-intel
-            artifact: act
           - name: windows-x86_64
             os: windows-latest
             artifact: act.exe
@@ -48,6 +42,32 @@ jobs:
         with:
           name: act-${{ matrix.name }}
           path: act-${{ matrix.name }}.tar.gz
+
+  macos-universal:
+    name: Build (macos-universal)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-universal
+      - uses: mlugg/setup-zig@v2
+      - uses: taiki-e/install-action@cargo-zigbuild
+      - name: Build
+        run: cargo zigbuild --release --target universal2-apple-darwin
+      - name: Package
+        run: |
+          cd target/universal2-apple-darwin/release
+          tar czf ../../../act-macos-universal.tar.gz act
+      - uses: actions/upload-artifact@v7
+        with:
+          name: act-macos-universal
+          path: act-macos-universal.tar.gz
 
   zigbuild:
     name: Build (${{ matrix.name }})
