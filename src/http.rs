@@ -293,7 +293,7 @@ async fn call_tool_sse(
     }
 
     let stream = ReceiverStream::new(event_rx);
-    let sse_stream = tokio_stream::StreamExt::filter_map(stream, |event| sse_event_to_axum(event));
+    let sse_stream = tokio_stream::StreamExt::filter_map(stream, sse_event_to_axum);
 
     Sse::new(sse_stream).into_response()
 }

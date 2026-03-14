@@ -91,7 +91,7 @@ pub fn create_store(engine: &Engine) -> Store<HostState> {
         wasi,
         table: ResourceTable::new(),
         http_p2: WasiHttpCtx::new(),
-        http_p3: DefaultWasiHttpCtx::default(),
+        http_p3: DefaultWasiHttpCtx,
     };
     Store::new(engine, state)
 }
