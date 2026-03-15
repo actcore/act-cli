@@ -37,11 +37,11 @@ jobs:
         shell: bash
         run: |
           cd target/release
-          tar czf ../../act-${{ matrix.name }}.tar.gz ${{ matrix.artifact }}
+          tar --zstd -cf ../../act-${{ matrix.name }}.tar.zst ${{ matrix.artifact }}
       - uses: actions/upload-artifact@v7
         with:
           name: act-${{ matrix.name }}
-          path: act-${{ matrix.name }}.tar.gz
+          path: act-${{ matrix.name }}.tar.zst
 
   macos-universal:
     name: Build (macos-universal)
@@ -66,11 +66,11 @@ jobs:
             target/aarch64-apple-darwin/release/act \
             target/x86_64-apple-darwin/release/act \
             -output act
-          tar czf act-macos-universal.tar.gz act
+          tar --zstd -cf act-macos-universal.tar.zst act
       - uses: actions/upload-artifact@v7
         with:
           name: act-macos-universal
-          path: act-macos-universal.tar.gz
+          path: act-macos-universal.tar.zst
 
   zigbuild:
     name: Build (${{ matrix.name }})
@@ -103,8 +103,8 @@ jobs:
       - name: Package
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../act-${{ matrix.name }}.tar.gz act
+          tar --zstd -cf ../../../act-${{ matrix.name }}.tar.zst act
       - uses: actions/upload-artifact@v7
         with:
           name: act-${{ matrix.name }}
-          path: act-${{ matrix.name }}.tar.gz
+          path: act-${{ matrix.name }}.tar.zst

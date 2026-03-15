@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   build:
@@ -22,9 +24,12 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+      - uses: actions/attest@v4
+        with:
+          subject-path: artifacts/*.tar.zst
       - name: Create GitHub Release
         run: |
-          gh release create ${{ github.ref_name }} artifacts/*.tar.gz \
+          gh release create ${{ github.ref_name }} artifacts/*.tar.zst \
             --title "${{ github.ref_name }}" \
             --generate-notes
         env:
