@@ -14,7 +14,7 @@ name = "act"
 path = "src/main.rs"
 
 [dependencies]
-act-types = { path = "../act-sdk-rs/act-types", version = "0.2.2" }
+act-types = "0.2.2"
 ciborium = "0.2"
 anyhow = "1.0.102"
 axum = "0.8.8"
