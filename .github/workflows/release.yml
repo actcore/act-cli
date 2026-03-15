@@ -26,10 +26,10 @@ jobs:
           merge-multiple: true
       - uses: actions/attest@v4
         with:
-          subject-path: artifacts/*.tar.zst
+          subject-path: artifacts/act-*
       - name: Create GitHub Release
         run: |
-          gh release create ${{ github.ref_name }} artifacts/*.tar.zst \
+          gh release create ${{ github.ref_name }} artifacts/act-* \
             --title "${{ github.ref_name }}" \
             --generate-notes
         env:

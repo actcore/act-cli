@@ -19,11 +19,11 @@ runs:
       shell: bash
       run: |
         case "${{ runner.os }}-${{ runner.arch }}" in
-          Linux-X64)   echo "asset=act-linux-x86_64.tar.zst" >> "$GITHUB_OUTPUT" ;;
-          Linux-ARM64) echo "asset=act-linux-aarch64.tar.zst" >> "$GITHUB_OUTPUT" ;;
-          macOS-*)     echo "asset=act-macos-universal.tar.zst" >> "$GITHUB_OUTPUT" ;;
-          Windows-X64)   echo "asset=act-windows-x86_64.tar.zst" >> "$GITHUB_OUTPUT" ;;
-          Windows-ARM64) echo "asset=act-windows-aarch64.tar.zst" >> "$GITHUB_OUTPUT" ;;
+          Linux-X64)   echo "asset=act-linux-x86_64" >> "$GITHUB_OUTPUT" ;;
+          Linux-ARM64) echo "asset=act-linux-aarch64" >> "$GITHUB_OUTPUT" ;;
+          macOS-*)     echo "asset=act-macos-universal" >> "$GITHUB_OUTPUT" ;;
+          Windows-X64)   echo "asset=act-windows-x86_64.exe" >> "$GITHUB_OUTPUT" ;;
+          Windows-ARM64) echo "asset=act-windows-aarch64.exe" >> "$GITHUB_OUTPUT" ;;
           *) echo "::error::Unsupported platform: ${{ runner.os }}-${{ runner.arch }}" && exit 1 ;;
         esac
 
@@ -37,12 +37,13 @@ runs:
 
         VERSION="${{ inputs.version }}"
         if [ "$VERSION" = "latest" ]; then
-          gh release download --repo actcore/act-cli --pattern "${{ steps.detect.outputs.asset }}" --dir /tmp
+          gh release download --repo actcore/act-cli --pattern "${{ steps.detect.outputs.asset }}" --dir "$INSTALL_DIR"
         else
-          gh release download "$VERSION" --repo actcore/act-cli --pattern "${{ steps.detect.outputs.asset }}" --dir /tmp
+          gh release download "$VERSION" --repo actcore/act-cli --pattern "${{ steps.detect.outputs.asset }}" --dir "$INSTALL_DIR"
         fi
 
-        tar --zstd -xf "/tmp/${{ steps.detect.outputs.asset }}" -C "$INSTALL_DIR"
+        chmod +x "$INSTALL_DIR/${{ steps.detect.outputs.asset }}"
+        mv "$INSTALL_DIR/${{ steps.detect.outputs.asset }}" "$INSTALL_DIR/act"
         echo "$INSTALL_DIR" >> "$GITHUB_PATH"
 
     - name: Verify
