@@ -34,26 +34,26 @@ enum Cli {
         #[arg(long, default_value = "{}")]
         args: String,
 
-        /// JSON config to pass to the component
+        /// JSON metadata to pass to the component
         #[arg(short, long)]
-        config: Option<String>,
+        metadata: Option<String>,
 
-        /// Path to a JSON config file
+        /// Path to a JSON metadata file
         #[arg(long)]
-        config_file: Option<PathBuf>,
+        metadata_file: Option<PathBuf>,
     },
     /// Load a .wasm component and serve it as an MCP server over stdio
     Mcp {
         /// Path to the .wasm component file
         component: PathBuf,
 
-        /// JSON config to pass to the component
+        /// JSON metadata to pass to the component
         #[arg(short, long)]
-        config: Option<String>,
+        metadata: Option<String>,
 
-        /// Path to a JSON config file
+        /// Path to a JSON metadata file
         #[arg(long)]
-        config_file: Option<PathBuf>,
+        metadata_file: Option<PathBuf>,
     },
     /// Show component info (name, version, description, capabilities)
     Info {
@@ -65,13 +65,13 @@ enum Cli {
         /// Path to the .wasm component file
         component: PathBuf,
 
-        /// JSON config to pass to the component
+        /// JSON metadata to pass to the component
         #[arg(short, long)]
-        config: Option<String>,
+        metadata: Option<String>,
 
-        /// Path to a JSON config file
+        /// Path to a JSON metadata file
         #[arg(long)]
-        config_file: Option<PathBuf>,
+        metadata_file: Option<PathBuf>,
     },
 }
 
@@ -93,36 +93,36 @@ async fn main() -> Result<()> {
             component,
             tool,
             args,
-            config,
-            config_file,
-        } => cli_call_tool(component, tool, args, config, config_file).await,
+            metadata,
+            metadata_file,
+        } => cli_call_tool(component, tool, args, metadata, metadata_file).await,
         Cli::Mcp {
             component,
-            config,
-            config_file,
-        } => mcp_serve(component, config, config_file).await,
+            metadata,
+            metadata_file,
+        } => mcp_serve(component, metadata, metadata_file).await,
         Cli::Info { component } => cli_info(component).await,
         Cli::Tools {
             component,
-            config,
-            config_file,
-        } => cli_tools(component, config, config_file).await,
+            metadata,
+            metadata_file,
+        } => cli_tools(component, metadata, metadata_file).await,
     }
 }
 
-/// Parse JSON config from --config or --config-file CLI arguments.
-fn parse_cli_config(
-    config: Option<String>,
-    config_file: Option<PathBuf>,
+/// Parse JSON metadata from --metadata or --metadata-file CLI arguments.
+fn parse_cli_metadata(
+    metadata: Option<String>,
+    metadata_file: Option<PathBuf>,
 ) -> Result<Option<serde_json::Value>> {
-    match (config, config_file) {
+    match (metadata, metadata_file) {
         (Some(json_str), _) => Ok(Some(
-            serde_json::from_str(&json_str).context("invalid --config JSON")?,
+            serde_json::from_str(&json_str).context("invalid --metadata JSON")?,
         )),
         (_, Some(path)) => {
-            let contents = std::fs::read_to_string(&path).context("reading config file")?;
+            let contents = std::fs::read_to_string(&path).context("reading metadata file")?;
             Ok(Some(
-                serde_json::from_str(&contents).context("invalid config file JSON")?,
+                serde_json::from_str(&contents).context("invalid metadata file JSON")?,
             ))
         }
         (None, None) => Ok(None),
@@ -133,14 +133,14 @@ async fn cli_call_tool(
     component_path: PathBuf,
     tool: String,
     args: String,
-    config: Option<String>,
-    config_file: Option<PathBuf>,
+    metadata: Option<String>,
+    metadata_file: Option<PathBuf>,
 ) -> Result<()> {
-    let config_json = parse_cli_config(config, config_file)?;
-    let cbor_config = config_json
-        .map(|v| cbor::json_to_cbor(&v))
-        .transpose()
-        .context("encoding config as CBOR")?;
+    let metadata_json = parse_cli_metadata(metadata, metadata_file)?;
+    let metadata_kv: runtime::Metadata = metadata_json
+        .as_ref()
+        .map(|v| runtime::Metadata::from(v.clone()))
+        .unwrap_or_default();
 
     let arguments: serde_json::Value =
         serde_json::from_str(&args).context("invalid --args JSON")?;
@@ -149,20 +149,18 @@ async fn cli_call_tool(
     let engine = runtime::create_engine()?;
     let component = runtime::load_component(&engine, &component_path)?;
     let linker = runtime::create_linker(&engine)?;
-    let (instance, _component_info, _config_schema, store) =
-        runtime::instantiate_component(&engine, &component, &linker).await?;
+    let (instance, store) = runtime::instantiate_component(&engine, &component, &linker).await?;
 
     let component_handle = runtime::spawn_component_actor(instance, store);
 
     let tool_call = runtime::act::core::types::ToolCall {
         name: tool,
         arguments: cbor_args,
-        metadata: Vec::new(),
+        metadata: metadata_kv.clone().into(),
     };
 
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     let request = runtime::ComponentRequest::CallTool {
-        config: cbor_config,
         call: tool_call,
         reply: reply_tx,
     };
@@ -201,20 +199,22 @@ async fn cli_call_tool(
 
 async fn mcp_serve(
     component_path: PathBuf,
-    config: Option<String>,
-    config_file: Option<PathBuf>,
+    metadata: Option<String>,
+    metadata_file: Option<PathBuf>,
 ) -> Result<()> {
-    let config_json = parse_cli_config(config, config_file)?;
-    let cbor_config = config_json
-        .map(|v| cbor::json_to_cbor(&v))
-        .transpose()
-        .context("encoding config as CBOR")?;
+    let metadata_json = parse_cli_metadata(metadata, metadata_file)?;
+    let metadata_kv: runtime::Metadata = metadata_json
+        .as_ref()
+        .map(|v| runtime::Metadata::from(v.clone()))
+        .unwrap_or_default();
+
+    let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
+    let component_info = runtime::read_component_info(&wasm_bytes)?;
 
     let engine = runtime::create_engine()?;
     let component = runtime::load_component(&engine, &component_path)?;
     let linker = runtime::create_linker(&engine)?;
-    let (instance, component_info, _config_schema, store) =
-        runtime::instantiate_component(&engine, &component, &linker).await?;
+    let (instance, store) = runtime::instantiate_component(&engine, &component, &linker).await?;
 
     tracing::info!(
         name = %component_info.name,
@@ -224,51 +224,39 @@ async fn mcp_serve(
 
     let component_handle = runtime::spawn_component_actor(instance, store);
 
-    mcp::run_stdio(component_info, component_handle, cbor_config).await
+    mcp::run_stdio(component_info, component_handle, metadata_kv).await
 }
 
 async fn cli_info(component_path: PathBuf) -> Result<()> {
-    let engine = runtime::create_engine()?;
-    let component = runtime::load_component(&engine, &component_path)?;
-    let linker = runtime::create_linker(&engine)?;
-    let (_instance, info, _config_schema, _store) =
-        runtime::instantiate_component(&engine, &component, &linker).await?;
+    let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
+    let info = runtime::read_component_info(&wasm_bytes)?;
 
-    let ls = act_types::types::LocalizedString::from(&info.description);
     println!("{} v{}", info.name, info.version);
-    println!("{}", ls.any_text());
-    if !info.capabilities.is_empty() {
-        println!("\nCapabilities:");
-        for cap in &info.capabilities {
-            let req = if cap.required { " (required)" } else { "" };
-            println!("  {}{}", cap.id, req);
-        }
-    }
+    println!("{}", info.description);
     Ok(())
 }
 
 async fn cli_tools(
     component_path: PathBuf,
-    config: Option<String>,
-    config_file: Option<PathBuf>,
+    metadata: Option<String>,
+    metadata_file: Option<PathBuf>,
 ) -> Result<()> {
-    let config_json = parse_cli_config(config, config_file)?;
-    let cbor_config = config_json
-        .map(|v| cbor::json_to_cbor(&v))
-        .transpose()
-        .context("encoding config as CBOR")?;
+    let metadata_json = parse_cli_metadata(metadata, metadata_file)?;
+    let metadata_kv: runtime::Metadata = metadata_json
+        .as_ref()
+        .map(|v| runtime::Metadata::from(v.clone()))
+        .unwrap_or_default();
 
     let engine = runtime::create_engine()?;
     let component = runtime::load_component(&engine, &component_path)?;
     let linker = runtime::create_linker(&engine)?;
-    let (instance, _info, _config_schema, store) =
-        runtime::instantiate_component(&engine, &component, &linker).await?;
+    let (instance, store) = runtime::instantiate_component(&engine, &component, &linker).await?;
 
     let component_handle = runtime::spawn_component_actor(instance, store);
 
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     let request = runtime::ComponentRequest::ListTools {
-        config: cbor_config,
+        metadata: metadata_kv.clone(),
         reply: reply_tx,
     };
 
@@ -300,30 +288,30 @@ mod tests {
     use tempfile::NamedTempFile;
 
     #[test]
-    fn parse_cli_config_from_string() {
-        let result = parse_cli_config(Some(r#"{"key":"value"}"#.to_string()), None).unwrap();
+    fn parse_cli_metadata_from_string() {
+        let result = parse_cli_metadata(Some(r#"{"key":"value"}"#.to_string()), None).unwrap();
         assert_eq!(result, Some(serde_json::json!({"key": "value"})));
     }
 
     #[test]
-    fn parse_cli_config_from_file() {
+    fn parse_cli_metadata_from_file() {
         let mut file = NamedTempFile::new().unwrap();
         write!(file, r#"{{"port": 8080}}"#).unwrap();
-        let result = parse_cli_config(None, Some(file.path().to_path_buf())).unwrap();
+        let result = parse_cli_metadata(None, Some(file.path().to_path_buf())).unwrap();
         assert_eq!(result, Some(serde_json::json!({"port": 8080})));
     }
 
     #[test]
-    fn parse_cli_config_none() {
-        let result = parse_cli_config(None, None).unwrap();
+    fn parse_cli_metadata_none() {
+        let result = parse_cli_metadata(None, None).unwrap();
         assert_eq!(result, None);
     }
 
     #[test]
-    fn parse_cli_config_string_takes_precedence() {
+    fn parse_cli_metadata_string_takes_precedence() {
         let mut file = NamedTempFile::new().unwrap();
         write!(file, r#"{{"from":"file"}}"#).unwrap();
-        let result = parse_cli_config(
+        let result = parse_cli_metadata(
             Some(r#"{"from":"arg"}"#.to_string()),
             Some(file.path().to_path_buf()),
         )
@@ -332,29 +320,35 @@ mod tests {
     }
 
     #[test]
-    fn parse_cli_config_invalid_json() {
-        assert!(parse_cli_config(Some("not json".to_string()), None).is_err());
+    fn parse_cli_metadata_invalid_json() {
+        assert!(parse_cli_metadata(Some("not json".to_string()), None).is_err());
+    }
+
+    #[test]
+    fn metadata_from_json_object() {
+        let json = serde_json::json!({"key": "value"});
+        let meta = runtime::Metadata::from(json.clone());
+        assert_eq!(meta.len(), 1);
+        assert_eq!(meta.get("key"), Some(&serde_json::json!("value")));
+    }
+
+    #[test]
+    fn metadata_from_json_non_object_is_empty() {
+        let json = serde_json::json!("not an object");
+        let meta = runtime::Metadata::from(json.clone());
+        assert!(meta.is_empty());
     }
 }
 
 async fn serve(component_path: PathBuf, addr: SocketAddr) -> Result<()> {
+    let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
+    let component_info = runtime::read_component_info(&wasm_bytes)?;
+
     let engine = runtime::create_engine()?;
     let component = runtime::load_component(&engine, &component_path)?;
     let linker = runtime::create_linker(&engine)?;
 
-    let (instance, component_info, config_schema, store) =
-        runtime::instantiate_component(&engine, &component, &linker).await?;
-
-    let ls = act_types::types::LocalizedString::from(&component_info.description);
-
-    let info = act_types::http::ServerInfo {
-        name: component_info.name.clone(),
-        version: component_info.version.clone(),
-        description: ls.any_text().to_string(),
-        default_language: component_info.default_language.clone(),
-        capabilities: None,
-        metadata: None,
-    };
+    let (instance, store) = runtime::instantiate_component(&engine, &component, &linker).await?;
 
     tracing::info!(
         name = %component_info.name,
@@ -365,8 +359,7 @@ async fn serve(component_path: PathBuf, addr: SocketAddr) -> Result<()> {
     let component_handle = runtime::spawn_component_actor(instance, store);
 
     let state = Arc::new(http::AppState {
-        info,
-        config_schema,
+        info: component_info,
         component: component_handle,
     });
 

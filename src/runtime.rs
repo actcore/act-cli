@@ -96,6 +96,40 @@ pub fn create_store(engine: &Engine) -> Store<HostState> {
     Store::new(engine, state)
 }
 
+// ── Component info from custom section ──
+
+pub use act_types::ComponentInfo;
+
+/// Read component info from the `act:component` custom section (CBOR-encoded)
+/// and standard WASM metadata sections (`version`, `description`).
+pub fn read_component_info(component_bytes: &[u8]) -> Result<ComponentInfo> {
+    let mut info = ComponentInfo::default();
+
+    for payload in wasmparser::Parser::new(0).parse_all(component_bytes) {
+        if let Ok(wasmparser::Payload::CustomSection(section)) = payload {
+            match section.name() {
+                act_types::constants::SECTION_ACT_COMPONENT => {
+                    info = ciborium::from_reader(section.data())
+                        .map_err(|e| anyhow::anyhow!("failed to decode act:component CBOR: {e}"))?;
+                }
+                "version" if info.version.is_empty() => {
+                    info.version = String::from_utf8_lossy(section.data()).into_owned();
+                }
+                "description" if info.description.is_empty() => {
+                    info.description = String::from_utf8_lossy(section.data()).into_owned();
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if info.name.is_empty() {
+        info.name = "unknown".to_string();
+    }
+
+    Ok(info)
+}
+
 // ── Conversion helpers ──
 
 impl From<&act::core::types::LocalizedString> for act_types::types::LocalizedString {
@@ -117,19 +151,23 @@ pub enum ComponentError {
     Internal(anyhow::Error),
 }
 
+pub use act_types::Metadata;
+
 /// Requests that can be sent to the component actor.
 pub enum ComponentRequest {
+    GetMetadataSchema {
+        metadata: Metadata,
+        reply: oneshot::Sender<Result<Option<String>, ComponentError>>,
+    },
     ListTools {
-        config: Option<Vec<u8>>,
+        metadata: Metadata,
         reply: oneshot::Sender<Result<act::core::types::ListToolsResponse, ComponentError>>,
     },
     CallTool {
-        config: Option<Vec<u8>>,
         call: act::core::types::ToolCall,
         reply: oneshot::Sender<Result<CallToolResult, ComponentError>>,
     },
     CallToolStreaming {
-        config: Option<Vec<u8>>,
         call: act::core::types::ToolCall,
         event_tx: mpsc::Sender<SseEvent>,
     },
@@ -150,58 +188,19 @@ pub enum SseEvent {
 /// Handle to send requests to the component actor.
 pub type ComponentHandle = mpsc::Sender<ComponentRequest>;
 
-/// Instantiate the component and call sync methods (get_info, get_config_schema).
-/// Returns the ActWorld, cached info, cached config schema, and the store.
+/// Instantiate the component. Returns the ActWorld and the store.
+/// Component info is read from custom sections (no instantiation needed for that).
 pub async fn instantiate_component(
     engine: &Engine,
     component: &Component,
     linker: &Linker<HostState>,
-) -> Result<(
-    ActWorld,
-    act::core::types::ComponentInfo,
-    Option<String>,
-    Store<HostState>,
-)> {
+) -> Result<(ActWorld, Store<HostState>)> {
     let mut store = create_store(engine);
     let instance = ActWorld::instantiate_async(&mut store, component, linker)
         .await
         .map_err(|e| anyhow::anyhow!("failed to instantiate component: {e}"))?;
 
-    // get_info and get_config_schema are sync WIT functions, but the store has
-    // component_model_async enabled so TypedFunc::call() panics. We bypass the
-    // generated Guest methods and call TypedFunc::call_async() directly.
-    let iface_idx = component
-        .get_export_index(None, "act:core/tool-provider@0.1.6")
-        .ok_or_else(|| anyhow::anyhow!("no exported instance act:core/tool-provider@0.1.6"))?;
-
-    let get_info_idx = component
-        .get_export_index(Some(&iface_idx), "get-info")
-        .ok_or_else(|| anyhow::anyhow!("no get-info export"))?;
-    let pre = linker.instantiate_pre(component)?;
-    let raw_instance = pre
-        .instantiate_async(&mut store)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to instantiate (raw): {e}"))?;
-    let get_info_func = raw_instance
-        .get_typed_func::<(), (act::core::types::ComponentInfo,)>(&mut store, &get_info_idx)
-        .map_err(|e| anyhow::anyhow!("get-info type check failed: {e}"))?;
-    let (info,) = get_info_func
-        .call_async(&mut store, ())
-        .await
-        .map_err(|e| anyhow::anyhow!("get-info failed: {e}"))?;
-
-    let get_config_idx = component
-        .get_export_index(Some(&iface_idx), "get-config-schema")
-        .ok_or_else(|| anyhow::anyhow!("no get-config-schema export"))?;
-    let get_config_func = raw_instance
-        .get_typed_func::<(), (Option<String>,)>(&mut store, &get_config_idx)
-        .map_err(|e| anyhow::anyhow!("get-config-schema type check failed: {e}"))?;
-    let (config_schema,) = get_config_func
-        .call_async(&mut store, ())
-        .await
-        .map_err(|e| anyhow::anyhow!("get-config-schema failed: {e}"))?;
-
-    Ok((instance, info, config_schema, store))
+    Ok((instance, store))
 }
 
 /// Spawn the component actor task. Owns the Store and ActWorld.
@@ -212,11 +211,33 @@ pub fn spawn_component_actor(instance: ActWorld, mut store: Store<HostState>) ->
     tokio::spawn(async move {
         while let Some(request) = rx.recv().await {
             match request {
-                ComponentRequest::ListTools { config, reply } => {
+                ComponentRequest::GetMetadataSchema { metadata, reply } => {
                     let provider = instance.act_core_tool_provider().clone();
                     let result = store
                         .run_concurrent(async |accessor| {
-                            provider.call_list_tools(accessor, config).await
+                            provider
+                                .call_get_metadata_schema(accessor, metadata.clone().into())
+                                .await
+                        })
+                        .await;
+                    let response = match result {
+                        Ok(Ok(schema)) => Ok(schema),
+                        Ok(Err(e)) => Err(ComponentError::Internal(anyhow::anyhow!(
+                            "get-metadata-schema failed: {e}"
+                        ))),
+                        Err(e) => Err(ComponentError::Internal(anyhow::anyhow!(
+                            "run_concurrent failed: {e}"
+                        ))),
+                    };
+                    let _ = reply.send(response);
+                }
+                ComponentRequest::ListTools { metadata, reply } => {
+                    let provider = instance.act_core_tool_provider().clone();
+                    let result = store
+                        .run_concurrent(async |accessor| {
+                            provider
+                                .call_list_tools(accessor, metadata.clone().into())
+                                .await
                         })
                         .await;
                     let response = match result {
@@ -231,21 +252,16 @@ pub fn spawn_component_actor(instance: ActWorld, mut store: Store<HostState>) ->
                     };
                     let _ = reply.send(response);
                 }
-                ComponentRequest::CallTool {
-                    config,
-                    call,
-                    reply,
-                } => {
+                ComponentRequest::CallTool { call, reply } => {
                     let provider = instance.act_core_tool_provider().clone();
 
                     let collected = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
                     let collected2 = collected.clone();
                     let (done_tx, done_rx) = oneshot::channel::<()>();
 
-                    // call_call_tool now returns StreamReader<StreamEvent> directly
                     let result = store
                         .run_concurrent(async |accessor| {
-                            let stream = provider.call_call_tool(accessor, config, call).await?;
+                            let stream = provider.call_call_tool(accessor, call).await?;
 
                             accessor.with(|access| {
                                 let consumer = CollectingConsumer {
@@ -284,17 +300,13 @@ pub fn spawn_component_actor(instance: ActWorld, mut store: Store<HostState>) ->
                     };
                     let _ = reply.send(response);
                 }
-                ComponentRequest::CallToolStreaming {
-                    config,
-                    call,
-                    event_tx,
-                } => {
+                ComponentRequest::CallToolStreaming { call, event_tx } => {
                     let provider = instance.act_core_tool_provider().clone();
                     let (done_tx, done_rx) = oneshot::channel::<()>();
 
                     let result = store
                         .run_concurrent(async |accessor| {
-                            let stream = provider.call_call_tool(accessor, config, call).await?;
+                            let stream = provider.call_call_tool(accessor, call).await?;
 
                             accessor.with(|access| {
                                 let consumer = ForwardingConsumer {

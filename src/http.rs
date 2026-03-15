@@ -1,7 +1,7 @@
 use act_types::cbor;
 use act_types::constants::*;
 use act_types::http as act_http;
-use act_types::types::{Config, Metadata};
+use act_types::types::Metadata;
 use axum::{
     Json, Router,
     extract::{Path, Request, State},
@@ -21,8 +21,7 @@ use crate::runtime;
 // ── App state ──
 
 pub struct AppState {
-    pub info: act_http::ServerInfo,
-    pub config_schema: Option<String>,
+    pub info: act_types::ComponentInfo,
     pub component: runtime::ComponentHandle,
 }
 
@@ -139,34 +138,66 @@ fn sse_event_to_axum(event: runtime::SseEvent) -> Option<Result<Event, std::conv
 
 // ── Handlers ──
 
-async fn get_info(State(state): State<Arc<AppState>>) -> Json<act_http::ServerInfo> {
+async fn get_info(State(state): State<Arc<AppState>>) -> Json<act_types::ComponentInfo> {
     Json(state.info.clone())
 }
 
-async fn get_config_schema(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match &state.config_schema {
-        Some(schema) => (
-            StatusCode::OK,
-            [("content-type", MIME_JSON)],
-            schema.clone(),
-        )
-            .into_response(),
-        None => StatusCode::NO_CONTENT.into_response(),
+async fn post_metadata_schema(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+) -> axum::response::Response {
+    let body_bytes = match axum::body::to_bytes(request.into_body(), 1024 * 1024).await {
+        Ok(b) => b,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+
+    let metadata = if body_bytes.is_empty() {
+        runtime::Metadata::new()
+    } else {
+        let body: act_http::MetadataSchemaRequest = match serde_json::from_slice(&body_bytes) {
+            Ok(b) => b,
+            Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+        };
+        match body.metadata {
+            Some(value) => runtime::Metadata::from(value),
+            None => runtime::Metadata::new(),
+        }
+    };
+
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let request = runtime::ComponentRequest::GetMetadataSchema {
+        metadata,
+        reply: reply_tx,
+    };
+
+    if state.component.send(request).await.is_err() {
+        return internal_error_response("component actor unavailable");
+    }
+
+    match reply_rx.await {
+        Ok(Ok(Some(schema))) => {
+            (StatusCode::OK, [("content-type", MIME_JSON)], schema).into_response()
+        }
+        Ok(Ok(None)) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(e)) => component_error_response(e),
+        Err(_) => component_error_response(runtime::ComponentError::Internal(anyhow::anyhow!(
+            "component actor dropped reply"
+        ))),
     }
 }
 
 async fn list_tools_inner(
     state: &AppState,
-    config: Option<serde_json::Value>,
+    metadata: Option<serde_json::Value>,
 ) -> axum::response::Response {
-    let cbor_config = match Config::from_json_opt(&config) {
-        Ok(c) => c.map(Vec::from),
-        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    let meta = match metadata {
+        Some(value) => runtime::Metadata::from(value),
+        None => runtime::Metadata::new(),
     };
 
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     let request = runtime::ComponentRequest::ListTools {
-        config: cbor_config,
+        metadata: meta,
         reply: reply_tx,
     };
 
@@ -187,7 +218,11 @@ async fn list_tools_inner(
                         description: ls.any_text().to_string(),
                         parameters_schema: serde_json::from_str(&td.parameters_schema)
                             .unwrap_or(serde_json::Value::Object(Default::default())),
-                        metadata: meta.to_json(),
+                        metadata: if meta.is_empty() {
+                            None
+                        } else {
+                            Some(meta.into())
+                        },
                     }
                 })
                 .collect();
@@ -207,11 +242,9 @@ async fn list_tools_inner(
 async fn call_tool_buffered(
     state: Arc<AppState>,
     tool_call: runtime::act::core::types::ToolCall,
-    cbor_config: Option<Vec<u8>>,
 ) -> axum::response::Response {
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     let request = runtime::ComponentRequest::CallTool {
-        config: cbor_config,
         call: tool_call,
         reply: reply_tx,
     };
@@ -276,14 +309,12 @@ async fn call_tool_buffered(
 async fn call_tool_sse(
     state: Arc<AppState>,
     tool_call: runtime::act::core::types::ToolCall,
-    cbor_config: Option<Vec<u8>>,
 ) -> axum::response::Response {
     tracing::debug!(tool = %tool_call.name, "SSE streaming requested");
 
     let (event_tx, event_rx) = tokio::sync::mpsc::channel(32);
 
     let request = runtime::ComponentRequest::CallToolStreaming {
-        config: cbor_config,
         call: tool_call,
         event_tx,
     };
@@ -298,17 +329,17 @@ async fn call_tool_sse(
     Sse::new(sse_stream).into_response()
 }
 
-/// Parse a JSON body with config, accepting empty body as no config.
-async fn parse_config_body(request: Request) -> Result<Option<serde_json::Value>, StatusCode> {
+/// Parse a JSON body with metadata, accepting empty body as no metadata.
+async fn parse_metadata_body(request: Request) -> Result<Option<serde_json::Value>, StatusCode> {
     let body_bytes = axum::body::to_bytes(request.into_body(), 1024 * 1024)
         .await
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     if body_bytes.is_empty() {
         return Ok(None);
     }
-    let body: act_http::ConfigRequest =
+    let body: act_http::MetadataRequest =
         serde_json::from_slice(&body_bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
-    Ok(body.config)
+    Ok(body.metadata)
 }
 
 /// Handler for the /tools route that dispatches POST and QUERY methods.
@@ -317,11 +348,11 @@ async fn tools_dispatcher(
     request: Request,
 ) -> axum::response::Response {
     if request.method() == Method::POST || request.method() == query_method() {
-        let config = match parse_config_body(request).await {
-            Ok(c) => c,
+        let metadata = match parse_metadata_body(request).await {
+            Ok(m) => m,
             Err(status) => return status.into_response(),
         };
-        list_tools_inner(&state, config).await
+        list_tools_inner(&state, metadata).await
     } else {
         StatusCode::METHOD_NOT_ALLOWED.into_response()
     }
@@ -356,26 +387,26 @@ async fn tool_call_dispatcher(
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.contains(MIME_SSE));
 
-    let cbor_config = match Config::from_json_opt(&body.config) {
-        Ok(c) => c.map(Vec::from),
-        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
-    };
-
     let cbor_args = match cbor::json_to_cbor(&body.arguments) {
         Ok(bytes) => bytes,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
 
+    let metadata: Metadata = match body.metadata {
+        Some(value) => Metadata::from(value),
+        None => Metadata::new(),
+    };
+
     let tool_call = runtime::act::core::types::ToolCall {
         name,
         arguments: cbor_args,
-        metadata: Vec::new(),
+        metadata: metadata.clone().into(),
     };
 
     if wants_sse {
-        call_tool_sse(state, tool_call, cbor_config).await
+        call_tool_sse(state, tool_call).await
     } else {
-        call_tool_buffered(state, tool_call, cbor_config).await
+        call_tool_buffered(state, tool_call).await
     }
 }
 
@@ -434,7 +465,10 @@ mod tests {
 pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/info", get(get_info))
-        .route("/config-schema", get(get_config_schema))
+        .route(
+            "/metadata-schema",
+            axum::routing::post(post_metadata_schema),
+        )
         .route("/tools", axum::routing::any(tools_dispatcher))
         .route("/tools/{name}", axum::routing::any(tool_call_dispatcher))
         .layer(middleware::from_fn(protocol_version_layer))

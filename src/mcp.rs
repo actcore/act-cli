@@ -13,9 +13,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 // ── Stdio loop ──
 
 pub async fn run_stdio(
-    info: runtime::act::core::types::ComponentInfo,
+    info: runtime::ComponentInfo,
     handle: runtime::ComponentHandle,
-    config: Option<Vec<u8>>,
+    metadata: runtime::Metadata,
 ) -> Result<()> {
     let stdin = BufReader::new(tokio::io::stdin());
     let mut stdout = tokio::io::stdout();
@@ -36,7 +36,7 @@ pub async fn run_stdio(
             }
         };
 
-        let response = handle_request(&request, &info, &handle, &config).await;
+        let response = handle_request(&request, &info, &handle, &metadata).await;
         if let Some(resp) = response {
             write_response(&mut stdout, &resp).await?;
         }
@@ -57,9 +57,9 @@ async fn write_response(stdout: &mut tokio::io::Stdout, resp: &JsonRpcResponse) 
 
 async fn handle_request(
     req: &JsonRpcRequest,
-    info: &runtime::act::core::types::ComponentInfo,
+    info: &runtime::ComponentInfo,
     handle: &runtime::ComponentHandle,
-    config: &Option<Vec<u8>>,
+    metadata: &runtime::Metadata,
 ) -> Option<JsonRpcResponse> {
     let id = req.id.clone().unwrap_or(Value::Null);
 
@@ -67,8 +67,8 @@ async fn handle_request(
         "initialize" => Some(handle_initialize(id, info)),
         "notifications/initialized" => None,
         "ping" => Some(JsonRpcResponse::success(id, serde_json::json!({}))),
-        "tools/list" => Some(handle_tools_list(id, handle, config).await),
-        "tools/call" => Some(handle_tools_call(id, req, handle, config).await),
+        "tools/list" => Some(handle_tools_list(id, handle, metadata).await),
+        "tools/call" => Some(handle_tools_call(id, req, handle, metadata).await),
         _ => {
             if req.method.starts_with("notifications/") {
                 None
@@ -85,10 +85,7 @@ async fn handle_request(
 
 // ── initialize ──
 
-fn handle_initialize(
-    id: Value,
-    info: &runtime::act::core::types::ComponentInfo,
-) -> JsonRpcResponse {
+fn handle_initialize(id: Value, info: &runtime::ComponentInfo) -> JsonRpcResponse {
     let result = InitializeResult {
         protocol_version: mcp::PROTOCOL_VERSION.to_string(),
         server_info: ServerInfo {
@@ -108,11 +105,11 @@ fn handle_initialize(
 async fn handle_tools_list(
     id: Value,
     handle: &runtime::ComponentHandle,
-    config: &Option<Vec<u8>>,
+    metadata: &runtime::Metadata,
 ) -> JsonRpcResponse {
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     let request = runtime::ComponentRequest::ListTools {
-        config: config.clone(),
+        metadata: metadata.clone(),
         reply: reply_tx,
     };
 
@@ -180,7 +177,7 @@ async fn handle_tools_call(
     id: Value,
     req: &JsonRpcRequest,
     handle: &runtime::ComponentHandle,
-    config: &Option<Vec<u8>>,
+    metadata: &runtime::Metadata,
 ) -> JsonRpcResponse {
     let call_params: CallToolParams = match req.params.as_ref() {
         Some(p) => match serde_json::from_value(p.clone()) {
@@ -199,12 +196,11 @@ async fn handle_tools_call(
     let tool_call = runtime::act::core::types::ToolCall {
         name: call_params.name,
         arguments: cbor_args,
-        metadata: Vec::new(),
+        metadata: metadata.clone().into(),
     };
 
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     let request = runtime::ComponentRequest::CallTool {
-        config: config.clone(),
         call: tool_call,
         reply: reply_tx,
     };
