@@ -1,3 +1,4 @@
+mod config;
 mod http;
 mod mcp;
 mod runtime;
