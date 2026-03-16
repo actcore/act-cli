@@ -84,16 +84,37 @@ pub fn create_linker(engine: &Engine) -> Result<Linker<HostState>> {
     Ok(linker)
 }
 
-/// Create a new store with WASI context.
-pub fn create_store(engine: &Engine) -> Store<HostState> {
-    let wasi = WasiCtxBuilder::new().build();
+/// Create a new store with WASI context, preopening directories from fs_config.
+pub fn create_store(
+    engine: &Engine,
+    fs_config: &crate::config::FsConfig,
+) -> Result<Store<HostState>> {
+    let mut builder = WasiCtxBuilder::new();
+    for mount in &fs_config.mounts {
+        builder
+            .preopened_dir(
+                &mount.host,
+                &mount.guest,
+                wasmtime_wasi::DirPerms::all(),
+                wasmtime_wasi::FilePerms::all(),
+            )
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to preopen host dir '{}' as guest '{}': {}",
+                    mount.host.display(),
+                    mount.guest,
+                    e
+                )
+            })?;
+    }
+    let wasi = builder.build();
     let state = HostState {
         wasi,
         table: ResourceTable::new(),
         http_p2: WasiHttpCtx::new(),
         http_p3: DefaultWasiHttpCtx,
     };
-    Store::new(engine, state)
+    Ok(Store::new(engine, state))
 }
 
 // ── Component info from custom section ──
@@ -194,13 +215,28 @@ pub async fn instantiate_component(
     engine: &Engine,
     component: &Component,
     linker: &Linker<HostState>,
+    fs_config: &crate::config::FsConfig,
 ) -> Result<(ActWorld, Store<HostState>)> {
-    let mut store = create_store(engine);
+    let mut store = create_store(engine, fs_config)?;
     let instance = ActWorld::instantiate_async(&mut store, component, linker)
         .await
         .map_err(|e| anyhow::anyhow!("failed to instantiate component: {e}"))?;
 
     Ok((instance, store))
+}
+
+/// Warn if a component declares wasi:filesystem capability but no filesystem access was granted.
+pub fn warn_missing_capabilities(info: &ComponentInfo, fs_config: &crate::config::FsConfig) {
+    let wants_fs = info
+        .capabilities
+        .iter()
+        .any(|c| c.id == act_types::constants::CAP_FILESYSTEM);
+    if wants_fs && fs_config.mounts.is_empty() {
+        tracing::warn!(
+            component = %info.name,
+            "component declares wasi:filesystem capability but no filesystem access was granted"
+        );
+    }
 }
 
 /// Spawn the component actor task. Owns the Store and ActWorld.

@@ -23,6 +23,7 @@ use crate::runtime;
 pub struct AppState {
     pub info: act_types::ComponentInfo,
     pub component: runtime::ComponentHandle,
+    pub metadata: Metadata,
 }
 
 // ── Conversion helpers ──
@@ -151,18 +152,16 @@ async fn post_metadata_schema(
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
 
-    let metadata = if body_bytes.is_empty() {
-        runtime::Metadata::new()
-    } else {
+    let mut metadata = state.metadata.clone();
+    if !body_bytes.is_empty() {
         let body: act_http::MetadataSchemaRequest = match serde_json::from_slice(&body_bytes) {
             Ok(b) => b,
             Err(_) => return StatusCode::BAD_REQUEST.into_response(),
         };
-        match body.metadata {
-            Some(value) => runtime::Metadata::from(value),
-            None => runtime::Metadata::new(),
+        if let Some(value) = body.metadata {
+            metadata.extend(runtime::Metadata::from(value));
         }
-    };
+    }
 
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     let request = runtime::ComponentRequest::GetMetadataSchema {
@@ -190,10 +189,10 @@ async fn list_tools_inner(
     state: &AppState,
     metadata: Option<serde_json::Value>,
 ) -> axum::response::Response {
-    let meta = match metadata {
-        Some(value) => runtime::Metadata::from(value),
-        None => runtime::Metadata::new(),
-    };
+    let mut meta = state.metadata.clone();
+    if let Some(value) = metadata {
+        meta.extend(runtime::Metadata::from(value));
+    }
 
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     let request = runtime::ComponentRequest::ListTools {
@@ -392,10 +391,10 @@ async fn tool_call_dispatcher(
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
 
-    let metadata: Metadata = match body.metadata {
-        Some(value) => Metadata::from(value),
-        None => Metadata::new(),
-    };
+    let mut metadata = state.metadata.clone();
+    if let Some(value) = body.metadata {
+        metadata.extend(Metadata::from(value));
+    }
 
     let tool_call = runtime::act::core::types::ToolCall {
         name,

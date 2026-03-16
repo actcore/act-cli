@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 
 /// A single guest←host directory mapping.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
 pub struct DirMount {
     pub guest: String,
     pub host: PathBuf,
@@ -15,12 +14,10 @@ pub struct DirMount {
 
 /// Resolved filesystem configuration for a component invocation.
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 pub struct FsConfig {
     pub mounts: Vec<DirMount>,
 }
 
-#[allow(dead_code)]
 impl FsConfig {
     /// No filesystem access (default).
     pub fn none() -> Self {
@@ -41,11 +38,12 @@ impl FsConfig {
 // ── TOML deserialization types ──
 
 #[derive(Debug, Clone, Deserialize, Default)]
-#[allow(dead_code)]
 pub struct ConfigFile {
     #[serde(default)]
+    #[allow(dead_code)]
     pub listen: Option<String>,
     #[serde(rename = "log-level", default)]
+    #[allow(dead_code)]
     pub log_level: Option<String>,
     #[serde(default)]
     pub policy: Option<PolicyConfig>,
@@ -54,25 +52,23 @@ pub struct ConfigFile {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
-#[allow(dead_code)]
 pub struct PolicyConfig {
     #[serde(default)]
     pub filesystem: Option<FilesystemPolicy>,
     #[serde(default)]
+    #[allow(dead_code)]
     pub network: Option<bool>,
 }
 
 /// Filesystem policy — either a simple string ("none"/"full") or a structured object.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(untagged)]
-#[allow(dead_code)]
 pub enum FilesystemPolicy {
     Simple(String),
     Structured(StructuredFsPolicy),
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
-#[allow(dead_code)]
 pub struct StructuredFsPolicy {
     pub mode: String,
     #[serde(rename = "allow-dir", default)]
@@ -80,14 +76,12 @@ pub struct StructuredFsPolicy {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
-#[allow(dead_code)]
 pub struct DirMapping {
     pub guest: String,
     pub host: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
-#[allow(dead_code)]
 pub struct ProfileConfig {
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
@@ -98,13 +92,11 @@ pub struct ProfileConfig {
 // ── Loading ──
 
 /// Default config file path: `~/.config/act/config.toml`.
-#[allow(dead_code)]
 pub fn default_config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("act").join("config.toml"))
 }
 
 /// Load and parse a TOML config file. Returns `ConfigFile::default()` if the file doesn't exist.
-#[allow(dead_code)]
 pub fn load_config(path: Option<&Path>) -> Result<ConfigFile> {
     let path = match path {
         Some(p) => {
@@ -127,7 +119,6 @@ pub fn load_config(path: Option<&Path>) -> Result<ConfigFile> {
 }
 
 /// Resolve a profile by name from a loaded config.
-#[allow(dead_code)]
 pub fn get_profile<'a>(config: &'a ConfigFile, name: &str) -> Result<&'a ProfileConfig> {
     config
         .profile
@@ -136,7 +127,6 @@ pub fn get_profile<'a>(config: &'a ConfigFile, name: &str) -> Result<&'a Profile
 }
 
 /// Expand `~` in a path string to the user's home directory.
-#[allow(dead_code)]
 fn expand_path(s: &str) -> PathBuf {
     let expanded = shellexpand::tilde(s);
     PathBuf::from(expanded.as_ref())
@@ -145,7 +135,6 @@ fn expand_path(s: &str) -> PathBuf {
 // ── Resolution ──
 
 /// Resolve the final `FsConfig` from a filesystem policy.
-#[allow(dead_code)]
 fn resolve_fs_policy(policy: &FilesystemPolicy) -> Result<FsConfig> {
     match policy {
         FilesystemPolicy::Simple(s) => match s.as_str() {
@@ -171,7 +160,6 @@ fn resolve_fs_policy(policy: &FilesystemPolicy) -> Result<FsConfig> {
 }
 
 /// CLI-provided filesystem overrides.
-#[allow(dead_code)]
 pub struct CliOverrides {
     pub allow_fs: bool,
     pub allow_dir: Vec<String>,
@@ -180,7 +168,6 @@ pub struct CliOverrides {
 /// Resolve the final `FsConfig` from config file + profile + CLI overrides.
 ///
 /// Resolution order: CLI flags > profile > config defaults.
-#[allow(dead_code)]
 pub fn resolve_fs_config(
     config: &ConfigFile,
     profile: Option<&ProfileConfig>,
@@ -219,7 +206,6 @@ pub fn resolve_fs_config(
 
 /// Resolve the merged metadata from profile + CLI.
 /// CLI metadata takes precedence over profile metadata.
-#[allow(dead_code)]
 pub fn resolve_metadata(
     profile: Option<&ProfileConfig>,
     cli_metadata: Option<&serde_json::Value>,
@@ -247,7 +233,6 @@ pub fn resolve_metadata(
 
 /// Adjust guest paths in FsConfig based on the component's `std:fs:mount-root`.
 /// All guest paths become `{mount_root}/{guest}`.
-#[allow(dead_code)]
 pub fn apply_mount_root(fs_config: &mut FsConfig, mount_root: &str) {
     if mount_root == "/" || mount_root.is_empty() {
         return;
@@ -264,7 +249,6 @@ pub fn apply_mount_root(fs_config: &mut FsConfig, mount_root: &str) {
 }
 
 /// Parse `--allow-dir guest:host` flag value.
-#[allow(dead_code)]
 fn parse_allow_dir(s: &str) -> Result<DirMount> {
     let (guest, host) = s
         .split_once(':')

@@ -11,6 +11,28 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[derive(clap::Args, Clone, Debug)]
+struct CommonOpts {
+    /// JSON metadata to pass to the component
+    #[arg(short, long)]
+    metadata: Option<String>,
+    /// Path to a JSON metadata file
+    #[arg(long)]
+    metadata_file: Option<PathBuf>,
+    /// Map a host directory to a guest path (guest:host). Repeatable.
+    #[arg(long = "allow-dir")]
+    allow_dir: Vec<String>,
+    /// Grant full filesystem access (host / → guest /)
+    #[arg(long = "allow-fs")]
+    allow_fs: bool,
+    /// Use a named profile from the config file
+    #[arg(long)]
+    profile: Option<String>,
+    /// Override config file location
+    #[arg(long)]
+    config: Option<PathBuf>,
+}
+
 #[derive(Parser)]
 #[command(name = "act", about = "ACT — Agent Component Tools CLI")]
 enum Cli {
@@ -22,6 +44,9 @@ enum Cli {
         /// Address to listen on (host:port)
         #[arg(short, long, default_value = "[::1]:3000")]
         listen: SocketAddr,
+
+        #[command(flatten)]
+        opts: CommonOpts,
     },
     /// Call a tool directly and print the result
     Call {
@@ -35,26 +60,16 @@ enum Cli {
         #[arg(long, default_value = "{}")]
         args: String,
 
-        /// JSON metadata to pass to the component
-        #[arg(short, long)]
-        metadata: Option<String>,
-
-        /// Path to a JSON metadata file
-        #[arg(long)]
-        metadata_file: Option<PathBuf>,
+        #[command(flatten)]
+        opts: CommonOpts,
     },
     /// Load a .wasm component and serve it as an MCP server over stdio
     Mcp {
         /// Path to the .wasm component file
         component: PathBuf,
 
-        /// JSON metadata to pass to the component
-        #[arg(short, long)]
-        metadata: Option<String>,
-
-        /// Path to a JSON metadata file
-        #[arg(long)]
-        metadata_file: Option<PathBuf>,
+        #[command(flatten)]
+        opts: CommonOpts,
     },
     /// Show component info (name, version, description, capabilities)
     Info {
@@ -66,13 +81,8 @@ enum Cli {
         /// Path to the .wasm component file
         component: PathBuf,
 
-        /// JSON metadata to pass to the component
-        #[arg(short, long)]
-        metadata: Option<String>,
-
-        /// Path to a JSON metadata file
-        #[arg(long)]
-        metadata_file: Option<PathBuf>,
+        #[command(flatten)]
+        opts: CommonOpts,
     },
 }
 
@@ -89,25 +99,20 @@ async fn main() -> Result<()> {
         .init();
 
     match cli {
-        Cli::Serve { component, listen } => serve(component, listen).await,
+        Cli::Serve {
+            component,
+            listen,
+            opts,
+        } => serve(component, listen, opts).await,
         Cli::Call {
             component,
             tool,
             args,
-            metadata,
-            metadata_file,
-        } => cli_call_tool(component, tool, args, metadata, metadata_file).await,
-        Cli::Mcp {
-            component,
-            metadata,
-            metadata_file,
-        } => mcp_serve(component, metadata, metadata_file).await,
+            opts,
+        } => cli_call_tool(component, tool, args, opts).await,
+        Cli::Mcp { component, opts } => mcp_serve(component, opts).await,
         Cli::Info { component } => cli_info(component).await,
-        Cli::Tools {
-            component,
-            metadata,
-            metadata_file,
-        } => cli_tools(component, metadata, metadata_file).await,
+        Cli::Tools { component, opts } => cli_tools(component, opts).await,
     }
 }
 
@@ -130,15 +135,46 @@ fn parse_cli_metadata(
     }
 }
 
+fn resolve_opts(opts: &CommonOpts) -> Result<(config::FsConfig, Option<serde_json::Value>)> {
+    let config_file = config::load_config(opts.config.as_deref())?;
+    let profile = match &opts.profile {
+        Some(name) => Some(config::get_profile(&config_file, name)?),
+        None => None,
+    };
+    let cli_overrides = config::CliOverrides {
+        allow_fs: opts.allow_fs,
+        allow_dir: opts.allow_dir.clone(),
+    };
+    let fs_config = config::resolve_fs_config(&config_file, profile, &cli_overrides)?;
+    let cli_metadata = parse_cli_metadata(opts.metadata.clone(), opts.metadata_file.clone())?;
+    let merged_metadata = config::resolve_metadata(profile, cli_metadata.as_ref());
+    let metadata = if merged_metadata.is_null() {
+        None
+    } else {
+        Some(merged_metadata)
+    };
+    Ok((fs_config, metadata))
+}
+
 async fn cli_call_tool(
     component_path: PathBuf,
     tool: String,
     args: String,
-    metadata: Option<String>,
-    metadata_file: Option<PathBuf>,
+    opts: CommonOpts,
 ) -> Result<()> {
-    let metadata_json = parse_cli_metadata(metadata, metadata_file)?;
-    let metadata_kv: runtime::Metadata = metadata_json
+    let (mut fs_config, metadata_value) = resolve_opts(&opts)?;
+
+    let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
+    let component_info = runtime::read_component_info(&wasm_bytes)?;
+    let mount_root = component_info
+        .metadata
+        .get(act_types::constants::COMPONENT_FS_MOUNT_ROOT)
+        .and_then(|v| v.as_str())
+        .unwrap_or("/");
+    config::apply_mount_root(&mut fs_config, mount_root);
+    runtime::warn_missing_capabilities(&component_info, &fs_config);
+
+    let metadata_kv: runtime::Metadata = metadata_value
         .as_ref()
         .map(|v| runtime::Metadata::from(v.clone()))
         .unwrap_or_default();
@@ -150,7 +186,8 @@ async fn cli_call_tool(
     let engine = runtime::create_engine()?;
     let component = runtime::load_component(&engine, &component_path)?;
     let linker = runtime::create_linker(&engine)?;
-    let (instance, store) = runtime::instantiate_component(&engine, &component, &linker).await?;
+    let (instance, store) =
+        runtime::instantiate_component(&engine, &component, &linker, &fs_config).await?;
 
     let component_handle = runtime::spawn_component_actor(instance, store);
 
@@ -198,24 +235,29 @@ async fn cli_call_tool(
     }
 }
 
-async fn mcp_serve(
-    component_path: PathBuf,
-    metadata: Option<String>,
-    metadata_file: Option<PathBuf>,
-) -> Result<()> {
-    let metadata_json = parse_cli_metadata(metadata, metadata_file)?;
-    let metadata_kv: runtime::Metadata = metadata_json
+async fn mcp_serve(component_path: PathBuf, opts: CommonOpts) -> Result<()> {
+    let (mut fs_config, metadata_value) = resolve_opts(&opts)?;
+
+    let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
+    let component_info = runtime::read_component_info(&wasm_bytes)?;
+    let mount_root = component_info
+        .metadata
+        .get(act_types::constants::COMPONENT_FS_MOUNT_ROOT)
+        .and_then(|v| v.as_str())
+        .unwrap_or("/");
+    config::apply_mount_root(&mut fs_config, mount_root);
+    runtime::warn_missing_capabilities(&component_info, &fs_config);
+
+    let metadata_kv: runtime::Metadata = metadata_value
         .as_ref()
         .map(|v| runtime::Metadata::from(v.clone()))
         .unwrap_or_default();
 
-    let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
-    let component_info = runtime::read_component_info(&wasm_bytes)?;
-
     let engine = runtime::create_engine()?;
     let component = runtime::load_component(&engine, &component_path)?;
     let linker = runtime::create_linker(&engine)?;
-    let (instance, store) = runtime::instantiate_component(&engine, &component, &linker).await?;
+    let (instance, store) =
+        runtime::instantiate_component(&engine, &component, &linker, &fs_config).await?;
 
     tracing::info!(
         name = %component_info.name,
@@ -237,13 +279,20 @@ async fn cli_info(component_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn cli_tools(
-    component_path: PathBuf,
-    metadata: Option<String>,
-    metadata_file: Option<PathBuf>,
-) -> Result<()> {
-    let metadata_json = parse_cli_metadata(metadata, metadata_file)?;
-    let metadata_kv: runtime::Metadata = metadata_json
+async fn cli_tools(component_path: PathBuf, opts: CommonOpts) -> Result<()> {
+    let (mut fs_config, metadata_value) = resolve_opts(&opts)?;
+
+    let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
+    let component_info = runtime::read_component_info(&wasm_bytes)?;
+    let mount_root = component_info
+        .metadata
+        .get(act_types::constants::COMPONENT_FS_MOUNT_ROOT)
+        .and_then(|v| v.as_str())
+        .unwrap_or("/");
+    config::apply_mount_root(&mut fs_config, mount_root);
+    runtime::warn_missing_capabilities(&component_info, &fs_config);
+
+    let metadata_kv: runtime::Metadata = metadata_value
         .as_ref()
         .map(|v| runtime::Metadata::from(v.clone()))
         .unwrap_or_default();
@@ -251,7 +300,8 @@ async fn cli_tools(
     let engine = runtime::create_engine()?;
     let component = runtime::load_component(&engine, &component_path)?;
     let linker = runtime::create_linker(&engine)?;
-    let (instance, store) = runtime::instantiate_component(&engine, &component, &linker).await?;
+    let (instance, store) =
+        runtime::instantiate_component(&engine, &component, &linker, &fs_config).await?;
 
     let component_handle = runtime::spawn_component_actor(instance, store);
 
@@ -341,15 +391,30 @@ mod tests {
     }
 }
 
-async fn serve(component_path: PathBuf, addr: SocketAddr) -> Result<()> {
+async fn serve(component_path: PathBuf, addr: SocketAddr, opts: CommonOpts) -> Result<()> {
+    let (mut fs_config, metadata_value) = resolve_opts(&opts)?;
+
     let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
     let component_info = runtime::read_component_info(&wasm_bytes)?;
+    let mount_root = component_info
+        .metadata
+        .get(act_types::constants::COMPONENT_FS_MOUNT_ROOT)
+        .and_then(|v| v.as_str())
+        .unwrap_or("/");
+    config::apply_mount_root(&mut fs_config, mount_root);
+    runtime::warn_missing_capabilities(&component_info, &fs_config);
+
+    let resolved_metadata: runtime::Metadata = metadata_value
+        .as_ref()
+        .map(|v| runtime::Metadata::from(v.clone()))
+        .unwrap_or_default();
 
     let engine = runtime::create_engine()?;
     let component = runtime::load_component(&engine, &component_path)?;
     let linker = runtime::create_linker(&engine)?;
 
-    let (instance, store) = runtime::instantiate_component(&engine, &component, &linker).await?;
+    let (instance, store) =
+        runtime::instantiate_component(&engine, &component, &linker, &fs_config).await?;
 
     tracing::info!(
         name = %component_info.name,
@@ -362,6 +427,7 @@ async fn serve(component_path: PathBuf, addr: SocketAddr) -> Result<()> {
     let state = Arc::new(http::AppState {
         info: component_info,
         component: component_handle,
+        metadata: resolved_metadata,
     });
 
     tracing::info!(%addr, component = %component_path.display(), "ACT host listening");
