@@ -14,7 +14,7 @@ name = "act"
 path = "src/main.rs"
 
 [dependencies]
-act-types = "0.2.2"
+act-types = { path = "../act-sdk-rs/act-types" }
 ciborium = "0.2"
 anyhow = "1.0.102"
 axum = "0.8.8"
@@ -26,6 +26,9 @@ tokio = { version = "1.50", features = ["full"] }
 tokio-stream = "0.1.18"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+toml = "0.8"
+dirs = "6"
+shellexpand = "3"
 wasmparser = "0.245.1"
 wasmtime = { version = "42", features = ["component-model", "component-model-async"] }
 wasmtime-wasi = { version = "42", features = ["p3"] }
