@@ -1,0 +1,77 @@
+name: Build PyPI wheels
+
+on:
+  workflow_call:
+
+jobs:
+  linux:
+    name: wheel (linux-${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          manylinux: auto
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: dist
+
+  macos:
+    name: wheel (macos-${{ matrix.target }})
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}-apple-darwin
+          args: --release --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}
+          path: dist
+
+  windows:
+    name: wheel (windows-x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: x64
+      - uses: PyO3/maturin-action@v1
+        with:
+          args: --release --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-x64
+          path: dist
+
+  sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-sdist
+          path: dist
