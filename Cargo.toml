@@ -9,6 +9,9 @@ homepage = "https://actcore.dev"
 keywords = ["act", "wasm", "component-model", "mcp", "agent"]
 categories = ["command-line-utilities", "wasm"]
 
+readme = "README.md"
+include = ["src/**", "wit/**", "README.md", "LICENSE-*", "CHANGELOG.md"]
+
 [[bin]]
 name = "act"
 path = "src/main.rs"
