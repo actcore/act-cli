@@ -5,8 +5,44 @@ on:
 
 jobs:
   linux:
-    name: wheel (linux-${{ matrix.target }})
+    name: wheel (${{ matrix.name }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - name: manylinux-x86_64
+            target: x86_64
+            manylinux: auto
+          - name: manylinux-aarch64
+            target: aarch64
+            manylinux: auto
+          - name: manylinux-riscv64
+            target: riscv64gc
+            manylinux: auto
+          - name: musllinux-x86_64
+            target: x86_64-unknown-linux-musl
+            manylinux: musllinux_1_1
+          - name: musllinux-aarch64
+            target: aarch64-unknown-linux-musl
+            manylinux: musllinux_1_1
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          manylinux: ${{ matrix.manylinux }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.name }}
+          path: dist
+
+  macos:
+    name: wheel (macos-${{ matrix.target }})
+    runs-on: macos-latest
     strategy:
       matrix:
         target: [x86_64, aarch64]
@@ -17,29 +53,11 @@ jobs:
           python-version: "3.11"
       - uses: PyO3/maturin-action@v1
         with:
-          target: ${{ matrix.target }}
-          args: --release --out dist
-          manylinux: auto
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheels-linux-${{ matrix.target }}
-          path: dist
-
-  macos:
-    name: wheel (macos-universal2)
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - uses: PyO3/maturin-action@v1
-        with:
-          target: universal2-apple-darwin
+          target: ${{ matrix.target }}-apple-darwin
           args: --release --out dist
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-macos-universal2
+          name: wheels-macos-${{ matrix.target }}
           path: dist
 
   windows:
