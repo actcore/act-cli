@@ -1,3 +1,0 @@
-[submodule "wit/deps/act-core"]
-	path = wit/deps/act-core
-	url = https://github.com/actcore/act-wit.git
