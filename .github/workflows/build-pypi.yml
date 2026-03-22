@@ -26,11 +26,8 @@ jobs:
           path: dist
 
   macos:
-    name: wheel (macos-${{ matrix.target }})
+    name: wheel (macos-universal2)
     runs-on: macos-latest
-    strategy:
-      matrix:
-        target: [x86_64, aarch64]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v5
@@ -38,28 +35,36 @@ jobs:
           python-version: "3.11"
       - uses: PyO3/maturin-action@v1
         with:
-          target: ${{ matrix.target }}-apple-darwin
+          target: universal2-apple-darwin
           args: --release --out dist
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-macos-${{ matrix.target }}
+          name: wheels-macos-universal2
           path: dist
 
   windows:
-    name: wheel (windows-x64)
+    name: wheel (windows-${{ matrix.target }})
     runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - target: x64
+            maturin-target: ""
+          - target: arm64
+            maturin-target: aarch64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          architecture: x64
+          architecture: ${{ matrix.target }}
       - uses: PyO3/maturin-action@v1
         with:
+          target: ${{ matrix.maturin-target }}
           args: --release --out dist
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-windows-x64
+          name: wheels-windows-${{ matrix.target }}
           path: dist
 
   sdist:
