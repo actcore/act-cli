@@ -41,9 +41,9 @@ enum Cli {
         /// Path to the .wasm component file
         component: PathBuf,
 
-        /// Address to listen on (host:port)
-        #[arg(short, long, default_value = "[::1]:3000")]
-        listen: SocketAddr,
+        /// Address to listen on (host:port). Default: [::1]:3000
+        #[arg(short, long)]
+        listen: Option<SocketAddr>,
 
         #[command(flatten)]
         opts: CommonOpts,
@@ -90,8 +90,27 @@ enum Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "act_cli=info".parse().expect("valid default filter"));
+    // Resolve log level: RUST_LOG env > config file log-level > default "act_cli=info"
+    let env_filter = if std::env::var("RUST_LOG").is_ok() {
+        tracing_subscriber::EnvFilter::from_default_env()
+    } else {
+        // Try loading config to get log-level (best effort — don't fail on missing config)
+        let config_path = match &cli {
+            Cli::Serve { opts, .. }
+            | Cli::Call { opts, .. }
+            | Cli::Mcp { opts, .. }
+            | Cli::Tools { opts, .. } => opts.config.as_deref(),
+            Cli::Info { .. } => None,
+        };
+        let log_level = config::load_config(config_path)
+            .ok()
+            .and_then(|c| c.log_level);
+        let directive = match log_level.as_deref() {
+            Some(level) => format!("act_cli={level}"),
+            None => "act_cli=info".to_string(),
+        };
+        directive.parse().expect("valid log filter")
+    };
 
     tracing_subscriber::fmt()
         .with_env_filter(env_filter)
@@ -135,7 +154,13 @@ fn parse_cli_metadata(
     }
 }
 
-fn resolve_opts(opts: &CommonOpts) -> Result<(config::FsConfig, Option<serde_json::Value>)> {
+fn resolve_opts(
+    opts: &CommonOpts,
+) -> Result<(
+    config::ConfigFile,
+    config::FsConfig,
+    Option<serde_json::Value>,
+)> {
     let config_file = config::load_config(opts.config.as_deref())?;
     let profile = match &opts.profile {
         Some(name) => Some(config::get_profile(&config_file, name)?),
@@ -153,7 +178,7 @@ fn resolve_opts(opts: &CommonOpts) -> Result<(config::FsConfig, Option<serde_jso
     } else {
         Some(merged_metadata)
     };
-    Ok((fs_config, metadata))
+    Ok((config_file, fs_config, metadata))
 }
 
 async fn cli_call_tool(
@@ -162,7 +187,7 @@ async fn cli_call_tool(
     args: String,
     opts: CommonOpts,
 ) -> Result<()> {
-    let (mut fs_config, metadata_value) = resolve_opts(&opts)?;
+    let (_config, mut fs_config, metadata_value) = resolve_opts(&opts)?;
 
     let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
     let component_info = runtime::read_component_info(&wasm_bytes)?;
@@ -236,7 +261,7 @@ async fn cli_call_tool(
 }
 
 async fn mcp_serve(component_path: PathBuf, opts: CommonOpts) -> Result<()> {
-    let (mut fs_config, metadata_value) = resolve_opts(&opts)?;
+    let (_config, mut fs_config, metadata_value) = resolve_opts(&opts)?;
 
     let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
     let component_info = runtime::read_component_info(&wasm_bytes)?;
@@ -280,7 +305,7 @@ async fn cli_info(component_path: PathBuf) -> Result<()> {
 }
 
 async fn cli_tools(component_path: PathBuf, opts: CommonOpts) -> Result<()> {
-    let (mut fs_config, metadata_value) = resolve_opts(&opts)?;
+    let (_config, mut fs_config, metadata_value) = resolve_opts(&opts)?;
 
     let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
     let component_info = runtime::read_component_info(&wasm_bytes)?;
@@ -391,8 +416,24 @@ mod tests {
     }
 }
 
-async fn serve(component_path: PathBuf, addr: SocketAddr, opts: CommonOpts) -> Result<()> {
-    let (mut fs_config, metadata_value) = resolve_opts(&opts)?;
+async fn serve(
+    component_path: PathBuf,
+    cli_listen: Option<SocketAddr>,
+    opts: CommonOpts,
+) -> Result<()> {
+    let (config, mut fs_config, metadata_value) = resolve_opts(&opts)?;
+
+    // Resolve listen address: CLI flag > config file > default
+    let addr: SocketAddr = match cli_listen {
+        Some(a) => a,
+        None => config
+            .listen
+            .as_deref()
+            .map(|s| s.parse())
+            .transpose()
+            .context("invalid 'listen' in config file")?
+            .unwrap_or_else(|| "[::1]:3000".parse().unwrap()),
+    };
 
     let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
     let component_info = runtime::read_component_info(&wasm_bytes)?;
