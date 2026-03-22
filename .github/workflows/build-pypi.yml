@@ -17,7 +17,7 @@ jobs:
             target: aarch64
             manylinux: auto
           - name: manylinux-riscv64
-            target: riscv64gc
+            target: riscv64gc-unknown-linux-gnu
             manylinux: auto
           - name: musllinux-x86_64
             target: x86_64-unknown-linux-musl
