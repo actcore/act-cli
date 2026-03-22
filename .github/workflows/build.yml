@@ -31,8 +31,6 @@ jobs:
             dest: act-windows-aarch64.exe
     steps:
       - uses: actions/checkout@v6
-        with:
-          submodules: true
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
       - name: Build
@@ -50,8 +48,6 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
-        with:
-          submodules: true
       - uses: dtolnay/rust-toolchain@nightly
         with:
           targets: x86_64-apple-darwin,aarch64-apple-darwin
@@ -89,8 +85,6 @@ jobs:
             target: riscv64gc-unknown-linux-musl
     steps:
       - uses: actions/checkout@v6
-        with:
-          submodules: true
       - uses: dtolnay/rust-toolchain@nightly
         with:
           targets: ${{ matrix.target }}

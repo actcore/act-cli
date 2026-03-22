@@ -1,0 +1,27 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "act-cli"
+version = "0.2.0"
+description = "CLI host for ACT (Agent Component Tools) WebAssembly components"
+readme = "README.md"
+license = { text = "MIT OR Apache-2.0" }
+requires-python = ">=3.8"
+keywords = ["act", "wasm", "component-model", "mcp", "agent"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
+    "Topic :: Software Development :: Libraries",
+]
+
+[project.urls]
+Homepage = "https://actcore.dev"
+Repository = "https://github.com/actcore/act-cli"
+
+[tool.maturin]
+bindings = "bin"
