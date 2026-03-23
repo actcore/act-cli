@@ -15,6 +15,12 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: Inject version from Cargo.toml
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          find npm -name 'package.json' -exec sed -i "s/0.0.0/$VERSION/g" {} +
+
       - name: Populate platform packages
         run: |
           cp artifacts/act-linux-x86_64-musl    npm/@actcore/act-cli-linux-x64/act

@@ -1,6 +1,6 @@
 {
   "name": "@actcore/act-cli-linux-arm64",
-  "version": "0.2.0",
+  "version": "0.0.0",
   "description": "act-cli binary for linux-arm64",
   "license": "MIT OR Apache-2.0",
   "repository": {
