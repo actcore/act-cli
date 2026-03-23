@@ -96,7 +96,8 @@ async fn cache_dir() -> Result<PathBuf> {
 /// SHA-256 based cache filename.
 fn cache_key(input: &str) -> String {
     let hash = Sha256::digest(input.as_bytes());
-    format!("{hash:x}.wasm")
+    let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+    format!("{hex}.wasm")
 }
 
 async fn cache_path(input: &str) -> Result<PathBuf> {

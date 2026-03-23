@@ -35,9 +35,9 @@ dirs = "6"
 futures-util = "0.3"
 indicatif = "0.18.4"
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+reqwest = { version = "0.13.2", default-features = false, features = ["rustls", "stream"] }
 oci-client = "0.16"
-sha2 = "0.10"
+sha2 = "0.11.0"
 url = "2"
 shellexpand = "3"
 wasmparser = "0.245.1"
