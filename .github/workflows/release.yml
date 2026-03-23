@@ -51,9 +51,4 @@ jobs:
           pattern: wheels-*
           merge-multiple: true
           path: dist
-      - uses: PyO3/maturin-action@v1
-        with:
-          command: upload
-          args: --non-interactive --skip-existing dist/*
-        env:
-          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+      - uses: pypa/gh-action-pypi-publish@release/v1
