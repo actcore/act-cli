@@ -30,7 +30,7 @@ jobs:
             manylinux: musllinux_1_2
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
       - uses: moonrepo/setup-rust@v1
@@ -57,7 +57,7 @@ jobs:
         target: [x86_64, aarch64]
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
       - uses: moonrepo/setup-rust@v1
@@ -87,7 +87,7 @@ jobs:
             maturin-target: aarch64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
       - uses: moonrepo/setup-rust@v1
