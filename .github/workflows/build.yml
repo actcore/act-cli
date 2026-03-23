@@ -42,7 +42,7 @@ jobs:
       - name: Rename
         shell: bash
         run: cp target/release/${{ matrix.src }} ${{ matrix.dest }}
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.dest }}
           path: ${{ matrix.dest }}
@@ -79,7 +79,7 @@ jobs:
       - run: cargo zigbuild --release --target ${{ matrix.target }}
       - name: Rename
         run: cp target/${{ matrix.target }}/release/act act-${{ matrix.name }}
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v6
         with:
           name: act-${{ matrix.name }}
           path: act-${{ matrix.name }}
