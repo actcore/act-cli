@@ -4,11 +4,14 @@
 //! local `PathBuf` that can be passed to `runtime::load_component`.
 
 use anyhow::{Context, Result};
+use futures_util::StreamExt;
+use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::LazyLock;
+use tokio::io::AsyncWriteExt;
 use url::Url;
 
 /// A parsed component reference.
@@ -129,6 +132,32 @@ pub async fn resolve(component_ref: &ComponentRef, fresh: bool) -> Result<PathBu
     }
 }
 
+fn make_progress_bar(total: Option<u64>, message: &str) -> ProgressBar {
+    let pb = match total {
+        Some(len) => {
+            let pb = ProgressBar::new(len);
+            pb.set_style(
+                ProgressStyle::with_template(
+                    "{msg}\n  {wide_bar:.cyan/dim} {bytes}/{total_bytes} ({bytes_per_sec})",
+                )
+                .unwrap()
+                .progress_chars("━╸─"),
+            );
+            pb
+        }
+        None => {
+            let pb = ProgressBar::new_spinner();
+            pb.set_style(
+                ProgressStyle::with_template("{msg}\n  {spinner} {bytes} ({bytes_per_sec})")
+                    .unwrap(),
+            );
+            pb
+        }
+    };
+    pb.set_message(message.to_string());
+    pb
+}
+
 async fn resolve_http(url: &str, fresh: bool) -> Result<PathBuf> {
     let cached = cache_path(url).await?;
     if !fresh && tokio::fs::try_exists(&cached).await.unwrap_or(false) {
@@ -136,7 +165,6 @@ async fn resolve_http(url: &str, fresh: bool) -> Result<PathBuf> {
         return Ok(cached);
     }
 
-    tracing::info!(%url, "Downloading component");
     let response = reqwest::get(url)
         .await
         .with_context(|| format!("HTTP request to {url}"))?;
@@ -144,15 +172,23 @@ async fn resolve_http(url: &str, fresh: bool) -> Result<PathBuf> {
     if !status.is_success() {
         anyhow::bail!("HTTP {status} fetching {url}");
     }
-    let bytes = response
-        .bytes()
-        .await
-        .with_context(|| format!("reading response body from {url}"))?;
-    tracing::info!(size = bytes.len(), "Downloaded component");
 
-    tokio::fs::write(&cached, &bytes)
+    let total = response.content_length();
+    let pb = make_progress_bar(total, url);
+
+    let mut file = tokio::fs::File::create(&cached)
         .await
-        .with_context(|| format!("writing cache file: {}", cached.display()))?;
+        .with_context(|| format!("creating cache file: {}", cached.display()))?;
+
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.with_context(|| format!("reading response from {url}"))?;
+        file.write_all(&chunk).await?;
+        pb.inc(chunk.len() as u64);
+    }
+    file.flush().await?;
+
+    pb.finish_with_message("done");
     Ok(cached)
 }
 
@@ -163,8 +199,6 @@ async fn resolve_oci(reference: &str, fresh: bool) -> Result<PathBuf> {
         return Ok(cached);
     }
 
-    tracing::info!(%reference, "Pulling component from OCI registry");
-
     let oci_ref: oci_client::Reference = reference
         .parse()
         .with_context(|| format!("invalid OCI reference: {reference}"))?;
@@ -174,27 +208,45 @@ async fn resolve_oci(reference: &str, fresh: bool) -> Result<PathBuf> {
         ..Default::default()
     };
     let oci = oci_client::Client::new(client_config);
-    let wasm_client = oci_wasm::WasmClient::new(oci);
-
     let auth = oci_client::secrets::RegistryAuth::Anonymous;
-    let image_data = wasm_client
-        .pull(&oci_ref, &auth)
-        .await
-        .with_context(|| format!("pulling from OCI: {reference}"))?;
 
-    // oci-wasm 0.4 guarantees exactly one layer; take it directly
-    let bytes = image_data
+    // Pull manifest to find the wasm layer descriptor
+    let (manifest, _digest) = oci
+        .pull_image_manifest(&oci_ref, &auth)
+        .await
+        .with_context(|| format!("pulling manifest from OCI: {reference}"))?;
+
+    let layer = manifest
         .layers
-        .into_iter()
-        .next()
-        .context("no wasm layer found in OCI artifact")?
-        .data;
+        .first()
+        .context("no layers in OCI manifest")?;
 
-    tracing::info!(size = bytes.len(), "Pulled component from OCI");
+    let total = if layer.size > 0 {
+        Some(layer.size as u64)
+    } else {
+        None
+    };
+    let pb = make_progress_bar(total, reference);
 
-    tokio::fs::write(&cached, &bytes)
+    // Stream the layer blob to cache file
+    let sized_stream = oci
+        .pull_blob_stream(&oci_ref, layer)
         .await
-        .with_context(|| format!("writing cache file: {}", cached.display()))?;
+        .with_context(|| format!("streaming blob from OCI: {reference}"))?;
+
+    let mut file = tokio::fs::File::create(&cached)
+        .await
+        .with_context(|| format!("creating cache file: {}", cached.display()))?;
+
+    let mut stream = sized_stream.stream;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.with_context(|| format!("reading OCI blob: {reference}"))?;
+        file.write_all(&chunk).await?;
+        pb.inc(chunk.len() as u64);
+    }
+    file.flush().await?;
+
+    pb.finish_with_message("done");
     Ok(cached)
 }
 
