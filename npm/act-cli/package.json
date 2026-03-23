@@ -1,5 +1,5 @@
 {
-  "name": "act-cli",
+  "name": "@actcore/act",
   "version": "0.0.0",
   "description": "CLI host for ACT (Agent Component Tools) WebAssembly components",
   "license": "MIT OR Apache-2.0",
