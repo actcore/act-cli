@@ -15,6 +15,7 @@ dependencies = [
  "dirs",
  "serde",
  "serde_json",
+ "serde_with",
  "shellexpand",
  "tempfile",
  "tokio",
