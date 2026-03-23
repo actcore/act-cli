@@ -25,6 +25,9 @@ jobs:
           - name: musllinux-aarch64
             target: aarch64-unknown-linux-musl
             manylinux: musllinux_1_2
+          - name: musllinux-riscv64
+            target: riscv64gc-unknown-linux-musl
+            manylinux: musllinux_1_2
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v5
