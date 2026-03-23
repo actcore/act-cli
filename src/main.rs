@@ -2,6 +2,7 @@ mod config;
 mod format;
 mod http;
 mod mcp;
+mod resolve;
 mod runtime;
 
 use act_types::cbor;
@@ -46,8 +47,8 @@ enum OutputFormat {
 enum Cli {
     /// Load a .wasm component and serve it (HTTP or MCP)
     Run {
-        /// Path to the .wasm component file
-        component: PathBuf,
+        /// Component reference (path, URL, OCI ref, or name)
+        component: String,
 
         /// Serve over MCP stdio instead of HTTP
         #[arg(long)]
@@ -62,8 +63,8 @@ enum Cli {
     },
     /// Call a tool directly and print the result
     Call {
-        /// Path to the .wasm component file
-        component: PathBuf,
+        /// Component reference (path, URL, OCI ref, or name)
+        component: String,
 
         /// Tool name to call
         tool: String,
@@ -77,8 +78,8 @@ enum Cli {
     },
     /// Show component info and optionally list tools
     Info {
-        /// Path to the .wasm component file
-        component: PathBuf,
+        /// Component reference (path, URL, OCI ref, or name)
+        component: String,
 
         /// Instantiate component and list tools with full metadata
         #[arg(short, long)]
@@ -210,8 +211,14 @@ fn resolve_opts(
     Ok((config_file, fs_config, metadata))
 }
 
+/// Parse and resolve a component reference string to a local path.
+async fn resolve_component(component: &str) -> Result<PathBuf> {
+    let component_ref = component.parse::<resolve::ComponentRef>().unwrap();
+    resolve::resolve(&component_ref, false).await
+}
+
 async fn cmd_run(
-    component_path: PathBuf,
+    component: String,
     mcp: bool,
     listen: Option<SocketAddr>,
     opts: CommonOpts,
@@ -224,6 +231,7 @@ async fn cmd_run(
         // Run MCP stdio server
         let (_config, mut fs_config, metadata_value) = resolve_opts(&opts)?;
 
+        let component_path = resolve_component(&component).await?;
         let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
         let component_info = runtime::read_component_info(&wasm_bytes)?;
         let mount_root = component_info
@@ -265,6 +273,7 @@ async fn cmd_run(
             cli_listen
         };
 
+        let component_path = resolve_component(&component).await?;
         let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
         let component_info = runtime::read_component_info(&wasm_bytes)?;
         let mount_root = component_info
@@ -316,14 +325,10 @@ async fn cmd_run(
     }
 }
 
-async fn cmd_call(
-    component_path: PathBuf,
-    tool: String,
-    args: String,
-    opts: CommonOpts,
-) -> Result<()> {
+async fn cmd_call(component: String, tool: String, args: String, opts: CommonOpts) -> Result<()> {
     let (_config, mut fs_config, metadata_value) = resolve_opts(&opts)?;
 
+    let component_path = resolve_component(&component).await?;
     let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
     let component_info = runtime::read_component_info(&wasm_bytes)?;
     let mount_root = component_info
@@ -396,11 +401,12 @@ async fn cmd_call(
 }
 
 async fn cmd_info(
-    component_path: PathBuf,
+    component: String,
     show_tools: bool,
     output_format: OutputFormat,
     opts: CommonOpts,
 ) -> Result<()> {
+    let component_path = resolve_component(&component).await?;
     // Always read component info from custom section (no instantiation needed)
     let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
     let component_info = runtime::read_component_info(&wasm_bytes)?;
@@ -493,12 +499,42 @@ async fn cmd_info(
     Ok(())
 }
 
-async fn cmd_pull(
-    _reference: String,
-    _output: Option<PathBuf>,
-    _output_from_ref: bool,
-) -> Result<()> {
-    anyhow::bail!("not yet implemented");
+async fn cmd_pull(reference: String, output: Option<PathBuf>, output_from_ref: bool) -> Result<()> {
+    let component_ref = reference.parse::<resolve::ComponentRef>().unwrap();
+
+    // Resolve to local path (downloads to cache for remote refs)
+    // Always download fresh — pull is explicit user action
+    let cached_path = resolve::resolve(&component_ref, true).await?;
+
+    if let Some(out) = output {
+        tokio::fs::copy(&cached_path, &out)
+            .await
+            .with_context(|| format!("copying to {}", out.display()))?;
+        println!("{}", out.display());
+    } else if output_from_ref {
+        let filename = reference
+            .rsplit('/')
+            .next()
+            .unwrap_or(&reference)
+            .split(':')
+            .next()
+            .unwrap_or(&reference);
+        let filename = if filename.ends_with(".wasm") {
+            filename.to_string()
+        } else {
+            format!("{filename}.wasm")
+        };
+        let out = PathBuf::from(&filename);
+        tokio::fs::copy(&cached_path, &out)
+            .await
+            .with_context(|| format!("copying to {}", out.display()))?;
+        println!("{}", out.display());
+    } else {
+        // No output flag — print cached path
+        println!("{}", cached_path.display());
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
