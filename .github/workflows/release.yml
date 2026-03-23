@@ -31,6 +31,7 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
+          pattern: act-*
           merge-multiple: true
       - uses: actions/attest@v4
         with:
@@ -93,6 +94,7 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           path: .
+          pattern: act-linux-*-gnu
           merge-multiple: true
       - run: chmod +x act-linux-*
       - uses: docker/setup-qemu-action@v3
