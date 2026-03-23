@@ -1,0 +1,43 @@
+name: Build npm packages
+
+on:
+  workflow_call:
+
+jobs:
+  package:
+    name: npm packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Populate platform packages
+        run: |
+          cp artifacts/act-linux-x86_64       npm/@actcore/act-cli-linux-x64/act
+          cp artifacts/act-linux-aarch64       npm/@actcore/act-cli-linux-arm64/act
+          cp artifacts/act-macos-x86_64        npm/@actcore/act-cli-darwin-x64/act
+          cp artifacts/act-macos-aarch64       npm/@actcore/act-cli-darwin-arm64/act
+          cp artifacts/act-windows-x86_64.exe  npm/@actcore/act-cli-win32-x64/act.exe
+          cp artifacts/act-windows-aarch64.exe npm/@actcore/act-cli-win32-arm64/act.exe
+
+          chmod +x npm/@actcore/act-cli-linux-x64/act
+          chmod +x npm/@actcore/act-cli-linux-arm64/act
+          chmod +x npm/@actcore/act-cli-darwin-x64/act
+          chmod +x npm/@actcore/act-cli-darwin-arm64/act
+
+      - name: Pack npm packages
+        run: |
+          mkdir -p dist-npm
+          for dir in npm/@actcore/act-cli-*/; do
+            (cd "$dir" && npm pack --pack-destination ../../../dist-npm)
+          done
+          (cd npm/act-cli && npm pack --pack-destination ../../dist-npm)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-packages
+          path: dist-npm/*.tgz

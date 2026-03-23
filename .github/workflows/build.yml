@@ -21,6 +21,14 @@ jobs:
             os: ubuntu-24.04-arm
             src: act
             dest: act-linux-aarch64
+          - name: macos-x86_64
+            os: macos-13
+            src: act
+            dest: act-macos-x86_64
+          - name: macos-aarch64
+            os: macos-latest
+            src: act
+            dest: act-macos-aarch64
           - name: windows-x86_64
             os: windows-latest
             src: act.exe
@@ -46,32 +54,6 @@ jobs:
         with:
           name: ${{ matrix.dest }}
           path: ${{ matrix.dest }}
-
-  macos-universal:
-    name: Build (macos-universal)
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: moonrepo/setup-rust@v1
-        with:
-          channel: nightly
-          targets: x86_64-apple-darwin,aarch64-apple-darwin
-          bins: wit-deps-cli
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - run: wit-deps
-      - run: cargo build --release --target aarch64-apple-darwin
-      - run: cargo build --release --target x86_64-apple-darwin
-      - name: Create universal binary
-        run: |
-          lipo -create \
-            target/aarch64-apple-darwin/release/act \
-            target/x86_64-apple-darwin/release/act \
-            -output act-macos-universal
-      - uses: actions/upload-artifact@v7
-        with:
-          name: act-macos-universal
-          path: act-macos-universal
 
   zigbuild:
     name: Build (${{ matrix.name }})

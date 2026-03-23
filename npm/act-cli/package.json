@@ -1,0 +1,24 @@
+{
+  "name": "act-cli",
+  "version": "0.2.0",
+  "description": "CLI host for ACT (Agent Component Tools) WebAssembly components",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/actcore/act-cli"
+  },
+  "homepage": "https://actcore.dev",
+  "keywords": ["act", "wasm", "component-model", "mcp", "agent"],
+  "bin": {
+    "act": "bin/act"
+  },
+  "files": ["bin"],
+  "optionalDependencies": {
+    "@actcore/act-cli-linux-x64": "0.2.0",
+    "@actcore/act-cli-linux-arm64": "0.2.0",
+    "@actcore/act-cli-darwin-x64": "0.2.0",
+    "@actcore/act-cli-darwin-arm64": "0.2.0",
+    "@actcore/act-cli-win32-x64": "0.2.0",
+    "@actcore/act-cli-win32-arm64": "0.2.0"
+  }
+}

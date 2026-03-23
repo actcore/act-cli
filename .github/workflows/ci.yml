@@ -60,3 +60,7 @@ jobs:
   build-pypi:
     needs: [check, fmt]
     uses: ./.github/workflows/build-pypi.yml
+
+  build-npm:
+    needs: build
+    uses: ./.github/workflows/build-npm.yml

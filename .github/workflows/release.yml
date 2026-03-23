@@ -17,6 +17,10 @@ jobs:
   build-pypi:
     uses: ./.github/workflows/build-pypi.yml
 
+  build-npm:
+    needs: build
+    uses: ./.github/workflows/build-npm.yml
+
   release:
     name: GitHub Release
     needs: build
@@ -52,3 +56,25 @@ jobs:
           merge-multiple: true
           path: dist
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  npm-publish:
+    name: Publish to npm
+    needs: build-npm
+    runs-on: ubuntu-latest
+    environment: npm
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-packages
+          path: dist-npm
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - name: Publish all packages
+        run: |
+          for pkg in dist-npm/*.tgz; do
+            npm publish "$pkg" --access public
+          done
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

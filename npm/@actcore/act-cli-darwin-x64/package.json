@@ -1,0 +1,13 @@
+{
+  "name": "@actcore/act-cli-darwin-x64",
+  "version": "0.2.0",
+  "description": "act-cli binary for darwin-x64",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/actcore/act-cli"
+  },
+  "os": ["darwin"],
+  "cpu": ["x64"],
+  "files": ["act*"]
+}
