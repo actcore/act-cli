@@ -1,9 +1,9 @@
-FROM rust:slim-trixie AS builder
-RUN cargo install wit-deps-cli
-WORKDIR /src
-COPY . .
-RUN wit-deps && cargo build --release
+FROM scratch AS bins
+COPY act-linux-x86_64-gnu /linux/amd64/act
+COPY act-linux-aarch64-gnu /linux/arm64/act
+COPY act-linux-riscv64-gnu /linux/riscv64/act
 
 FROM gcr.io/distroless/cc-debian13:nonroot
-COPY --from=builder /src/target/release/act /usr/local/bin/act
+ARG TARGETPLATFORM
+COPY --from=bins /${TARGETPLATFORM}/act /usr/local/bin/act
 ENTRYPOINT ["act"]
