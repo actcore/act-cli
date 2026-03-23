@@ -71,14 +71,14 @@ jobs:
         with:
           name: npm-packages
           path: dist-npm
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: "22"
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
       - name: Publish all packages with provenance
         run: |
           for pkg in dist-npm/*.tgz; do
-            npm publish "$pkg" --access public --provenance
+            npm publish "$pkg" --access public
           done
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
