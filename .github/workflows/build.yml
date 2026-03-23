@@ -14,7 +14,7 @@ jobs:
       matrix:
         include:
           - name: macos-x86_64
-            os: macos-26
+            os: macos-26-intel
             src: act
             dest: act-macos-x86_64
           - name: macos-aarch64
