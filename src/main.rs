@@ -211,11 +211,54 @@ fn resolve_opts(
     Ok((config_file, fs_config, metadata))
 }
 
-/// Parse and resolve a component reference string to a local path.
-async fn resolve_component(component: &str) -> Result<PathBuf> {
-    let component_ref = component.parse::<resolve::ComponentRef>().unwrap();
-    resolve::resolve(&component_ref, false).await
+// ── Common component setup ───────────────────────────────────────────────────
+
+/// A fully loaded and instantiated component, ready for tool calls.
+struct PreparedComponent {
+    info: runtime::ComponentInfo,
+    handle: runtime::ComponentHandle,
+    metadata: runtime::Metadata,
 }
+
+/// Resolve, load, and instantiate a component. Returns a running actor handle.
+async fn prepare_component(component: &str, opts: &CommonOpts) -> Result<PreparedComponent> {
+    let (_config, mut fs_config, metadata_value) = resolve_opts(opts)?;
+
+    let component_ref = component.parse::<resolve::ComponentRef>().unwrap();
+    let component_path = resolve::resolve(&component_ref, false).await?;
+    let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
+    let info = runtime::read_component_info(&wasm_bytes)?;
+
+    let mount_root = info
+        .metadata
+        .get(act_types::constants::COMPONENT_FS_MOUNT_ROOT)
+        .and_then(|v| v.as_str())
+        .unwrap_or("/");
+    config::apply_mount_root(&mut fs_config, mount_root);
+    runtime::warn_missing_capabilities(&info, &fs_config);
+
+    let metadata: runtime::Metadata = metadata_value
+        .as_ref()
+        .map(|v| runtime::Metadata::from(v.clone()))
+        .unwrap_or_default();
+
+    let engine = runtime::create_engine()?;
+    let wasm = runtime::load_component(&engine, &component_path)?;
+    let linker = runtime::create_linker(&engine)?;
+    let (instance, store) =
+        runtime::instantiate_component(&engine, &wasm, &linker, &fs_config).await?;
+    let handle = runtime::spawn_component_actor(instance, store);
+
+    tracing::info!(name = %info.name, version = %info.version, "Loaded component");
+
+    Ok(PreparedComponent {
+        info,
+        handle,
+        metadata,
+    })
+}
+
+// ── Commands ─────────────────────────────────────────────────────────────────
 
 async fn cmd_run(
     component: String,
@@ -228,138 +271,44 @@ async fn cmd_run(
     }
 
     if mcp {
-        // Run MCP stdio server
-        let (_config, mut fs_config, metadata_value) = resolve_opts(&opts)?;
+        let pc = prepare_component(&component, &opts).await?;
+        return mcp::run_stdio(pc.info, pc.handle, pc.metadata).await;
+    }
 
-        let component_path = resolve_component(&component).await?;
-        let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
-        let component_info = runtime::read_component_info(&wasm_bytes)?;
-        let mount_root = component_info
-            .metadata
-            .get(act_types::constants::COMPONENT_FS_MOUNT_ROOT)
-            .and_then(|v| v.as_str())
-            .unwrap_or("/");
-        config::apply_mount_root(&mut fs_config, mount_root);
-        runtime::warn_missing_capabilities(&component_info, &fs_config);
-
-        let metadata_kv: runtime::Metadata = metadata_value
-            .as_ref()
-            .map(|v| runtime::Metadata::from(v.clone()))
-            .unwrap_or_default();
-
-        let engine = runtime::create_engine()?;
-        let component = runtime::load_component(&engine, &component_path)?;
-        let linker = runtime::create_linker(&engine)?;
-        let (instance, store) =
-            runtime::instantiate_component(&engine, &component, &linker, &fs_config).await?;
-
-        tracing::info!(
-            name = %component_info.name,
-            version = %component_info.version,
-            "Loaded component (MCP stdio)"
-        );
-
-        let component_handle = runtime::spawn_component_actor(instance, store);
-
-        mcp::run_stdio(component_info, component_handle, metadata_kv).await
-    } else if let Some(cli_listen) = listen {
-        // Run HTTP server
-        let (config, mut fs_config, metadata_value) = resolve_opts(&opts)?;
-
-        // Resolve listen address: CLI flag > config file > default
-        let addr: SocketAddr = {
-            // cli_listen is already the resolved address from the flag
-            let _ = config; // config.listen is a fallback, but CLI flag takes priority
-            cli_listen
-        };
-
-        let component_path = resolve_component(&component).await?;
-        let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
-        let component_info = runtime::read_component_info(&wasm_bytes)?;
-        let mount_root = component_info
-            .metadata
-            .get(act_types::constants::COMPONENT_FS_MOUNT_ROOT)
-            .and_then(|v| v.as_str())
-            .unwrap_or("/");
-        config::apply_mount_root(&mut fs_config, mount_root);
-        runtime::warn_missing_capabilities(&component_info, &fs_config);
-
-        let resolved_metadata: runtime::Metadata = metadata_value
-            .as_ref()
-            .map(|v| runtime::Metadata::from(v.clone()))
-            .unwrap_or_default();
-
-        let engine = runtime::create_engine()?;
-        let component = runtime::load_component(&engine, &component_path)?;
-        let linker = runtime::create_linker(&engine)?;
-
-        let (instance, store) =
-            runtime::instantiate_component(&engine, &component, &linker, &fs_config).await?;
-
-        tracing::info!(
-            name = %component_info.name,
-            version = %component_info.version,
-            "Loaded component"
-        );
-
-        let component_handle = runtime::spawn_component_actor(instance, store);
+    if let Some(addr) = listen {
+        let pc = prepare_component(&component, &opts).await?;
 
         let state = Arc::new(http::AppState {
-            info: component_info,
-            component: component_handle,
-            metadata: resolved_metadata,
+            info: pc.info,
+            component: pc.handle,
+            metadata: pc.metadata,
         });
 
-        tracing::info!(%addr, component = %component_path.display(), "ACT host listening");
+        tracing::info!(%addr, "ACT host listening");
 
         let listener = tokio::net::TcpListener::bind(addr).await?;
         axum::serve(listener, http::create_router(state))
             .await
             .context("server error")?;
-
-        Ok(())
-    } else {
-        anyhow::bail!(
-            "ACT stdio not yet implemented. Use --listen to serve over HTTP or --mcp for MCP stdio."
-        );
+        return Ok(());
     }
+
+    anyhow::bail!(
+        "ACT stdio not yet implemented. Use --listen to serve over HTTP or --mcp for MCP stdio."
+    )
 }
 
 async fn cmd_call(component: String, tool: String, args: String, opts: CommonOpts) -> Result<()> {
-    let (_config, mut fs_config, metadata_value) = resolve_opts(&opts)?;
-
-    let component_path = resolve_component(&component).await?;
-    let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
-    let component_info = runtime::read_component_info(&wasm_bytes)?;
-    let mount_root = component_info
-        .metadata
-        .get(act_types::constants::COMPONENT_FS_MOUNT_ROOT)
-        .and_then(|v| v.as_str())
-        .unwrap_or("/");
-    config::apply_mount_root(&mut fs_config, mount_root);
-    runtime::warn_missing_capabilities(&component_info, &fs_config);
-
-    let metadata_kv: runtime::Metadata = metadata_value
-        .as_ref()
-        .map(|v| runtime::Metadata::from(v.clone()))
-        .unwrap_or_default();
+    let pc = prepare_component(&component, &opts).await?;
 
     let arguments: serde_json::Value =
         serde_json::from_str(&args).context("invalid --args JSON")?;
     let cbor_args = cbor::json_to_cbor(&arguments).context("encoding args as CBOR")?;
 
-    let engine = runtime::create_engine()?;
-    let component = runtime::load_component(&engine, &component_path)?;
-    let linker = runtime::create_linker(&engine)?;
-    let (instance, store) =
-        runtime::instantiate_component(&engine, &component, &linker, &fs_config).await?;
-
-    let component_handle = runtime::spawn_component_actor(instance, store);
-
     let tool_call = runtime::act::core::types::ToolCall {
         name: tool,
         arguments: cbor_args,
-        metadata: metadata_kv.clone().into(),
+        metadata: pc.metadata.clone().into(),
     };
 
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
@@ -368,7 +317,7 @@ async fn cmd_call(component: String, tool: String, args: String, opts: CommonOpt
         reply: reply_tx,
     };
 
-    component_handle
+    pc.handle
         .send(request)
         .await
         .map_err(|_| anyhow::anyhow!("component actor unavailable"))?;
@@ -406,40 +355,20 @@ async fn cmd_info(
     output_format: OutputFormat,
     opts: CommonOpts,
 ) -> Result<()> {
-    let component_path = resolve_component(&component).await?;
-    // Always read component info from custom section (no instantiation needed)
+    // Without --tools: just read custom section, no instantiation
+    let component_ref = component.parse::<resolve::ComponentRef>().unwrap();
+    let component_path = resolve::resolve(&component_ref, false).await?;
     let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
     let component_info = runtime::read_component_info(&wasm_bytes)?;
 
     let (metadata_schema, tools) = if show_tools {
-        let (_config, mut fs_config, metadata_value) = resolve_opts(&opts)?;
-
-        let mount_root = component_info
-            .metadata
-            .get(act_types::constants::COMPONENT_FS_MOUNT_ROOT)
-            .and_then(|v| v.as_str())
-            .unwrap_or("/");
-        config::apply_mount_root(&mut fs_config, mount_root);
-        runtime::warn_missing_capabilities(&component_info, &fs_config);
-
-        let metadata_kv: runtime::Metadata = metadata_value
-            .as_ref()
-            .map(|v| runtime::Metadata::from(v.clone()))
-            .unwrap_or_default();
-
-        let engine = runtime::create_engine()?;
-        let component = runtime::load_component(&engine, &component_path)?;
-        let linker = runtime::create_linker(&engine)?;
-        let (instance, store) =
-            runtime::instantiate_component(&engine, &component, &linker, &fs_config).await?;
-
-        let component_handle = runtime::spawn_component_actor(instance, store);
+        let pc = prepare_component(&component, &opts).await?;
 
         // Get metadata schema
         let (schema_tx, schema_rx) = tokio::sync::oneshot::channel();
-        component_handle
+        pc.handle
             .send(runtime::ComponentRequest::GetMetadataSchema {
-                metadata: metadata_kv.clone(),
+                metadata: pc.metadata.clone(),
                 reply: schema_tx,
             })
             .await
@@ -460,9 +389,9 @@ async fn cmd_info(
 
         // List tools
         let (tools_tx, tools_rx) = tokio::sync::oneshot::channel();
-        component_handle
+        pc.handle
             .send(runtime::ComponentRequest::ListTools {
-                metadata: metadata_kv,
+                metadata: pc.metadata,
                 reply: tools_tx,
             })
             .await
@@ -492,7 +421,7 @@ async fn cmd_info(
         OutputFormat::Text => print!("{}", format::to_text(&data)),
         OutputFormat::Json => {
             let json = format::to_json(&data)?;
-            println!("{}", json);
+            println!("{json}");
         }
     }
 
