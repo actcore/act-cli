@@ -13,14 +13,6 @@ jobs:
     strategy:
       matrix:
         include:
-          - name: linux-x86_64
-            os: ubuntu-latest
-            src: act
-            dest: act-linux-x86_64
-          - name: linux-aarch64
-            os: ubuntu-24.04-arm
-            src: act
-            dest: act-linux-aarch64
           - name: macos-x86_64
             os: macos-13
             src: act
@@ -61,12 +53,16 @@ jobs:
     strategy:
       matrix:
         include:
+          - name: linux-x86_64-gnu
+            target: x86_64-unknown-linux-gnu
+          - name: linux-aarch64-gnu
+            target: aarch64-unknown-linux-gnu
+          - name: linux-riscv64-gnu
+            target: riscv64gc-unknown-linux-gnu
           - name: linux-x86_64-musl
             target: x86_64-unknown-linux-musl
           - name: linux-aarch64-musl
             target: aarch64-unknown-linux-musl
-          - name: linux-riscv64-gnu
-            target: riscv64gc-unknown-linux-gnu
           - name: linux-riscv64-musl
             target: riscv64gc-unknown-linux-musl
     steps:
