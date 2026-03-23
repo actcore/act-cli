@@ -7,6 +7,7 @@ const os = require("os");
 const PLATFORMS = {
   "linux-x64": "@actcore/act-cli-linux-x64",
   "linux-arm64": "@actcore/act-cli-linux-arm64",
+  "linux-riscv64": "@actcore/act-cli-linux-riscv64",
   "darwin-x64": "@actcore/act-cli-darwin-x64",
   "darwin-arm64": "@actcore/act-cli-darwin-arm64",
   "win32-x64": "@actcore/act-cli-win32-x64",

@@ -17,8 +17,9 @@ jobs:
 
       - name: Populate platform packages
         run: |
-          cp artifacts/act-linux-x86_64-gnu    npm/@actcore/act-cli-linux-x64/act
-          cp artifacts/act-linux-aarch64-gnu   npm/@actcore/act-cli-linux-arm64/act
+          cp artifacts/act-linux-x86_64-musl    npm/@actcore/act-cli-linux-x64/act
+          cp artifacts/act-linux-aarch64-musl   npm/@actcore/act-cli-linux-arm64/act
+          cp artifacts/act-linux-riscv64-musl   npm/@actcore/act-cli-linux-riscv64/act
           cp artifacts/act-macos-x86_64        npm/@actcore/act-cli-darwin-x64/act
           cp artifacts/act-macos-aarch64       npm/@actcore/act-cli-darwin-arm64/act
           cp artifacts/act-windows-x86_64.exe  npm/@actcore/act-cli-win32-x64/act.exe
@@ -26,6 +27,7 @@ jobs:
 
           chmod +x npm/@actcore/act-cli-linux-x64/act
           chmod +x npm/@actcore/act-cli-linux-arm64/act
+          chmod +x npm/@actcore/act-cli-linux-riscv64/act
           chmod +x npm/@actcore/act-cli-darwin-x64/act
           chmod +x npm/@actcore/act-cli-darwin-arm64/act
 

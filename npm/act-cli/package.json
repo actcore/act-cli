@@ -16,6 +16,7 @@
   "optionalDependencies": {
     "@actcore/act-cli-linux-x64": "0.2.0",
     "@actcore/act-cli-linux-arm64": "0.2.0",
+    "@actcore/act-cli-linux-riscv64": "0.2.0",
     "@actcore/act-cli-darwin-x64": "0.2.0",
     "@actcore/act-cli-darwin-arm64": "0.2.0",
     "@actcore/act-cli-win32-x64": "0.2.0",
