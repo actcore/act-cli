@@ -19,9 +19,10 @@ runs:
       shell: bash
       run: |
         case "${{ runner.os }}-${{ runner.arch }}" in
-          Linux-X64)   echo "asset=act-linux-x86_64" >> "$GITHUB_OUTPUT" ;;
-          Linux-ARM64) echo "asset=act-linux-aarch64" >> "$GITHUB_OUTPUT" ;;
-          macOS-*)     echo "asset=act-macos-universal" >> "$GITHUB_OUTPUT" ;;
+          Linux-X64)   echo "asset=act-linux-x86_64-gnu" >> "$GITHUB_OUTPUT" ;;
+          Linux-ARM64) echo "asset=act-linux-aarch64-gnu" >> "$GITHUB_OUTPUT" ;;
+          macOS-X64)   echo "asset=act-macos-x86_64" >> "$GITHUB_OUTPUT" ;;
+          macOS-ARM64) echo "asset=act-macos-aarch64" >> "$GITHUB_OUTPUT" ;;
           Windows-X64)   echo "asset=act-windows-x86_64.exe" >> "$GITHUB_OUTPUT" ;;
           Windows-ARM64) echo "asset=act-windows-aarch64.exe" >> "$GITHUB_OUTPUT" ;;
           *) echo "::error::Unsupported platform: ${{ runner.os }}-${{ runner.arch }}" && exit 1 ;;
