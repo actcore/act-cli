@@ -104,7 +104,7 @@ jobs:
           registry-url: "https://registry.npmjs.org"
       - name: Publish all packages with provenance
         run: |
-          for pkg in dist-npm/*.tgz; do
+          for pkg in ./dist-npm/*.tgz; do
             npm publish "$pkg" --access public
           done
         env:
