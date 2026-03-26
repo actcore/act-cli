@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-03-26
+
+### Added
+
+- Component references: all commands now accept HTTP/S URLs, OCI registry refs, and local paths (not just file paths). Remote components are cached in `~/.cache/act/components/`
+- `act pull` command to download components from OCI registries or HTTP URLs with `-o`/`-O` flags
+- `act info --tools --format text|json` for rich component introspection showing `std:skill`, metadata schema, tool annotations, usage hints, and tags
+- Progress bars (indicatif) for HTTP and OCI downloads
+- CycloneDX SBOM generation and attestation in release workflow
+
+### Changed
+
+- **Breaking:** CLI commands restructured — `serve` → `run -l`, `mcp` → `run --mcp`, `tools` → `info --tools`. Old commands removed.
+- `act info` now shows `--format text` (markdown-like, default) or `--format json` (machine-readable)
+
+### Fixed
+
+- macOS setup action now uses separate x86_64/aarch64 binaries instead of removed universal binary
+
 ## [0.2.0] - 2026-03-18
 
 ### Added
