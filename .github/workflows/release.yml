@@ -22,9 +22,26 @@ jobs:
     needs: build
     uses: ./.github/workflows/build-npm.yml
 
+  sbom:
+    name: Generate SBOM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-cyclonedx
+        uses: taiki-e/cache-cargo-install-action@v3
+        with:
+          tool: cargo-cyclonedx
+      - name: Generate CycloneDX SBOM
+        run: cargo cyclonedx -f json --target all
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: "**/*.cdx.json"
+
   release:
     name: GitHub Release
-    needs: build
+    needs: [build, sbom]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -33,12 +50,22 @@ jobs:
           path: artifacts
           pattern: act-*
           merge-multiple: true
-      - uses: actions/attest@v4
+      - uses: actions/download-artifact@v8
+        with:
+          name: sbom
+          path: sbom
+      - name: Attest build provenance
+        uses: actions/attest@v4
         with:
           subject-path: artifacts/act-*
+      - name: Attest SBOM
+        uses: actions/attest@v4
+        with:
+          subject-path: artifacts/act-*
+          sbom-path: sbom/act-cli/act-cli.cdx.json
       - name: Create GitHub Release
         run: |
-          gh release create ${{ github.ref_name }} artifacts/act-* \
+          gh release create ${{ github.ref_name }} artifacts/act-* sbom/**/*.cdx.json \
             --title "${{ github.ref_name }}" \
             --generate-notes
         env:
