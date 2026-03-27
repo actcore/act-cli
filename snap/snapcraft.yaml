@@ -1,0 +1,42 @@
+name: act-cli
+base: core26
+version: git
+summary: CLI host for ACT WebAssembly components
+description: |
+  ACT (Agent Component Tools) CLI loads WebAssembly components and serves
+  them over MCP stdio, ACT-HTTP, or as one-shot CLI calls. Supports local
+  paths, HTTP URLs, and OCI registry references.
+license: MIT OR Apache-2.0
+
+build-base: devel
+grade: devel
+
+confinement: classic
+
+platforms:
+  amd64:
+  arm64:
+  riscv64:
+
+parts:
+  act:
+    plugin: rust
+    source: .
+    rust-channel: stable
+    build-packages:
+      - git
+    override-build: |
+      # Fetch WIT dependencies
+      cargo install wit-deps-cli
+      wit-deps
+      craftctl default
+    build-attributes:
+      - enable-patchelf
+
+apps:
+  act:
+    command: bin/act
+    plugs:
+      - network
+      - network-bind
+      - home
