@@ -36,7 +36,3 @@ parts:
 apps:
   act:
     command: bin/act
-    plugs:
-      - network
-      - network-bind
-      - home
