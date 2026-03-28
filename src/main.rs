@@ -127,8 +127,8 @@ async fn main() -> Result<()> {
             .ok()
             .and_then(|c| c.log_level);
         let directive = match log_level.as_deref() {
-            Some(level) => format!("act_cli={level}"),
-            None => "act_cli=info".to_string(),
+            Some(level) => format!("act={level}"),
+            None => "act=info".to_string(),
         };
         directive.parse().expect("valid log filter")
     };
@@ -242,6 +242,13 @@ async fn prepare_component(component: &str, opts: &CommonOpts) -> Result<Prepare
         .map(|v| runtime::Metadata::from(v.clone()))
         .unwrap_or_default();
 
+    tracing::info!(
+        name = %info.name,
+        version = %info.version,
+        path = %component_path.display(),
+        "Loading component"
+    );
+
     let engine = runtime::create_engine()?;
     let wasm = runtime::load_component(&engine, &component_path)?;
     let linker = runtime::create_linker(&engine)?;
@@ -249,7 +256,7 @@ async fn prepare_component(component: &str, opts: &CommonOpts) -> Result<Prepare
         runtime::instantiate_component(&engine, &wasm, &linker, &fs_config).await?;
     let handle = runtime::spawn_component_actor(instance, store);
 
-    tracing::info!(name = %info.name, version = %info.version, "Loaded component");
+    tracing::info!(name = %info.name, version = %info.version, "Component ready");
 
     Ok(PreparedComponent {
         info,

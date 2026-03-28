@@ -31,7 +31,7 @@ pub enum ComponentRef {
 /// Registry host must contain a dot or be `localhost`.
 static OCI_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"^(?:localhost(?::\d+)?|[a-zA-Z0-9][\w.-]*\.[a-zA-Z]{2,}(?::\d+)?)/[a-zA-Z0-9][\w./-]*(?::[a-zA-Z][\w.-]*|@sha256:[a-fA-F0-9]+)?$"
+        r"^(?:localhost(?::\d+)?|[a-zA-Z0-9][\w.-]*\.[a-zA-Z]{2,}(?::\d+)?)/[a-zA-Z0-9][\w./-]*(?::[\w][\w.-]*|@sha256:[a-fA-F0-9]+)?$"
     ).unwrap()
 });
 
@@ -112,6 +112,7 @@ async fn cache_path(input: &str) -> Result<PathBuf> {
 /// If `fresh` is true, bypass cache and re-download.
 /// Returns the path to the .wasm file.
 pub async fn resolve(component_ref: &ComponentRef, fresh: bool) -> Result<PathBuf> {
+    tracing::info!(ref = %component_ref, "Resolving component");
     match component_ref {
         ComponentRef::Local(path) => {
             anyhow::ensure!(
@@ -119,6 +120,7 @@ pub async fn resolve(component_ref: &ComponentRef, fresh: bool) -> Result<PathBu
                 "component not found: {}",
                 path.display()
             );
+            tracing::debug!(path = %path.display(), "Using local component");
             Ok(path.clone())
         }
         ComponentRef::Http(url) => resolve_http(url.as_str(), fresh).await,
@@ -162,7 +164,7 @@ fn make_progress_bar(total: Option<u64>, message: &str) -> ProgressBar {
 async fn resolve_http(url: &str, fresh: bool) -> Result<PathBuf> {
     let cached = cache_path(url).await?;
     if !fresh && tokio::fs::try_exists(&cached).await.unwrap_or(false) {
-        tracing::debug!(%url, path = %cached.display(), "Using cached component");
+        tracing::info!(%url, path = %cached.display(), "Using cached component");
         return Ok(cached);
     }
 
@@ -196,7 +198,7 @@ async fn resolve_http(url: &str, fresh: bool) -> Result<PathBuf> {
 async fn resolve_oci(reference: &str, fresh: bool) -> Result<PathBuf> {
     let cached = cache_path(reference).await?;
     if !fresh && tokio::fs::try_exists(&cached).await.unwrap_or(false) {
-        tracing::debug!(%reference, path = %cached.display(), "Using cached component");
+        tracing::info!(%reference, path = %cached.display(), "Using cached component");
         return Ok(cached);
     }
 
@@ -305,6 +307,14 @@ mod tests {
     fn parse_oci_no_tag() {
         assert!(matches!(
             parse("ghcr.io/actcore/sqlite"),
+            ComponentRef::Oci(_)
+        ));
+    }
+
+    #[test]
+    fn parse_oci_semver_tag() {
+        assert!(matches!(
+            parse("ghcr.io/actpkg/sqlite:0.1.0"),
             ComponentRef::Oci(_)
         ));
     }
