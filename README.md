@@ -1,51 +1,79 @@
-# act-cli
+# ACT CLI
 
-CLI and reference host for [ACT](../act-spec/) — loads `.wasm` ACT components and serves them over HTTP or MCP (stdio).
+CLI host for [ACT](https://actcore.dev) (Agent Component Tools) — run WebAssembly component tools from local files, HTTP URLs, or OCI registries.
 
-## Usage
+## Install
 
-```
-act serve <component.wasm> [-l [::1]:3000]
-act call <component.wasm> <tool-name> [--args '{}'] [-c '{}']
-act mcp <component.wasm> [-c '{}'] [--config-file config.json]
-act info <component.wasm>
-act tools <component.wasm> [-c '{}']
+```bash
+npm i -g @actcore/act        # npm
+pip install act-cli           # PyPI
+cargo install act-cli         # crates.io
 ```
 
-Set `RUST_LOG=act_cli=debug` for verbose output.
+Pre-built binaries available on [GitHub Releases](https://github.com/actcore/act-cli/releases) and Docker (`ghcr.io/actcore/act`).
+
+## Quick Start
+
+```bash
+# Discover tools in a component
+act info --tools ghcr.io/actpkg/sqlite:0.1.0
+
+# Call a tool
+act call ghcr.io/actpkg/sqlite:0.1.0 query \
+  --args '{"sql":"SELECT sqlite_version()"}' \
+  --metadata '{"database_path":"/data/app.db"}' \
+  --allow-dir /data:./data
+
+# Serve over HTTP
+act run -l ghcr.io/actpkg/sqlite:0.1.0
+
+# Serve over MCP stdio
+act run --mcp ghcr.io/actpkg/sqlite:0.1.0
+```
+
+Components can be referenced as:
+- **OCI refs:** `ghcr.io/actpkg/sqlite:0.1.0`
+- **HTTP URLs:** `https://example.com/component.wasm`
+- **Local paths:** `./component.wasm`
+
+Remote components are cached in `~/.cache/act/components/`.
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `serve` | Start ACT-HTTP server for a component |
+| `run`   | Serve a component over ACT-HTTP (`-l`) or MCP stdio (`--mcp`) |
 | `call`  | Call a tool directly, print result to stdout |
-| `mcp`   | Serve component as MCP server over stdio |
-| `info`  | Show component name, version, description, capabilities |
-| `tools` | List tools exposed by a component |
+| `info`  | Show component metadata, tools, and schemas (`--tools`, `--format text\|json`) |
+| `pull`  | Download a component from OCI or HTTP to local file |
 
-## HTTP Endpoints (`serve`)
+## HTTP Endpoints (`run -l`)
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/info` | Component metadata |
-| `GET` | `/config-schema` | JSON Schema for config (204 if none) |
-| `GET` | `/tools` | List tools |
-| `POST` | `/tools/{name}` | Call a tool |
+| `POST` | `/metadata-schema` | JSON Schema for metadata |
+| `POST/QUERY` | `/tools` | List tools |
+| `POST/QUERY` | `/tools/{name}` | Call a tool (SSE with `Accept: text/event-stream`) |
+
+## Platform Support
+
+| Architecture | Linux (GNU) | Linux (musl) | macOS | Windows | Docker |
+|-------------|:-----------:|:------------:|:-----:|:-------:|:------:|
+| x86_64      | ✓           | ✓            | ✓     | ✓       | ✓      |
+| aarch64     | ✓           | ✓            | ✓     | ✓       | ✓      |
+| riscv64     | ✓           | ✓            | —     | —       | ✓      |
+
+RISC-V (`riscv64`) is a first-class target. Regressions on RISC-V are release-blocking.
 
 ## Building
 
-```
+```bash
 cargo build --release
 ```
 
-## Architecture
+Set `RUST_LOG=act=debug` for verbose output.
 
-```
-main.rs     CLI (clap) → subcommands (serve, call, mcp, info, tools)
-runtime.rs  wasmtime engine, component instantiation, actor pattern
-http.rs     axum routes, ACT-HTTP request/response handling
-mcp.rs      MCP JSON-RPC over stdio
-```
+## License
 
-The host uses an actor pattern: a single tokio task owns the wasmtime `Store` and component instance, receiving requests over an mpsc channel. This ensures single-threaded access to the Wasm component while allowing concurrent HTTP handling.
+MIT OR Apache-2.0
