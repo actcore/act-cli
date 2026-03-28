@@ -44,7 +44,7 @@ jobs:
           for dir in npm/@actcore/act-cli-*/; do
             (cd "$dir" && npm pack --pack-destination ../../../dist-npm)
           done
-          (cd npm/act-cli && npm pack --pack-destination ../../dist-npm)
+          (cd npm/@actcore/act && npm pack --pack-destination ../../../dist-npm)
 
       - uses: actions/upload-artifact@v7
         with:

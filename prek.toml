@@ -1,6 +1,7 @@
 [[repos]]
 repo = "builtin"
 hooks = [
+    { id = "check-json" },
     { id = "check-yaml" },
     { id = "check-toml" },
     { id = "end-of-file-fixer" },

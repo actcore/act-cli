@@ -8,7 +8,7 @@
     "url": "https://github.com/actcore/act-cli"
   },
   "homepage": "https://actcore.dev",
-  "keywords": ["act", "wasm", "component-model", "mcp", "agent"],
+  "keywords": ["act", "agent-component-tools", "wasm", "component-model", "mcp", "agent", "agent-tools"],
   "bin": {
     "act": "bin/act"
   },
