@@ -50,13 +50,17 @@ enum Cli {
         /// Component reference (path, URL, OCI ref, or name)
         component: String,
 
-        /// Serve over MCP stdio instead of HTTP
+        /// Serve over MCP stdio
         #[arg(long)]
         mcp: bool,
 
-        /// Address to listen on (host:port). Default: [::1]:3000
-        #[arg(short, long, num_args = 0..=1, default_missing_value = "[::1]:3000")]
-        listen: Option<SocketAddr>,
+        /// Serve over ACT-HTTP
+        #[arg(long)]
+        http: bool,
+
+        /// Listen address: [host]:port or just port (default: [::1]:3000)
+        #[arg(short, long)]
+        listen: Option<String>,
 
         #[command(flatten)]
         opts: CommonOpts,
@@ -142,9 +146,10 @@ async fn main() -> Result<()> {
         Cli::Run {
             component,
             mcp,
+            http,
             listen,
             opts,
-        } => cmd_run(component, mcp, listen, opts).await,
+        } => cmd_run(component, mcp, http, listen, opts).await,
         Cli::Call {
             component,
             tool,
@@ -267,14 +272,28 @@ async fn prepare_component(component: &str, opts: &CommonOpts) -> Result<Prepare
 
 // ── Commands ─────────────────────────────────────────────────────────────────
 
+/// Parse a listen address: either `[host]:port` or just a port number.
+fn parse_listen_addr(s: &str) -> Result<SocketAddr> {
+    // Try as full socket address first
+    if let Ok(addr) = s.parse::<SocketAddr>() {
+        return Ok(addr);
+    }
+    // Try as port number
+    if let Ok(port) = s.parse::<u16>() {
+        return Ok(SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], port)));
+    }
+    anyhow::bail!("invalid listen address: {s} (expected [host]:port or port number)")
+}
+
 async fn cmd_run(
     component: String,
     mcp: bool,
-    listen: Option<SocketAddr>,
+    http: bool,
+    listen: Option<String>,
     opts: CommonOpts,
 ) -> Result<()> {
-    if mcp && listen.is_some() {
-        anyhow::bail!("MCP over HTTP not yet supported");
+    if mcp && http {
+        anyhow::bail!("--mcp and --http are mutually exclusive");
     }
 
     if mcp {
@@ -282,7 +301,12 @@ async fn cmd_run(
         return mcp::run_stdio(pc.info, pc.handle, pc.metadata).await;
     }
 
-    if let Some(addr) = listen {
+    if http || listen.is_some() {
+        let addr = match &listen {
+            Some(s) => parse_listen_addr(s)?,
+            None => "[::1]:3000".parse().unwrap(),
+        };
+
         let pc = prepare_component(&component, &opts).await?;
 
         let state = Arc::new(http::AppState {
@@ -300,9 +324,7 @@ async fn cmd_run(
         return Ok(());
     }
 
-    anyhow::bail!(
-        "ACT stdio not yet implemented. Use --listen to serve over HTTP or --mcp for MCP stdio."
-    )
+    anyhow::bail!("Specify a transport: --http (ACT-HTTP server) or --mcp (MCP stdio)")
 }
 
 async fn cmd_call(component: String, tool: String, args: String, opts: CommonOpts) -> Result<()> {
