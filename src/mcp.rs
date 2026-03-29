@@ -10,6 +10,21 @@ use anyhow::Result;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+// ── Helpers ──
+
+async fn fetch_metadata_schema(
+    handle: &runtime::ComponentHandle,
+    metadata: &runtime::Metadata,
+) -> Option<String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let req = runtime::ComponentRequest::GetMetadataSchema {
+        metadata: metadata.clone(),
+        reply: tx,
+    };
+    handle.send(req).await.ok()?;
+    rx.await.ok()?.ok()?
+}
+
 // ── Stdio loop ──
 
 pub async fn run_stdio(
@@ -17,6 +32,9 @@ pub async fn run_stdio(
     handle: runtime::ComponentHandle,
     metadata: runtime::Metadata,
 ) -> Result<()> {
+    // Fetch metadata schema once at startup for _metadata injection in tool schemas
+    let metadata_schema = fetch_metadata_schema(&handle, &metadata).await;
+
     let stdin = BufReader::new(tokio::io::stdin());
     let mut stdout = tokio::io::stdout();
     let mut lines = stdin.lines();
@@ -36,7 +54,14 @@ pub async fn run_stdio(
             }
         };
 
-        let response = handle_request(&request, &info, &handle, &metadata).await;
+        let response = handle_request(
+            &request,
+            &info,
+            &handle,
+            &metadata,
+            metadata_schema.as_deref(),
+        )
+        .await;
         if let Some(resp) = response {
             write_response(&mut stdout, &resp).await?;
         }
@@ -60,6 +85,7 @@ async fn handle_request(
     info: &runtime::ComponentInfo,
     handle: &runtime::ComponentHandle,
     metadata: &runtime::Metadata,
+    metadata_schema: Option<&str>,
 ) -> Option<JsonRpcResponse> {
     let id = req.id.clone().unwrap_or(Value::Null);
 
@@ -67,7 +93,7 @@ async fn handle_request(
         "initialize" => Some(handle_initialize(id, info)),
         "notifications/initialized" => None,
         "ping" => Some(JsonRpcResponse::success(id, serde_json::json!({}))),
-        "tools/list" => Some(handle_tools_list(id, handle, metadata).await),
+        "tools/list" => Some(handle_tools_list(id, handle, metadata, metadata_schema).await),
         "tools/call" => Some(handle_tools_call(id, req, handle, metadata).await),
         _ => {
             if req.method.starts_with("notifications/") {
@@ -106,6 +132,7 @@ async fn handle_tools_list(
     id: Value,
     handle: &runtime::ComponentHandle,
     metadata: &runtime::Metadata,
+    metadata_schema: Option<&str>,
 ) -> JsonRpcResponse {
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     let request = runtime::ComponentRequest::ListTools {
@@ -126,8 +153,21 @@ async fn handle_tools_list(
                     let description = act_types::types::LocalizedString::from(&td.description)
                         .any_text()
                         .to_string();
-                    let input_schema: Value = serde_json::from_str(&td.parameters_schema)
+                    let mut input_schema: Value = serde_json::from_str(&td.parameters_schema)
                         .unwrap_or(serde_json::json!({"type": "object"}));
+
+                    // Inject _metadata property with actual component metadata schema
+                    if let Some(obj) = input_schema.as_object_mut() {
+                        let props = obj
+                            .entry("properties")
+                            .or_insert_with(|| serde_json::json!({}));
+                        if let Some(props) = props.as_object_mut() {
+                            let meta_schema = metadata_schema
+                                .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                                .unwrap_or_else(|| serde_json::json!({"type": "object"}));
+                            props.insert("_metadata".to_string(), meta_schema);
+                        }
+                    }
 
                     let annotations = build_annotations(&td.metadata);
 
@@ -187,7 +227,16 @@ async fn handle_tools_call(
         None => return JsonRpcResponse::error(id, -32602, "missing params"),
     };
 
-    let arguments = call_params.arguments.unwrap_or(serde_json::json!({}));
+    let mut arguments = call_params.arguments.unwrap_or(serde_json::json!({}));
+
+    // Extract _metadata from arguments for per-call metadata override
+    let mut call_metadata = metadata.clone();
+    if let Some(obj) = arguments.as_object_mut()
+        && let Some(Value::Object(extra)) = obj.remove("_metadata")
+    {
+        call_metadata.extend(Metadata::from(Value::Object(extra)));
+    }
+
     let cbor_args = match cbor::json_to_cbor(&arguments) {
         Ok(bytes) => bytes,
         Err(_) => return JsonRpcResponse::error(id, -32602, "invalid arguments"),
@@ -196,7 +245,7 @@ async fn handle_tools_call(
     let tool_call = runtime::act::core::types::ToolCall {
         name: call_params.name,
         arguments: cbor_args,
-        metadata: metadata.clone().into(),
+        metadata: call_metadata.into(),
     };
 
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
