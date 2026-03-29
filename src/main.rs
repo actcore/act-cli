@@ -6,6 +6,7 @@ mod resolve;
 mod runtime;
 
 use act_types::cbor;
+use resolve::ComponentRef;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -48,7 +49,7 @@ enum Cli {
     /// Load a .wasm component and serve it (HTTP or MCP)
     Run {
         /// Component reference (path, URL, OCI ref, or name)
-        component: String,
+        component: ComponentRef,
 
         /// Serve over MCP stdio
         #[arg(long)]
@@ -68,7 +69,7 @@ enum Cli {
     /// Call a tool directly and print the result
     Call {
         /// Component reference (path, URL, OCI ref, or name)
-        component: String,
+        component: ComponentRef,
 
         /// Tool name to call
         tool: String,
@@ -83,7 +84,7 @@ enum Cli {
     /// Show component info and optionally list tools
     Info {
         /// Component reference (path, URL, OCI ref, or name)
-        component: String,
+        component: ComponentRef,
 
         /// Instantiate component and list tools with full metadata
         #[arg(short, long)]
@@ -99,7 +100,7 @@ enum Cli {
     /// Extract embedded Agent Skills from a component
     Skill {
         /// Component reference (path, URL, OCI ref, or name)
-        component: String,
+        component: ComponentRef,
 
         /// Output directory (default: .agents/skills/<name>/)
         #[arg(short, long)]
@@ -107,9 +108,9 @@ enum Cli {
     },
     /// Pull a component from a registry
     Pull {
-        /// Registry reference (e.g. registry.example.com/name:tag)
+        /// Component reference (OCI ref, HTTP URL, or local path)
         #[arg(name = "ref")]
-        reference: String,
+        reference: ComponentRef,
 
         /// Output file path
         #[arg(short = 'o')]
@@ -236,11 +237,13 @@ struct PreparedComponent {
 }
 
 /// Resolve, load, and instantiate a component. Returns a running actor handle.
-async fn prepare_component(component: &str, opts: &CommonOpts) -> Result<PreparedComponent> {
+async fn prepare_component(
+    component: &ComponentRef,
+    opts: &CommonOpts,
+) -> Result<PreparedComponent> {
     let (_config, mut fs_config, metadata_value) = resolve_opts(opts)?;
 
-    let component_ref = component.parse::<resolve::ComponentRef>().unwrap();
-    let component_path = resolve::resolve(&component_ref, false).await?;
+    let component_path = resolve::resolve(component, false).await?;
     let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
     let info = runtime::read_component_info(&wasm_bytes)?;
 
@@ -296,7 +299,7 @@ fn parse_listen_addr(s: &str) -> Result<SocketAddr> {
 }
 
 async fn cmd_run(
-    component: String,
+    component: ComponentRef,
     mcp: bool,
     http: bool,
     listen: Option<String>,
@@ -337,7 +340,12 @@ async fn cmd_run(
     anyhow::bail!("Specify a transport: --http (ACT-HTTP server) or --mcp (MCP stdio)")
 }
 
-async fn cmd_call(component: String, tool: String, args: String, opts: CommonOpts) -> Result<()> {
+async fn cmd_call(
+    component: ComponentRef,
+    tool: String,
+    args: String,
+    opts: CommonOpts,
+) -> Result<()> {
     let pc = prepare_component(&component, &opts).await?;
 
     let arguments: serde_json::Value =
@@ -389,14 +397,13 @@ async fn cmd_call(component: String, tool: String, args: String, opts: CommonOpt
 }
 
 async fn cmd_info(
-    component: String,
+    component: ComponentRef,
     show_tools: bool,
     output_format: OutputFormat,
     opts: CommonOpts,
 ) -> Result<()> {
     // Without --tools: just read custom section, no instantiation
-    let component_ref = component.parse::<resolve::ComponentRef>().unwrap();
-    let component_path = resolve::resolve(&component_ref, false).await?;
+    let component_path = resolve::resolve(&component, false).await?;
     let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
     let component_info = runtime::read_component_info(&wasm_bytes)?;
 
@@ -467,9 +474,8 @@ async fn cmd_info(
     Ok(())
 }
 
-async fn cmd_skill(component: String, output: Option<PathBuf>) -> Result<()> {
-    let component_ref = component.parse::<resolve::ComponentRef>().unwrap();
-    let component_path = resolve::resolve(&component_ref, false).await?;
+async fn cmd_skill(component: ComponentRef, output: Option<PathBuf>) -> Result<()> {
+    let component_path = resolve::resolve(&component, false).await?;
     let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
 
     // Find act:skill custom section
@@ -506,12 +512,14 @@ async fn cmd_skill(component: String, output: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_pull(reference: String, output: Option<PathBuf>, output_from_ref: bool) -> Result<()> {
-    let component_ref = reference.parse::<resolve::ComponentRef>().unwrap();
-
+async fn cmd_pull(
+    reference: ComponentRef,
+    output: Option<PathBuf>,
+    output_from_ref: bool,
+) -> Result<()> {
     // Resolve to local path (downloads to cache for remote refs)
     // Always download fresh — pull is explicit user action
-    let cached_path = resolve::resolve(&component_ref, true).await?;
+    let cached_path = resolve::resolve(&reference, true).await?;
 
     if let Some(out) = output {
         tokio::fs::copy(&cached_path, &out)
@@ -519,17 +527,18 @@ async fn cmd_pull(reference: String, output: Option<PathBuf>, output_from_ref: b
             .with_context(|| format!("copying to {}", out.display()))?;
         println!("{}", out.display());
     } else if output_from_ref {
-        let filename = reference
+        let ref_str = reference.to_string();
+        let base = ref_str
             .rsplit('/')
             .next()
-            .unwrap_or(&reference)
+            .unwrap_or(&ref_str)
             .split(':')
             .next()
-            .unwrap_or(&reference);
-        let filename = if filename.ends_with(".wasm") {
-            filename.to_string()
+            .unwrap_or(&ref_str);
+        let filename = if base.ends_with(".wasm") {
+            base.to_string()
         } else {
-            format!("{filename}.wasm")
+            format!("{base}.wasm")
         };
         let out = PathBuf::from(&filename);
         tokio::fs::copy(&cached_path, &out)
