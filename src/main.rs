@@ -96,7 +96,16 @@ enum Cli {
         #[command(flatten)]
         opts: CommonOpts,
     },
-    /// Pull a component from a registry (not yet implemented)
+    /// Extract embedded Agent Skills from a component
+    Skill {
+        /// Component reference (path, URL, OCI ref, or name)
+        component: String,
+
+        /// Output directory (default: .agents/skills/<name>/)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Pull a component from a registry
     Pull {
         /// Registry reference (e.g. registry.example.com/name:tag)
         #[arg(name = "ref")]
@@ -125,7 +134,7 @@ async fn main() -> Result<()> {
             Cli::Run { opts, .. } | Cli::Call { opts, .. } | Cli::Info { opts, .. } => {
                 opts.config.as_deref()
             }
-            Cli::Pull { .. } => None,
+            Cli::Skill { .. } | Cli::Pull { .. } => None,
         };
         let log_level = config::load_config(config_path)
             .ok()
@@ -162,6 +171,7 @@ async fn main() -> Result<()> {
             format,
             opts,
         } => cmd_info(component, tools, format, opts).await,
+        Cli::Skill { component, output } => cmd_skill(component, output).await,
         Cli::Pull {
             reference,
             output,
@@ -454,6 +464,45 @@ async fn cmd_info(
         }
     }
 
+    Ok(())
+}
+
+async fn cmd_skill(component: String, output: Option<PathBuf>) -> Result<()> {
+    let component_ref = component.parse::<resolve::ComponentRef>().unwrap();
+    let component_path = resolve::resolve(&component_ref, false).await?;
+    let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
+
+    // Find act:skill custom section
+    let mut skill_data: Option<Vec<u8>> = None;
+    for payload in wasmparser::Parser::new(0).parse_all(&wasm_bytes) {
+        if let Ok(wasmparser::Payload::CustomSection(section)) = payload
+            && section.name() == "act:skill"
+        {
+            skill_data = Some(section.data().to_vec());
+            break;
+        }
+    }
+
+    let tar_bytes = skill_data.context("component does not contain an act:skill section")?;
+
+    // Determine output directory
+    let component_info = runtime::read_component_info(&wasm_bytes)?;
+    let out_dir = output.unwrap_or_else(|| {
+        PathBuf::from(".agents")
+            .join("skills")
+            .join(&component_info.name)
+    });
+
+    std::fs::create_dir_all(&out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
+
+    // Extract tar
+    let cursor = std::io::Cursor::new(tar_bytes);
+    let mut archive = tar::Archive::new(cursor);
+    archive
+        .unpack(&out_dir)
+        .with_context(|| format!("extracting skill to {}", out_dir.display()))?;
+
+    println!("{}", out_dir.display());
     Ok(())
 }
 
