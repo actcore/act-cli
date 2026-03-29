@@ -1,10 +1,12 @@
 ---
 name: act
 description: Run ACT WebAssembly component tools via `act call`. Use when the user asks to use an ACT component, run a .wasm tool, or needs sandboxed tools (SQLite, HTTP, filesystem, etc.) without system dependencies. Also use when you see references to ghcr.io/actpkg/ or .wasm component files.
+license: MIT-0
 compatibility: Requires act CLI (npm i -g @actcore/act) and shell/terminal access.
+allowed-tools: Bash(act:*)
 metadata:
   author: actcore
-  version: "0.3"
+  version: "0.1.0"
   openclaw:
     requires:
       bins:
