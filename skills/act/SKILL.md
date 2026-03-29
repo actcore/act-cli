@@ -3,10 +3,11 @@ name: act
 description: Run ACT WebAssembly component tools via `act call`. Use when the user asks to use an ACT component, run a .wasm tool, or needs sandboxed tools (SQLite, HTTP, filesystem, etc.) without system dependencies. Also use when you see references to ghcr.io/actpkg/ or .wasm component files.
 license: MIT-0
 compatibility: Requires act CLI (npm i -g @actcore/act) and shell/terminal access.
-allowed-tools: Bash(act:*)
+allowed-tools: Bash(act *) Bash(npx @actcore/act *) Bash(uvx --from act-cli act *)
 metadata:
   author: actcore
-  version: "0.1.0"
+  version: "0.3"
+  act: {}
   openclaw:
     requires:
       bins:
@@ -19,13 +20,21 @@ Run self-contained WebAssembly component tools via the `act` CLI. No system depe
 
 ## Prerequisites
 
-Check if `act` is available:
+Verify that the correct `act` is available (not nektos/act for GitHub Actions):
 
 ```bash
-act --help
+act --help 2>&1 | head -1
 ```
 
-If not installed:
+The output must contain "ACT" or "Agent Component Tools". If it shows "Run GitHub Actions locally" or is not installed, use npx:
+
+```bash
+npx @actcore/act --help
+```
+
+If npx works, use `npx @actcore/act` instead of `act` for all commands below.
+
+To install globally:
 
 ```bash
 npm i -g @actcore/act
@@ -64,6 +73,16 @@ act call <component> <tool-name> --args '<json>' [options]
 Output is JSON on stdout. Logs go to stderr.
 
 Remote components are cached locally after first download.
+
+## Step 3: Install component skills (optional)
+
+ACT components MAY embed Agent Skills in their `.wasm` binary. Extract and install them:
+
+```bash
+act skill <component>
+```
+
+This extracts the embedded skill to `.agents/skills/<name>/`, making it available to all compatible agents. Skills from ACT components include `metadata.act` in their SKILL.md frontmatter.
 
 ## Example: SQLite
 
