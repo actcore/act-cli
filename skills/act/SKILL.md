@@ -23,7 +23,7 @@ Run self-contained WebAssembly component tools via the `act` CLI. No system depe
 Verify that the correct `act` is available (not nektos/act for GitHub Actions):
 
 ```bash
-act --help 2>&1 | head -1
+act --help
 ```
 
 The output must contain "ACT" or "Agent Component Tools". If it shows "Run GitHub Actions locally" or is not installed, use npx:
@@ -106,9 +106,23 @@ act call ghcr.io/actpkg/sqlite:0.1.0 query \
   --allow-dir /data:/tmp/act-data
 ```
 
+## Filesystem access
+
+Components run sandboxed — no host filesystem access by default. If a tool fails with a capability or permission error, it likely needs `--allow-dir`:
+
+```
+--allow-dir /data:/path/on/host    # map guest /data → host directory
+--allow-dir /data:./local-dir      # relative paths work
+--allow-fs                         # full access (use with caution)
+```
+
+If a component works with files (paths in `metadata_schema` or tool `parameters_schema`), it needs `--allow-dir`. The guest path must match the path passed in `--metadata` or `--args`.
+
+Example: if you use path `/data/app.db`, grant access with `--allow-dir /data:./data`.
+
 ## Important
 
 - Always run `act info --tools` first to discover tool names and schemas
 - Pass `--metadata` on every call (stateless — no session)
-- Use `--allow-dir guest:host` only when the component needs filesystem access
-- Components run sandboxed in WebAssembly — no host access unless explicitly granted
+- If a call fails with permission/capability error, add `--allow-dir`
+- Components are sandboxed — they cannot access anything unless you grant it
