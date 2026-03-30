@@ -227,11 +227,7 @@ pub async fn instantiate_component(
 
 /// Warn if a component declares wasi:filesystem capability but no filesystem access was granted.
 pub fn warn_missing_capabilities(info: &ComponentInfo, fs_config: &crate::config::FsConfig) {
-    let wants_fs = info
-        .capabilities
-        .iter()
-        .any(|c| c.id == act_types::constants::CAP_FILESYSTEM);
-    if wants_fs && fs_config.mounts.is_empty() {
+    if info.capabilities.has(act_types::constants::CAP_FILESYSTEM) && fs_config.mounts.is_empty() {
         tracing::warn!(
             component = %info.name,
             "component declares wasi:filesystem capability but no filesystem access was granted"

@@ -34,18 +34,10 @@ pub struct InfoJson {
     pub version: String,
     pub description: String,
     pub default_language: Option<String>,
-    pub capabilities: Vec<CapabilityJson>,
+    pub capabilities: serde_json::Value,
     pub skill: Option<String>,
     pub metadata_schema: Option<serde_json::Value>,
     pub tools: Option<Vec<ToolJson>>,
-}
-
-#[skip_serializing_none]
-#[derive(Serialize)]
-pub struct CapabilityJson {
-    pub id: String,
-    pub required: bool,
-    pub description: Option<String>,
 }
 
 #[skip_serializing_none]
@@ -75,15 +67,8 @@ pub fn to_json(data: &InfoData<'_>) -> anyhow::Result<String> {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let capabilities = info
-        .capabilities
-        .iter()
-        .map(|c| CapabilityJson {
-            id: c.id.clone(),
-            required: c.required,
-            description: c.description.clone(),
-        })
-        .collect();
+    let capabilities = serde_json::to_value(&info.capabilities)
+        .unwrap_or_else(|_| serde_json::Value::Object(Default::default()));
 
     let metadata_schema_value: Option<serde_json::Value> = data
         .metadata_schema
@@ -152,11 +137,32 @@ pub fn to_text(data: &InfoData<'_>) -> String {
     // Capabilities
     if !info.capabilities.is_empty() {
         out.push_str("\nCapabilities:\n");
-        for cap in &info.capabilities {
-            let req = if cap.required { "required" } else { "optional" };
-            out.push_str(&format!("  {} ({})", cap.id, req));
-            if let Some(desc) = &cap.description {
-                out.push_str(&format!(" — {}", desc));
+        if let Some(fs) = &info.capabilities.filesystem {
+            out.push_str("  wasi:filesystem");
+            if let Some(root) = &fs.mount_root {
+                out.push_str(&format!(" (mount-root: {})", root));
+            }
+            out.push('\n');
+        }
+        if info.capabilities.http.is_some() {
+            out.push_str("  wasi:http\n");
+        }
+        if info.capabilities.sockets.is_some() {
+            out.push_str("  wasi:sockets\n");
+        }
+        for (id, params) in &info.capabilities.other {
+            out.push_str(&format!("  {}", id));
+            if let serde_json::Value::Object(map) = params
+                && !map.is_empty()
+            {
+                let pairs: Vec<String> = map
+                    .iter()
+                    .map(|(k, v)| match v {
+                        serde_json::Value::String(s) => format!("{}: {}", k, s),
+                        other => format!("{}: {}", k, other),
+                    })
+                    .collect();
+                out.push_str(&format!(" ({})", pairs.join(", ")));
             }
             out.push('\n');
         }
@@ -296,16 +302,15 @@ fn extract_params(schema: &serde_json::Value) -> Vec<(String, String, bool, Opti
 #[cfg(test)]
 mod tests {
     use super::*;
-    use act_types::types::{ComponentCapability, ComponentInfo};
+    use act_types::FilesystemCap;
+    use act_types::types::ComponentInfo;
 
     fn sample_info() -> ComponentInfo {
         let mut info = ComponentInfo::new("component-sqlite", "0.2.0", "SQLite database access");
         info.default_language = Some("en".to_string());
-        info.capabilities = vec![ComponentCapability {
-            id: "wasi:filesystem".to_string(),
-            required: true,
-            description: None,
-        }];
+        info.capabilities.filesystem = Some(FilesystemCap {
+            mount_root: Some("/data".to_string()),
+        });
         info.metadata.insert(
             COMPONENT_SKILL.to_string(),
             serde_json::Value::String("Use this component for database operations...".to_string()),
@@ -335,7 +340,7 @@ mod tests {
             tools: None,
         };
         let text = to_text(&data);
-        assert!(text.contains("wasi:filesystem (required)"));
+        assert!(text.contains("wasi:filesystem (mount-root: /data)"));
     }
 
     #[test]
@@ -379,8 +384,7 @@ mod tests {
         assert_eq!(v["version"], "0.2.0");
         assert_eq!(v["description"], "SQLite database access");
         assert_eq!(v["skill"], "Use this component for database operations...");
-        assert_eq!(v["capabilities"][0]["id"], "wasi:filesystem");
-        assert_eq!(v["capabilities"][0]["required"], true);
+        assert_eq!(v["capabilities"]["wasi:filesystem"]["mount-root"], "/data");
     }
 
     #[test]
