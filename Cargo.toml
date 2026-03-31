@@ -1,6 +1,6 @@
 [package]
 name = "act-cli"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
 description = "CLI host for ACT (Agent Component Tools) WebAssembly components"
 license = "MIT OR Apache-2.0"
@@ -17,7 +17,7 @@ name = "act"
 path = "src/main.rs"
 
 [dependencies]
-act-types = { path = "../act-sdk-rs/act-types" }
+act-types = "0.2.8"
 ciborium = "0.2"
 anyhow = "1.0.102"
 axum = "0.8.8"
