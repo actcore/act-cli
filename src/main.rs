@@ -370,10 +370,24 @@ async fn cmd_call(
             for event in &result.events {
                 match event {
                     runtime::act::core::types::StreamEvent::Content(part) => {
-                        let data = cbor::decode_content_data(&part.data, part.mime_type.as_deref());
-                        match data {
-                            serde_json::Value::String(s) => println!("{s}"),
-                            other => println!("{}", serde_json::to_string_pretty(&other)?),
+                        let mime = part.mime_type.as_deref().unwrap_or("application/cbor");
+                        if mime.starts_with("text/") || mime == "application/json" || mime == "application/xml" {
+                            let text = String::from_utf8_lossy(&part.data);
+                            println!("{text}");
+                        } else if mime == "application/cbor" {
+                            let json_val = act_types::cbor::cbor_to_json(&part.data)
+                                .unwrap_or_else(|_| serde_json::Value::String(
+                                    format!("[binary: {}, {} bytes]", mime, part.data.len())
+                                ));
+                            match json_val {
+                                serde_json::Value::String(s) => println!("{s}"),
+                                other => println!("{}", serde_json::to_string_pretty(&other)?),
+                            }
+                        } else if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+                            println!("[binary: {}, {} bytes]", mime, part.data.len());
+                        } else {
+                            use std::io::Write;
+                            std::io::stdout().write_all(&part.data)?;
                         }
                     }
                     runtime::act::core::types::StreamEvent::Error(err) => {
