@@ -115,8 +115,8 @@ fn handle_initialize(id: Value, info: &runtime::ComponentInfo) -> JsonRpcRespons
     let result = InitializeResult {
         protocol_version: mcp::PROTOCOL_VERSION.to_string(),
         server_info: ServerInfo {
-            name: info.name.clone(),
-            version: Some(info.version.clone()),
+            name: info.std.name.clone(),
+            version: Some(info.std.version.clone()),
         },
         capabilities: Some(ServerCapabilities {
             tools: Some(serde_json::json!({})),

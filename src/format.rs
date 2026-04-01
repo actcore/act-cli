@@ -6,8 +6,8 @@
 
 use act_types::{
     constants::{
-        COMPONENT_SKILL, META_ANTI_USAGE_HINTS, META_DESTRUCTIVE, META_IDEMPOTENT, META_READ_ONLY,
-        META_STREAMING, META_TAGS, META_TIMEOUT_MS, META_USAGE_HINTS,
+        META_ANTI_USAGE_HINTS, META_DESTRUCTIVE, META_IDEMPOTENT, META_READ_ONLY, META_STREAMING,
+        META_TAGS, META_TIMEOUT_MS, META_USAGE_HINTS,
     },
     types::{ComponentInfo, LocalizedString, Metadata},
 };
@@ -62,12 +62,12 @@ pub fn to_json(data: &InfoData<'_>) -> anyhow::Result<String> {
     let info = data.info;
 
     let skill = info
-        .metadata
-        .get(COMPONENT_SKILL)
+        .extra
+        .get("std:skill")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let capabilities = serde_json::to_value(&info.capabilities)
+    let capabilities = serde_json::to_value(&info.std.capabilities)
         .unwrap_or_else(|_| serde_json::Value::Object(Default::default()));
 
     let metadata_schema_value: Option<serde_json::Value> = data
@@ -83,10 +83,10 @@ pub fn to_json(data: &InfoData<'_>) -> anyhow::Result<String> {
         .map(|tools| tools.iter().map(tool_to_json).collect::<Vec<_>>());
 
     let out = InfoJson {
-        name: info.name.clone(),
-        version: info.version.clone(),
-        description: info.description.clone(),
-        default_language: info.default_language.clone(),
+        name: info.std.name.clone(),
+        version: info.std.version.clone(),
+        description: info.std.description.clone(),
+        default_language: info.std.default_language.clone(),
         capabilities,
         skill,
         metadata_schema: metadata_schema_value,
@@ -128,29 +128,29 @@ pub fn to_text(data: &InfoData<'_>) -> String {
     let mut out = String::new();
 
     // Header
-    out.push_str(&format!("# {} v{}\n", info.name, info.version));
-    if !info.description.is_empty() {
-        out.push_str(&info.description);
+    out.push_str(&format!("# {} v{}\n", info.std.name, info.std.version));
+    if !info.std.description.is_empty() {
+        out.push_str(&info.std.description);
         out.push('\n');
     }
 
     // Capabilities
-    if !info.capabilities.is_empty() {
+    if !info.std.capabilities.is_empty() {
         out.push_str("\nCapabilities:\n");
-        if let Some(fs) = &info.capabilities.filesystem {
+        if let Some(fs) = &info.std.capabilities.filesystem {
             out.push_str("  wasi:filesystem");
             if let Some(root) = &fs.mount_root {
                 out.push_str(&format!(" (mount-root: {})", root));
             }
             out.push('\n');
         }
-        if info.capabilities.http.is_some() {
+        if info.std.capabilities.http.is_some() {
             out.push_str("  wasi:http\n");
         }
-        if info.capabilities.sockets.is_some() {
+        if info.std.capabilities.sockets.is_some() {
             out.push_str("  wasi:sockets\n");
         }
-        for (id, params) in &info.capabilities.other {
+        for (id, params) in &info.std.capabilities.other {
             out.push_str(&format!("  {}", id));
             if let serde_json::Value::Object(map) = params
                 && !map.is_empty()
@@ -169,7 +169,7 @@ pub fn to_text(data: &InfoData<'_>) -> String {
     }
 
     // Skill
-    if let Some(skill) = info.metadata.get(COMPONENT_SKILL).and_then(|v| v.as_str()) {
+    if let Some(skill) = info.extra.get("std:skill").and_then(|v| v.as_str()) {
         out.push_str("\n## Skill\n");
         out.push_str(skill);
         out.push('\n');
@@ -307,12 +307,12 @@ mod tests {
 
     fn sample_info() -> ComponentInfo {
         let mut info = ComponentInfo::new("component-sqlite", "0.2.0", "SQLite database access");
-        info.default_language = Some("en".to_string());
-        info.capabilities.filesystem = Some(FilesystemCap {
+        info.std.default_language = Some("en".to_string());
+        info.std.capabilities.filesystem = Some(FilesystemCap {
             mount_root: Some("/data".to_string()),
         });
-        info.metadata.insert(
-            COMPONENT_SKILL.to_string(),
+        info.extra.insert(
+            "std:skill".to_string(),
             serde_json::Value::String("Use this component for database operations...".to_string()),
         );
         info

@@ -247,7 +247,7 @@ async fn prepare_component(
     let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
     let info = runtime::read_component_info(&wasm_bytes)?;
 
-    let mount_root = info.capabilities.fs_mount_root().unwrap_or("/");
+    let mount_root = info.std.capabilities.fs_mount_root().unwrap_or("/");
     config::apply_mount_root(&mut fs_config, mount_root);
     runtime::warn_missing_capabilities(&info, &fs_config);
 
@@ -257,8 +257,8 @@ async fn prepare_component(
         .unwrap_or_default();
 
     tracing::info!(
-        name = %info.name,
-        version = %info.version,
+        name = %info.std.name,
+        version = %info.std.version,
         path = %component_path.display(),
         "Loading component"
     );
@@ -270,7 +270,7 @@ async fn prepare_component(
         runtime::instantiate_component(&engine, &wasm, &linker, &fs_config).await?;
     let handle = runtime::spawn_component_actor(instance, store);
 
-    tracing::info!(name = %info.name, version = %info.version, "Component ready");
+    tracing::info!(name = %info.std.name, version = %info.std.version, "Component ready");
 
     Ok(PreparedComponent {
         info,
@@ -492,7 +492,7 @@ async fn cmd_skill(component: ComponentRef, output: Option<PathBuf>) -> Result<(
     let out_dir = output.unwrap_or_else(|| {
         PathBuf::from(".agents")
             .join("skills")
-            .join(&component_info.name)
+            .join(&component_info.std.name)
     });
 
     std::fs::create_dir_all(&out_dir).with_context(|| format!("creating {}", out_dir.display()))?;

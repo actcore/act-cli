@@ -122,7 +122,7 @@ pub fn create_store(
 pub use act_types::ComponentInfo;
 
 /// Read component info from the `act:component` custom section (CBOR-encoded)
-/// and standard WASM metadata sections (`version`, `description`).
+/// and standard WASM metadata sections (`version`, `description`) as fallback.
 pub fn read_component_info(component_bytes: &[u8]) -> Result<ComponentInfo> {
     let mut info = ComponentInfo::default();
 
@@ -133,19 +133,19 @@ pub fn read_component_info(component_bytes: &[u8]) -> Result<ComponentInfo> {
                     info = ciborium::from_reader(section.data())
                         .map_err(|e| anyhow::anyhow!("failed to decode act:component CBOR: {e}"))?;
                 }
-                "version" if info.version.is_empty() => {
-                    info.version = String::from_utf8_lossy(section.data()).into_owned();
+                "version" if info.std.version.is_empty() => {
+                    info.std.version = String::from_utf8_lossy(section.data()).into_owned();
                 }
-                "description" if info.description.is_empty() => {
-                    info.description = String::from_utf8_lossy(section.data()).into_owned();
+                "description" if info.std.description.is_empty() => {
+                    info.std.description = String::from_utf8_lossy(section.data()).into_owned();
                 }
                 _ => {}
             }
         }
     }
 
-    if info.name.is_empty() {
-        info.name = "unknown".to_string();
+    if info.std.name.is_empty() {
+        info.std.name = "unknown".to_string();
     }
 
     Ok(info)
@@ -227,9 +227,11 @@ pub async fn instantiate_component(
 
 /// Warn if a component declares wasi:filesystem capability but no filesystem access was granted.
 pub fn warn_missing_capabilities(info: &ComponentInfo, fs_config: &crate::config::FsConfig) {
-    if info.capabilities.has(act_types::constants::CAP_FILESYSTEM) && fs_config.mounts.is_empty() {
+    if info.std.capabilities.has(act_types::constants::CAP_FILESYSTEM)
+        && fs_config.mounts.is_empty()
+    {
         tracing::warn!(
-            component = %info.name,
+            component = %info.std.name,
             "component declares wasi:filesystem capability but no filesystem access was granted"
         );
     }
