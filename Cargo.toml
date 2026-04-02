@@ -3,7 +3,7 @@ members = ["act-cli", "act-build"]
 resolver = "3"
 
 [workspace.dependencies]
-act-types = { version = "0.2.8", path = "../act-sdk-rs/act-types" }
+act-types = "0.3"
 wasmparser = "0.246"
 
 [profile.release]
