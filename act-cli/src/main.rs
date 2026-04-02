@@ -371,14 +371,21 @@ async fn cmd_call(
                 match event {
                     runtime::act::core::types::StreamEvent::Content(part) => {
                         let mime = part.mime_type.as_deref().unwrap_or("application/cbor");
-                        if mime.starts_with("text/") || mime == "application/json" || mime == "application/xml" {
+                        if mime.starts_with("text/")
+                            || mime == "application/json"
+                            || mime == "application/xml"
+                        {
                             let text = String::from_utf8_lossy(&part.data);
                             println!("{text}");
                         } else if mime == "application/cbor" {
                             let json_val = act_types::cbor::cbor_to_json(&part.data)
-                                .unwrap_or_else(|_| serde_json::Value::String(
-                                    format!("[binary: {}, {} bytes]", mime, part.data.len())
-                                ));
+                                .unwrap_or_else(|_| {
+                                    serde_json::Value::String(format!(
+                                        "[binary: {}, {} bytes]",
+                                        mime,
+                                        part.data.len()
+                                    ))
+                                });
                             match json_val {
                                 serde_json::Value::String(s) => println!("{s}"),
                                 other => println!("{}", serde_json::to_string_pretty(&other)?),

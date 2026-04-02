@@ -13,16 +13,16 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
-          pattern: act-*
+          pattern: "{act,act-build}-*"
           merge-multiple: true
 
       - name: Inject version from Cargo.toml
         run: |
-          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          VERSION=$(grep '^version' act-cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           find npm -name 'package.json' -exec sed -i "s/0.0.0/$VERSION/g" {} +
 
-      - name: Populate platform packages
+      - name: Populate act-cli platform packages
         run: |
           cp artifacts/act-linux-x86_64-musl    npm/@actcore/act-cli-linux-x64/act
           cp artifacts/act-linux-aarch64-musl   npm/@actcore/act-cli-linux-arm64/act
@@ -38,13 +38,33 @@ jobs:
           chmod +x npm/@actcore/act-cli-darwin-x64/act
           chmod +x npm/@actcore/act-cli-darwin-arm64/act
 
+      - name: Populate act-build platform packages
+        run: |
+          cp artifacts/act-build-linux-x86_64-musl    npm/@actcore/act-build-linux-x64/act-build
+          cp artifacts/act-build-linux-aarch64-musl   npm/@actcore/act-build-linux-arm64/act-build
+          cp artifacts/act-build-linux-riscv64-musl   npm/@actcore/act-build-linux-riscv64/act-build
+          cp artifacts/act-build-macos-x86_64        npm/@actcore/act-build-darwin-x64/act-build
+          cp artifacts/act-build-macos-aarch64       npm/@actcore/act-build-darwin-arm64/act-build
+          cp artifacts/act-build-windows-x86_64.exe  npm/@actcore/act-build-win32-x64/act-build.exe
+          cp artifacts/act-build-windows-aarch64.exe npm/@actcore/act-build-win32-arm64/act-build.exe
+
+          chmod +x npm/@actcore/act-build-linux-x64/act-build
+          chmod +x npm/@actcore/act-build-linux-arm64/act-build
+          chmod +x npm/@actcore/act-build-linux-riscv64/act-build
+          chmod +x npm/@actcore/act-build-darwin-x64/act-build
+          chmod +x npm/@actcore/act-build-darwin-arm64/act-build
+
       - name: Pack npm packages
         run: |
           mkdir -p dist-npm
           for dir in npm/@actcore/act-cli-*/; do
             (cd "$dir" && npm pack --pack-destination ../../../dist-npm)
           done
+          for dir in npm/@actcore/act-build-*/; do
+            (cd "$dir" && npm pack --pack-destination ../../../dist-npm)
+          done
           (cd npm/@actcore/act && npm pack --pack-destination ../../../dist-npm)
+          (cd npm/@actcore/act-build && npm pack --pack-destination ../../../dist-npm)
 
       - uses: actions/upload-artifact@v7
         with:

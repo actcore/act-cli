@@ -15,20 +15,20 @@ jobs:
         include:
           - name: macos-x86_64
             os: macos-26-intel
-            src: act
-            dest: act-macos-x86_64
+            ext: ""
+            dest: macos-x86_64
           - name: macos-aarch64
             os: macos-latest
-            src: act
-            dest: act-macos-aarch64
+            ext: ""
+            dest: macos-aarch64
           - name: windows-x86_64
             os: windows-latest
-            src: act.exe
-            dest: act-windows-x86_64.exe
+            ext: .exe
+            dest: windows-x86_64.exe
           - name: windows-aarch64
             os: windows-11-arm
-            src: act.exe
-            dest: act-windows-aarch64.exe
+            ext: .exe
+            dest: windows-aarch64.exe
     steps:
       - uses: actions/checkout@v6
       - uses: moonrepo/setup-rust@v1
@@ -38,14 +38,21 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - run: wit-deps
+        working-directory: act-cli
       - run: cargo build --release
-      - name: Rename
+      - name: Rename binaries
         shell: bash
-        run: cp target/release/${{ matrix.src }} ${{ matrix.dest }}
+        run: |
+          cp target/release/act${{ matrix.ext }} act-${{ matrix.dest }}
+          cp target/release/act-build${{ matrix.ext }} act-build-${{ matrix.dest }}
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.dest }}
-          path: ${{ matrix.dest }}
+          name: act-${{ matrix.dest }}
+          path: act-${{ matrix.dest }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: act-build-${{ matrix.dest }}
+          path: act-build-${{ matrix.dest }}
 
   zigbuild:
     name: Build (${{ matrix.name }})
@@ -76,10 +83,17 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - uses: mlugg/setup-zig@v2
       - run: wit-deps
+        working-directory: act-cli
       - run: cargo zigbuild --release --target ${{ matrix.target }}
-      - name: Rename
-        run: cp target/${{ matrix.target }}/release/act act-${{ matrix.name }}
+      - name: Rename binaries
+        run: |
+          cp target/${{ matrix.target }}/release/act act-${{ matrix.name }}
+          cp target/${{ matrix.target }}/release/act-build act-build-${{ matrix.name }}
       - uses: actions/upload-artifact@v7
         with:
           name: act-${{ matrix.name }}
           path: act-${{ matrix.name }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: act-build-${{ matrix.name }}
+          path: act-build-${{ matrix.name }}

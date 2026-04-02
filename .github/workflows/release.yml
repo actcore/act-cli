@@ -37,7 +37,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: sbom
-          path: act-cli.cdx.json
+          path: "*.cdx.json"
 
   release:
     name: GitHub Release
@@ -48,7 +48,7 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
-          pattern: act-*
+          pattern: "{act,act-build}-*"
           merge-multiple: true
       - uses: actions/download-artifact@v8
         with:
@@ -57,15 +57,15 @@ jobs:
       - name: Attest build provenance
         uses: actions/attest@v4
         with:
-          subject-path: artifacts/act-*
+          subject-path: "artifacts/*"
       - name: Attest SBOM
         uses: actions/attest@v4
         with:
-          subject-path: artifacts/act-*
-          sbom-path: sbom/act-cli.cdx.json
+          subject-path: "artifacts/*"
+          sbom-path: "sbom/*.cdx.json"
       - name: Create GitHub Release
         run: |
-          gh release create ${{ github.ref_name }} artifacts/act-* sbom/*.cdx.json \
+          gh release create ${{ github.ref_name }} artifacts/act-* artifacts/act-build-* sbom/*.cdx.json \
             --title "${{ github.ref_name }}" \
             --generate-notes
         env:
@@ -78,12 +78,17 @@ jobs:
     environment: pypi
     permissions:
       id-token: write
+      attestations: write
     steps:
       - uses: actions/download-artifact@v8
         with:
           pattern: wheels-*
           merge-multiple: true
           path: dist
+      - name: Attest PyPI artifacts
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*
       - uses: pypa/gh-action-pypi-publish@release/v1
 
   npm-publish:
@@ -105,7 +110,7 @@ jobs:
       - name: Publish all packages with provenance
         run: |
           for pkg in ./dist-npm/*.tgz; do
-            npm publish "$pkg" --access public
+            npm publish "$pkg" --access public --provenance
           done
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -126,11 +131,16 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - run: wit-deps
+        working-directory: act-cli
       - name: Authenticate with crates.io
         id: auth
         uses: rust-lang/crates-io-auth-action@v1
-      - name: Publish to crates.io
-        run: cargo publish --allow-dirty
+      - name: Publish act-build to crates.io
+        run: cargo publish -p act-build --allow-dirty
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+      - name: Publish act-cli to crates.io
+        run: cargo publish -p act-cli --allow-dirty
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 

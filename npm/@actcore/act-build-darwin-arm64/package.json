@@ -1,0 +1,13 @@
+{
+  "name": "@actcore/act-build-darwin-arm64",
+  "version": "0.0.0",
+  "description": "act-build binary for darwin-arm64",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/actcore/act-cli"
+  },
+  "os": ["darwin"],
+  "cpu": ["arm64"],
+  "files": ["act-build*"]
+}

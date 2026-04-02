@@ -1,0 +1,50 @@
+[package]
+name = "act-cli"
+version = "0.3.3"
+edition = "2024"
+description = "CLI host for ACT (Agent Component Tools) WebAssembly components"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/actcore/act-cli"
+homepage = "https://actcore.dev"
+keywords = ["act", "wasm", "component-model", "mcp", "agent"]
+categories = ["command-line-utilities", "wasm"]
+
+readme = "../README.md"
+include = ["src/**", "wit/**"]
+
+[[bin]]
+name = "act"
+path = "src/main.rs"
+
+[dependencies]
+act-types.workspace = true
+ciborium = "0.2"
+anyhow = "1.0.102"
+axum = "0.8.8"
+base64 = "0.22.1"
+clap = { version = "4.6", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+serde_with = "3"
+tokio = { version = "1.50", features = ["full"] }
+tokio-stream = "0.1.18"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+toml = "1.0.7"
+dirs = "6"
+futures-util = "0.3"
+indicatif = "0.18.4"
+regex = "1"
+reqwest = { version = "0.13.2", default-features = false, features = ["rustls", "stream"] }
+oci-client = "0.16"
+sha2 = "0.11.0"
+tar = "0.4"
+url = "2"
+shellexpand = "3"
+wasmparser.workspace = true
+wasmtime = { version = "42", features = ["component-model", "component-model-async"] }
+wasmtime-wasi = { version = "42", features = ["p3"] }
+wasmtime-wasi-http = { version = "42", features = ["p3"] }
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,13 @@
+{
+  "name": "@actcore/act-build-win32-x64",
+  "version": "0.0.0",
+  "description": "act-build binary for win32-x64",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/actcore/act-cli"
+  },
+  "os": ["win32"],
+  "cpu": ["x64"],
+  "files": ["act-build*"]
+}

@@ -22,6 +22,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - run: wit-deps
+        working-directory: act-cli
       - run: cargo check
       - run: cargo clippy -- -D warnings
 
@@ -51,6 +52,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - run: wit-deps
+        working-directory: act-cli
       - run: cargo test
 
   build:

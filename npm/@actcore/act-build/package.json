@@ -1,0 +1,25 @@
+{
+  "name": "@actcore/act-build",
+  "version": "0.0.0",
+  "description": "Build tool for ACT WASM components",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/actcore/act-cli"
+  },
+  "homepage": "https://actcore.dev",
+  "keywords": ["act", "agent-component-tools", "wasm", "component-model", "build"],
+  "bin": {
+    "act-build": "bin/act-build"
+  },
+  "files": ["bin"],
+  "optionalDependencies": {
+    "@actcore/act-build-linux-x64": "0.0.0",
+    "@actcore/act-build-linux-arm64": "0.0.0",
+    "@actcore/act-build-linux-riscv64": "0.0.0",
+    "@actcore/act-build-darwin-x64": "0.0.0",
+    "@actcore/act-build-darwin-arm64": "0.0.0",
+    "@actcore/act-build-win32-x64": "0.0.0",
+    "@actcore/act-build-win32-arm64": "0.0.0"
+  }
+}

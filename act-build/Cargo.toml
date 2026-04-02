@@ -1,0 +1,34 @@
+[package]
+name = "act-build"
+version = "0.1.0"
+edition = "2024"
+description = "Build tool for ACT WASM components"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/actcore/act-cli"
+homepage = "https://actcore.dev"
+keywords = ["act", "wasm", "component-model", "build"]
+categories = ["command-line-utilities", "wasm", "development-tools::build-utils"]
+
+readme = "../README.md"
+
+[[bin]]
+name = "act-build"
+path = "src/main.rs"
+
+[dependencies]
+act-types.workspace = true
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+ciborium = "0.2"
+json-patch = "4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tar = "0.4"
+toml = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+wasmparser.workspace = true
+wasm-encoder = "0.246"
+
+[dev-dependencies]
+tempfile = "3"

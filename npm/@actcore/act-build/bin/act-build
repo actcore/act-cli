@@ -4,13 +4,13 @@ const path = require("path");
 const os = require("os");
 
 const PLATFORMS = {
-  "linux-x64": "@actcore/act-cli-linux-x64",
-  "linux-arm64": "@actcore/act-cli-linux-arm64",
-  "linux-riscv64": "@actcore/act-cli-linux-riscv64",
-  "darwin-x64": "@actcore/act-cli-darwin-x64",
-  "darwin-arm64": "@actcore/act-cli-darwin-arm64",
-  "win32-x64": "@actcore/act-cli-win32-x64",
-  "win32-arm64": "@actcore/act-cli-win32-arm64",
+  "linux-x64": "@actcore/act-build-linux-x64",
+  "linux-arm64": "@actcore/act-build-linux-arm64",
+  "linux-riscv64": "@actcore/act-build-linux-riscv64",
+  "darwin-x64": "@actcore/act-build-darwin-x64",
+  "darwin-arm64": "@actcore/act-build-darwin-arm64",
+  "win32-x64": "@actcore/act-build-win32-x64",
+  "win32-arm64": "@actcore/act-build-win32-arm64",
 };
 
 const platform = os.platform();
@@ -27,7 +27,7 @@ let binPath;
 try {
   const pkgDir = path.dirname(require.resolve(`${pkg}/package.json`));
   const ext = platform === "win32" ? ".exe" : "";
-  binPath = path.join(pkgDir, `act${ext}`);
+  binPath = path.join(pkgDir, `act-build${ext}`);
 } catch {
   console.error(
     `Could not find binary package ${pkg}. ` +
