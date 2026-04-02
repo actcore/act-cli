@@ -23,7 +23,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - run: wit-deps
         working-directory: act-cli
-      - run: cargo check
       - run: cargo clippy -- -D warnings
 
   fmt:
