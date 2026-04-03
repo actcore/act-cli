@@ -13,20 +13,24 @@ jobs:
     strategy:
       matrix:
         include:
-          - name: macos-x86_64
-            os: macos-26-intel
-            ext: ""
-            dest: macos-x86_64
           - name: macos-aarch64
             os: macos-latest
+            target: aarch64-apple-darwin
             ext: ""
             dest: macos-aarch64
+          - name: macos-x86_64
+            os: macos-latest
+            target: x86_64-apple-darwin
+            ext: ""
+            dest: macos-x86_64
           - name: windows-x86_64
             os: windows-latest
+            target: x86_64-pc-windows-msvc
             ext: .exe
             dest: windows-x86_64.exe
           - name: windows-aarch64
             os: windows-11-arm
+            target: aarch64-pc-windows-msvc
             ext: .exe
             dest: windows-aarch64.exe
     steps:
@@ -34,17 +38,18 @@ jobs:
       - uses: moonrepo/setup-rust@v1
         with:
           channel: nightly
+          targets: ${{ matrix.target }}
           bins: wit-deps-cli
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - run: wit-deps
         working-directory: act-cli
-      - run: cargo build --release
+      - run: cargo build --release --target ${{ matrix.target }}
       - name: Rename binaries
         shell: bash
         run: |
-          cp target/release/act${{ matrix.ext }} act-${{ matrix.dest }}
-          cp target/release/act-build${{ matrix.ext }} act-build-${{ matrix.dest }}
+          cp target/${{ matrix.target }}/release/act${{ matrix.ext }} act-${{ matrix.dest }}
+          cp target/${{ matrix.target }}/release/act-build${{ matrix.ext }} act-build-${{ matrix.dest }}
       - uses: actions/upload-artifact@v7
         with:
           name: act-${{ matrix.dest }}
