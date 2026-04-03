@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.4] - 2026-04-03
+
+### Added
+
+- `act-build` crate — build tool for ACT WASM components, sharing the workspace with `act-cli`
+- README files for both `act-cli` and `act-build`
+
+### Changed
+
+- MIME-aware display for `act call` output — content parts now rendered according to their MIME type
+- Support for nested `ComponentInfo.std` structure
+- Workspace metadata (version, license, repository, etc.) unified via `[workspace.package]` inheritance
+- All dependencies updated to latest versions; `act-types` switched to 0.3 registry release
+
+### Removed
+
+- Redundant `cargo check` step from CI workflow
+
 ## [0.3.2] - 2026-03-29
 
 ### Added
