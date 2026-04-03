@@ -21,7 +21,4 @@ wasmparser = "0.246"
 wasmtime-internal-fiber = { git = "https://github.com/Heap-Hop/wasmtime.git", branch = "android_pauth" }
 
 [profile.release]
-lto = "fat"
-codegen-units = 1
-strip = true
-opt-level = 3
+lto = "thin"
