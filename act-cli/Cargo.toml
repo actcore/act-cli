@@ -42,9 +42,9 @@ tar = "0.4"
 url = "2"
 shellexpand = "3"
 wasmparser.workspace = true
-wasmtime = { version = "42", features = ["component-model", "component-model-async"] }
-wasmtime-wasi = { version = "42", features = ["p3"] }
-wasmtime-wasi-http = { version = "42", features = ["p3"] }
+wasmtime = { version = "43", features = ["component-model", "component-model-async"] }
+wasmtime-wasi = { version = "43", features = ["p3"] }
+wasmtime-wasi-http = { version = "43", features = ["p3"] }
 
 [dev-dependencies]
 tempfile = "3"

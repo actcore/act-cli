@@ -8,7 +8,7 @@ use wasmtime::component::{Component, Linker, ResourceTable, Source, StreamConsum
 use wasmtime::{Config, Engine, Store, StoreContextMut};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use wasmtime_wasi_http::WasiHttpCtx;
-use wasmtime_wasi_http::p3::{DefaultWasiHttpCtx, WasiHttpCtxView};
+use wasmtime_wasi_http::p3::WasiHttpCtxView;
 
 // Generated bindings from WIT — fully auto-generated, no manual patching.
 #[path = "bindings/mod.rs"]
@@ -16,12 +16,18 @@ use wasmtime_wasi_http::p3::{DefaultWasiHttpCtx, WasiHttpCtxView};
 mod bindings;
 pub use bindings::*;
 
+/// Default no-op hooks for WASI HTTP.
+struct NoopHttpHooks;
+impl wasmtime_wasi_http::p2::WasiHttpHooks for NoopHttpHooks {}
+impl wasmtime_wasi_http::p3::WasiHttpHooks for NoopHttpHooks {}
+
 /// Host state passed into the wasmtime store.
 pub struct HostState {
     wasi: WasiCtx,
     table: ResourceTable,
     http_p2: WasiHttpCtx,
-    http_p3: DefaultWasiHttpCtx,
+    http_p3: WasiHttpCtx,
+    http_hooks: NoopHttpHooks,
 }
 
 impl WasiView for HostState {
@@ -33,12 +39,13 @@ impl WasiView for HostState {
     }
 }
 
-impl wasmtime_wasi_http::WasiHttpView for HostState {
-    fn ctx(&mut self) -> &mut WasiHttpCtx {
-        &mut self.http_p2
-    }
-    fn table(&mut self) -> &mut ResourceTable {
-        &mut self.table
+impl wasmtime_wasi_http::p2::WasiHttpView for HostState {
+    fn http(&mut self) -> wasmtime_wasi_http::p2::WasiHttpCtxView<'_> {
+        wasmtime_wasi_http::p2::WasiHttpCtxView {
+            ctx: &mut self.http_p2,
+            table: &mut self.table,
+            hooks: &mut self.http_hooks,
+        }
     }
 }
 
@@ -47,6 +54,7 @@ impl wasmtime_wasi_http::p3::WasiHttpView for HostState {
         WasiHttpCtxView {
             ctx: &mut self.http_p3,
             table: &mut self.table,
+            hooks: &mut self.http_hooks,
         }
     }
 }
@@ -77,7 +85,7 @@ pub fn create_linker(engine: &Engine) -> Result<Linker<HostState>> {
     wasmtime_wasi::p3::add_to_linker(&mut linker)
         .map_err(|e| anyhow::anyhow!("failed to add WASI P3 to linker: {e}"))?;
     // Add WASI HTTP bindings (P2 for wasm32-wasip2 components, P3 for async)
-    wasmtime_wasi_http::add_only_http_to_linker_async(&mut linker)
+    wasmtime_wasi_http::p2::add_only_http_to_linker_async(&mut linker)
         .map_err(|e| anyhow::anyhow!("failed to add WASI HTTP P2 to linker: {e}"))?;
     wasmtime_wasi_http::p3::add_to_linker(&mut linker)
         .map_err(|e| anyhow::anyhow!("failed to add WASI HTTP P3 to linker: {e}"))?;
@@ -112,7 +120,8 @@ pub fn create_store(
         wasi,
         table: ResourceTable::new(),
         http_p2: WasiHttpCtx::new(),
-        http_p3: DefaultWasiHttpCtx,
+        http_p3: WasiHttpCtx::new(),
+        http_hooks: NoopHttpHooks,
     };
     Ok(Store::new(engine, state))
 }
@@ -305,7 +314,7 @@ pub fn spawn_component_actor(instance: ActWorld, mut store: Store<HostState>) ->
                                     collected,
                                     done_tx: Some(done_tx),
                                 };
-                                stream.pipe(access, consumer);
+                                let _ = stream.pipe(access, consumer);
                             });
 
                             if tokio::time::timeout(std::time::Duration::from_secs(30), done_rx)
@@ -350,7 +359,7 @@ pub fn spawn_component_actor(instance: ActWorld, mut store: Store<HostState>) ->
                                     event_tx: event_tx.clone(),
                                     done_tx: Some(done_tx),
                                 };
-                                stream.pipe(access, consumer);
+                                let _ = stream.pipe(access, consumer);
                             });
 
                             let _ = done_rx.await;

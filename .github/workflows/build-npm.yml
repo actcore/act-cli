@@ -18,7 +18,7 @@ jobs:
 
       - name: Inject version from Cargo.toml
         run: |
-          VERSION=$(grep '^version' act-cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           find npm -name 'package.json' -exec sed -i "s/0.0.0/$VERSION/g" {} +
 
