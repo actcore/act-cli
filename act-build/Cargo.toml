@@ -1,15 +1,15 @@
 [package]
 name = "act-build"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 description = "Build tool for ACT WASM components"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/actcore/act-cli"
-homepage = "https://actcore.dev"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 keywords = ["act", "wasm", "component-model", "build"]
 categories = ["command-line-utilities", "wasm", "development-tools::build-utils"]
 
-readme = "../README.md"
+readme.workspace = true
 
 [[bin]]
 name = "act-build"

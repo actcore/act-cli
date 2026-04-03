@@ -1,15 +1,15 @@
 [package]
 name = "act-cli"
-version = "0.3.3"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 description = "CLI host for ACT (Agent Component Tools) WebAssembly components"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/actcore/act-cli"
-homepage = "https://actcore.dev"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 keywords = ["act", "wasm", "component-model", "mcp", "agent"]
 categories = ["command-line-utilities", "wasm"]
 
-readme = "../README.md"
+readme.workspace = true
 include = ["src/**", "wit/**"]
 
 [[bin]]
