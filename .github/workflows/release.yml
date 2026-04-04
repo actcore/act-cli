@@ -86,7 +86,7 @@ jobs:
           merge-multiple: true
           path: dist
       - name: Attest PyPI artifacts
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: dist/*
       - uses: pypa/gh-action-pypi-publish@release/v1
