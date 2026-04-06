@@ -13,11 +13,6 @@ jobs:
     name: Docker (${{ matrix.image.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-      attestations: write
     strategy:
       fail-fast: false
       matrix:
