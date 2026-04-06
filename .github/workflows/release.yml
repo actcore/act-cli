@@ -37,7 +37,8 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: sbom
-          path: "*.cdx.json"
+          path: "**/*.cdx.json"
+          if-no-files-found: error
 
   attest:
     name: Attest binaries
@@ -104,6 +105,9 @@ jobs:
         with:
           subject-path: dist/*
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+          verbose: true
 
   npm-publish:
     name: Publish to npm
