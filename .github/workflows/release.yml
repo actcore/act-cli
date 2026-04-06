@@ -62,7 +62,7 @@ jobs:
         uses: actions/attest@v4
         with:
           subject-path: "artifacts/*"
-          sbom-path: "sbom/*.cdx.json"
+          sbom-path: "sbom/**/*.cdx.json"
 
   release:
     name: GitHub Release
