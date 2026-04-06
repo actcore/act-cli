@@ -16,11 +16,12 @@ jobs:
           pattern: "{act,act-build}-*"
           merge-multiple: true
 
-      - name: Inject version from Cargo.toml
+      - name: Set package versions
         run: |
-          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-          find npm -name 'package.json' -exec sed -i "s/0.0.0/$VERSION/g" {} +
+          VERSION=$(cargo metadata --format-version=1 --no-deps | jq -r '.packages[] | select(.name == "act-cli") | .version')
+          cd npm
+          npm version "$VERSION" --workspaces --no-git-tag-version
+          sed -i "s/0.0.0/$VERSION/g" @actcore/act/package.json @actcore/act-build/package.json
 
       - name: Populate act-cli platform packages
         run: |
@@ -54,19 +55,7 @@ jobs:
           chmod +x npm/@actcore/act-build-darwin-x64/act-build
           chmod +x npm/@actcore/act-build-darwin-arm64/act-build
 
-      - name: Pack npm packages
-        run: |
-          mkdir -p dist-npm
-          for dir in npm/@actcore/act-cli-*/; do
-            (cd "$dir" && npm pack --pack-destination ../../../dist-npm)
-          done
-          for dir in npm/@actcore/act-build-*/; do
-            (cd "$dir" && npm pack --pack-destination ../../../dist-npm)
-          done
-          (cd npm/@actcore/act && npm pack --pack-destination ../../../dist-npm)
-          (cd npm/@actcore/act-build && npm pack --pack-destination ../../../dist-npm)
-
       - uses: actions/upload-artifact@v7
         with:
           name: npm-packages
-          path: dist-npm/*.tgz
+          path: npm

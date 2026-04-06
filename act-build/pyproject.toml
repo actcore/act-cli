@@ -6,7 +6,7 @@ build-backend = "maturin"
 name = "act-build"
 dynamic = ["version"]
 description = "Build tool for ACT WASM components"
-readme = "README.md"
+readme = "../README.md"
 license = "MIT OR Apache-2.0"
 requires-python = ">=3.8"
 keywords = ["act", "wasm", "component-model", "build"]

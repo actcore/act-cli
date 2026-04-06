@@ -11,5 +11,5 @@ hooks = [
 repo = "local"
 hooks = [
     { id = "cargo-clippy", name = "cargo clippy (host)", entry = "cargo clippy -- -D warnings", language = "system", pass_filenames = false, always_run = true },
-    { id = "cargo-fmt", name = "cargo fmt", entry = "cargo fmt --all -- --check", language = "system", pass_filenames = false, always_run = true },
+    { id = "cargo-fmt", name = "cargo fmt", entry = "cargo fmt --all", language = "system", pass_filenames = false, always_run = true },
 ]

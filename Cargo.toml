@@ -14,11 +14,5 @@ readme = "README.md"
 act-types = "0.3"
 wasmparser = "0.246"
 
-[patch.crates-io]
-# Fix SIGILL on Android: wasmtime fiber uses PAuth instructions (paciasp/autiasp)
-# unconditionally, but Android doesn't configure PAuth keys.
-# See: https://github.com/bytecodealliance/wasmtime/issues/12778
-wasmtime-internal-fiber = { git = "https://github.com/Heap-Hop/wasmtime.git", branch = "android_pauth" }
-
 [profile.release]
 lto = "thin"
