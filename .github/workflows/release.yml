@@ -23,27 +23,13 @@ jobs:
     uses: ./.github/workflows/build-npm.yml
 
   sbom:
-    name: Generate SBOM
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install cargo-cyclonedx
-        uses: taiki-e/cache-cargo-install-action@v3
-        with:
-          tool: cargo-cyclonedx
-      - name: Generate CycloneDX SBOM
-        run: cargo cyclonedx -f json --target all
-      - uses: actions/upload-artifact@v4
-        with:
-          name: sbom
-          path: "**/*.cdx.json"
-          if-no-files-found: error
+    uses: ./.github/workflows/build-sbom.yml
 
   attest:
     name: Attest binaries
     needs: [build, sbom]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -64,32 +50,11 @@ jobs:
           subject-path: "artifacts/*"
           sbom-path: "sbom/**/*.cdx.json"
 
-  release:
-    name: GitHub Release
-    needs: [attest, pypi-publish, npm-publish, crates-publish, docker-publish]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v8
-        with:
-          path: artifacts
-          pattern: "{act,act-build}-*"
-          merge-multiple: true
-      - uses: actions/download-artifact@v8
-        with:
-          name: sbom
-          path: sbom
-      - name: Create GitHub Release
-        run: |
-          gh release create ${{ github.ref_name }} artifacts/act-* artifacts/act-build-* sbom/*.cdx.json \
-            --title "${{ github.ref_name }}" \
-            --generate-notes
-        env:
-          GH_TOKEN: ${{ github.token }}
-
   pypi-publish:
     name: Publish to PyPI
-    needs: build-pypi
+    needs: [build, build-pypi]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment: pypi
     permissions:
       id-token: write
@@ -113,6 +78,7 @@ jobs:
     name: Publish to npm
     needs: build-npm
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: npm
     permissions:
       id-token: write
@@ -133,7 +99,9 @@ jobs:
 
   crates-publish:
     name: Publish to crates.io
+    needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment: crates-io
     permissions:
       id-token: write
@@ -157,54 +125,44 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
   docker-publish:
-    name: Publish Docker image
     needs: build
+    uses: ./.github/workflows/build-docker.yml
+    with:
+      push: true
+    secrets: inherit
+
+  release:
+    name: GitHub Release
+    needs: [attest, pypi-publish, npm-publish, crates-publish, docker-publish]
     runs-on: ubuntu-latest
-    permissions:
-      packages: write
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v8
         with:
-          path: .
-          pattern: "{act,act-build}-linux-*-gnu"
+          path: artifacts
+          pattern: "{act,act-build}-*"
           merge-multiple: true
-      - run: chmod +x act-linux-* act-build-linux-*
-      - uses: docker/setup-qemu-action@v4
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
+      - uses: actions/download-artifact@v8
         with:
-          registry: docker.io
-          username: ${{ secrets.DOCKER_IO_USERNAME }}
-          password: ${{ secrets.DOCKER_IO_PASSWORD }}
-      - uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: container/act.containerfile
-          push: true
-          platforms: linux/amd64,linux/arm64,linux/riscv64
-          provenance: true
-          sbom: true
-          tags: |
-            docker.io/actcore/act:${{ github.ref_name }}
-            docker.io/actcore/act:latest
-            ghcr.io/actcore/act:${{ github.ref_name }}
-            ghcr.io/actcore/act:latest
-      - uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: container/act-build.containerfile
-          push: true
-          platforms: linux/amd64,linux/arm64,linux/riscv64
-          provenance: true
-          sbom: true
-          tags: |
-            docker.io/actcore/act-build:${{ github.ref_name }}
-            docker.io/actcore/act-build:latest
-            ghcr.io/actcore/act-build:${{ github.ref_name }}
-            ghcr.io/actcore/act-build:latest
+          name: sbom
+          path: sbom
+      - name: Extract release notes from CHANGELOG
+        shell: bash
+        run: |
+          VERSION="${{ github.ref_name }}"
+          awk -v ver="$VERSION" '$0 ~ "^## \\[" ver "\\]"{flag=1;next}/^## \[/{flag=0}flag' CHANGELOG.md > /tmp/notes.md
+          if [ ! -s /tmp/notes.md ]; then
+            echo "No release notes found for $VERSION in CHANGELOG.md" >&2
+            exit 1
+          fi
+          cat /tmp/notes.md
+      - name: Create GitHub Release
+        run: |
+          gh release create ${{ github.ref_name }} \
+            artifacts/act-* artifacts/act-build-* \
+            sbom/*/*.cdx.json \
+            --title "${{ github.ref_name }}" \
+            --notes-file /tmp/notes.md
+        env:
+          GH_TOKEN: ${{ github.token }}

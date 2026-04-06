@@ -4,21 +4,27 @@ on:
   workflow_call:
 
 jobs:
-  linux:
+  wheels:
     name: wheel (${{ matrix.crate.name }}, ${{ matrix.platform.name }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.platform.os }}
+    timeout-minutes: 60
     strategy:
+      fail-fast: false
       matrix:
         crate:
           - { name: act-cli, manifest: act-cli/Cargo.toml }
           - { name: act-build, manifest: act-build/Cargo.toml }
         platform:
-          - { name: manylinux-x86_64, target: x86_64, manylinux: auto }
-          - { name: manylinux-aarch64, target: aarch64, manylinux: auto }
-          - { name: manylinux-riscv64, target: riscv64gc-unknown-linux-gnu, manylinux: auto }
-          - { name: musllinux-x86_64, target: x86_64-unknown-linux-musl, manylinux: musllinux_1_2 }
-          - { name: musllinux-aarch64, target: aarch64-unknown-linux-musl, manylinux: musllinux_1_2 }
-          - { name: musllinux-riscv64, target: riscv64gc-unknown-linux-musl, manylinux: musllinux_1_2 }
+          - { name: manylinux-x86_64, os: ubuntu-latest, target: x86_64, manylinux: auto, zig: true }
+          - { name: manylinux-aarch64, os: ubuntu-latest, target: aarch64, manylinux: auto, zig: true }
+          - { name: manylinux-riscv64, os: ubuntu-latest, target: riscv64gc-unknown-linux-gnu, manylinux: auto, zig: true }
+          - { name: musllinux-x86_64, os: ubuntu-latest, target: x86_64-unknown-linux-musl, manylinux: musllinux_1_2, zig: true }
+          - { name: musllinux-aarch64, os: ubuntu-latest, target: aarch64-unknown-linux-musl, manylinux: musllinux_1_2, zig: true }
+          - { name: musllinux-riscv64, os: ubuntu-latest, target: riscv64gc-unknown-linux-musl, manylinux: musllinux_1_2, zig: true }
+          - { name: macos-x86_64, os: macos-latest, target: x86_64-apple-darwin, manylinux: "", zig: false }
+          - { name: macos-aarch64, os: macos-latest, target: aarch64-apple-darwin, manylinux: "", zig: false }
+          - { name: windows-x64, os: windows-latest, target: "", manylinux: "", zig: false }
+          - { name: windows-arm64, os: windows-latest, target: aarch64-pc-windows-msvc, manylinux: "", zig: false }
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -34,79 +40,19 @@ jobs:
       - uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist --zig --manifest-path ${{ matrix.crate.manifest }}
           manylinux: ${{ matrix.platform.manylinux }}
+          args: --release --out dist --manifest-path ${{ matrix.crate.manifest }}${{ matrix.platform.zig && ' --zig' || '' }}
       - uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.crate.name }}-${{ matrix.platform.name }}
           path: dist
 
-  macos:
-    name: wheel (${{ matrix.crate.name }}, macos-${{ matrix.target }})
-    runs-on: macos-latest
-    strategy:
-      matrix:
-        crate:
-          - { name: act-cli, manifest: act-cli/Cargo.toml }
-          - { name: act-build, manifest: act-build/Cargo.toml }
-        target: [x86_64, aarch64]
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.14"
-      - uses: moonrepo/setup-rust@v1
-        with:
-          bins: wit-deps-cli
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - run: wit-deps
-        working-directory: act-cli
-      - uses: PyO3/maturin-action@v1
-        with:
-          target: ${{ matrix.target }}-apple-darwin
-          args: --release --out dist --manifest-path ${{ matrix.crate.manifest }}
-      - uses: actions/upload-artifact@v7
-        with:
-          name: wheels-${{ matrix.crate.name }}-macos-${{ matrix.target }}
-          path: dist
-
-  windows:
-    name: wheel (${{ matrix.crate.name }}, windows-${{ matrix.platform.target }})
-    runs-on: windows-latest
-    strategy:
-      matrix:
-        crate:
-          - { name: act-cli, manifest: act-cli/Cargo.toml }
-          - { name: act-build, manifest: act-build/Cargo.toml }
-        platform:
-          - { target: x64, maturin-target: "" }
-          - { target: arm64, maturin-target: aarch64-pc-windows-msvc }
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.14"
-      - uses: moonrepo/setup-rust@v1
-        with:
-          bins: wit-deps-cli
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - run: wit-deps
-        working-directory: act-cli
-      - uses: PyO3/maturin-action@v1
-        with:
-          target: ${{ matrix.platform.maturin-target }}
-          args: --release --out dist --manifest-path ${{ matrix.crate.manifest }}
-      - uses: actions/upload-artifact@v7
-        with:
-          name: wheels-${{ matrix.crate.name }}-windows-${{ matrix.platform.target }}
-          path: dist
-
   sdist:
     name: sdist (${{ matrix.crate.name }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
+      fail-fast: false
       matrix:
         crate:
           - { name: act-cli, manifest: act-cli/Cargo.toml }
