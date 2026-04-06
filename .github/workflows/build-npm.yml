@@ -19,9 +19,7 @@ jobs:
       - name: Set package versions
         run: |
           VERSION=$(cargo metadata --format-version=1 --no-deps | jq -r '.packages[] | select(.name == "act-cli") | .version')
-          cd npm
-          npm version "$VERSION" --workspaces --no-git-tag-version
-          sed -i "s/0.0.0/$VERSION/g" @actcore/act/package.json @actcore/act-build/package.json
+          find npm -name package.json -exec sed -i "s/\"0.0.0\"/\"$VERSION\"/g" {} +
 
       - name: Populate act-cli platform packages
         run: |
