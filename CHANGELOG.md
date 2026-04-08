@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.8] - 2026-04-08
+
+### Changed
+
+- CI/release pipeline refactored into reusable workflows (`build-sbom.yml`, `build-docker.yml`, consolidated `build-pypi.yml` matrix), with stricter job dependencies so a partial build failure can no longer publish a split release across crates.io and PyPI.
+- GitHub Release notes now come from `CHANGELOG.md` instead of auto-generated PR lists, so users see the humanized entry.
+- Docker and SBOM builds now run on PRs (dry-run) to catch regressions before tag push.
+- Explicit `timeout-minutes` added across all CI jobs to surface hangs instead of burning the 6h default.
+- `ci.yml` now cancels stacked runs on fast re-pushes via a concurrency group.
+
+### Fixed
+
+- PyPI sdist upload rejection caused by a `License-File` path mismatch in maturin-generated metadata (license files are still shipped inside the sdist).
+- SBOM artifact attestation path now matches the per-crate directory layout (`act-build/*.cdx.json`, `act-cli/*.cdx.json`).
+- `build-docker.yml` no longer requests permissions its caller can't grant, which was preventing CI jobs from starting.
+
 ## [0.3.7] - 2026-04-08
 
 ### Fixed
