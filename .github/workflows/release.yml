@@ -26,15 +26,22 @@ jobs:
     uses: ./.github/workflows/build-sbom.yml
 
   attest:
-    name: Attest binaries
+    name: Attest ${{ matrix.crate }}
     needs: [build, sbom]
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      matrix:
+        include:
+          - crate: act-cli
+            artifact-pattern: "act-!(build-*)"
+          - crate: act-build
+            artifact-pattern: "act-build-*"
     steps:
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
-          pattern: "{act,act-build}-*"
+          pattern: ${{ matrix.artifact-pattern }}
           merge-multiple: true
       - uses: actions/download-artifact@v8
         with:
@@ -48,7 +55,7 @@ jobs:
         uses: actions/attest@v4
         with:
           subject-path: "artifacts/*"
-          sbom-path: "sbom/**/*.cdx.json"
+          sbom-path: "sbom/${{ matrix.crate }}/${{ matrix.crate }}.cdx.json"
 
   pypi-publish:
     name: Publish to PyPI
