@@ -103,13 +103,13 @@ jobs:
           # Platform packages first (no cross-deps), then wrappers last
           for tgz in packed/*.tgz; do
             case "$(basename "$tgz")" in
-              actcore-act-cli-*|actcore-act-build-[a-z]*) npm publish "$tgz" --provenance --access public || true ;;
+              actcore-act-cli-*|actcore-act-build-[a-z]*) npm publish "./$tgz" --provenance --access public || true ;;
             esac
           done
           for tgz in packed/*.tgz; do
             case "$(basename "$tgz")" in
               actcore-act-cli-*|actcore-act-build-[a-z]*) ;; # already published
-              *) npm publish "$tgz" --provenance --access public || true ;;
+              *) npm publish "./$tgz" --provenance --access public || true ;;
             esac
           done
         env:
