@@ -53,7 +53,13 @@ jobs:
           chmod +x npm/@actcore/act-build-darwin-x64/act-build
           chmod +x npm/@actcore/act-build-darwin-arm64/act-build
 
+      - name: Pack all npm packages
+        run: |
+          mkdir -p packed
+          for dir in npm/@actcore/*/; do
+            (cd "$dir" && npm pack --pack-destination "$GITHUB_WORKSPACE/packed")
+          done
       - uses: actions/upload-artifact@v7
         with:
           name: npm-packages
-          path: npm
+          path: packed/*.tgz

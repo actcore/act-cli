@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.9] - 2026-04-14
+
+### Fixed
+
+- npm packages now preserve executable permissions on binaries (fixes silent failure when running `npx @actcore/act` on CI)
+- npm shims (`bin/act`, `bin/act-build`) ensure executable permission before spawning the binary as a fallback
+
+### Changed
+
+- npm release pipeline packs `.tgz` archives before upload to preserve file permissions across artifact transfer
+- Per-crate SBOM attestation in release workflow
+
 ## [0.3.8] - 2026-04-08
 
 ### Changed

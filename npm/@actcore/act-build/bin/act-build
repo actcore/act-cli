@@ -36,6 +36,9 @@ try {
   process.exit(1);
 }
 
+const fs = require("fs");
+try { fs.chmodSync(binPath, 0o755); } catch {}
+
 const result = require("child_process").spawnSync(binPath, process.argv.slice(2), {
   stdio: "inherit",
 });
