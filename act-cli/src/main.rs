@@ -44,7 +44,7 @@ enum OutputFormat {
 }
 
 #[derive(Parser)]
-#[command(name = "act", about = "ACT — Agent Component Tools CLI")]
+#[command(name = "act", version, about = "ACT — Agent Component Tools CLI")]
 enum Cli {
     /// Load a .wasm component and serve it (HTTP or MCP)
     Run {

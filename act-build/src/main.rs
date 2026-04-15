@@ -9,7 +9,11 @@ mod validate;
 mod wasm;
 
 #[derive(Parser)]
-#[command(name = "act-build", about = "Build tool for ACT WASM components")]
+#[command(
+    name = "act-build",
+    version,
+    about = "Build tool for ACT WASM components"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,

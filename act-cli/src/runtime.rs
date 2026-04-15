@@ -317,12 +317,7 @@ pub fn spawn_component_actor(instance: ActWorld, mut store: Store<HostState>) ->
                                 let _ = stream.pipe(access, consumer);
                             });
 
-                            if tokio::time::timeout(std::time::Duration::from_secs(30), done_rx)
-                                .await
-                                .is_err()
-                            {
-                                tracing::warn!("stream consumption timed out after 30s");
-                            }
+                            let _ = done_rx.await;
 
                             Ok::<_, wasmtime::Error>(())
                         })
