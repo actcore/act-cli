@@ -369,7 +369,7 @@ async fn cmd_call(
         Ok(result) => {
             for event in &result.events {
                 match event {
-                    runtime::act::core::types::StreamEvent::Content(part) => {
+                    runtime::act::core::types::ToolEvent::Content(part) => {
                         let mime = part.mime_type.as_deref().unwrap_or("application/cbor");
                         if mime.starts_with("text/")
                             || mime == "application/json"
@@ -397,7 +397,7 @@ async fn cmd_call(
                             std::io::stdout().write_all(&part.data)?;
                         }
                     }
-                    runtime::act::core::types::StreamEvent::Error(err) => {
+                    runtime::act::core::types::ToolEvent::Error(err) => {
                         let ls = act_types::types::LocalizedString::from(&err.message);
                         anyhow::bail!("{}: {}", err.kind, ls.any_text());
                     }

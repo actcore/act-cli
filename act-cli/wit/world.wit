@@ -1,5 +1,5 @@
 package host:impl;
 
 world act-world {
-  export act:core/tool-provider@0.2.0;
+  export act:core/tool-provider@0.3.0;
 }

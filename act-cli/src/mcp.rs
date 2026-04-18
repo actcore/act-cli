@@ -265,10 +265,10 @@ async fn handle_tools_call(
 
             for event in &result.events {
                 match event {
-                    runtime::act::core::types::StreamEvent::Content(part) => {
+                    runtime::act::core::types::ToolEvent::Content(part) => {
                         content.push(map_content_part(part));
                     }
-                    runtime::act::core::types::StreamEvent::Error(err) => {
+                    runtime::act::core::types::ToolEvent::Error(err) => {
                         is_error = true;
                         let message = act_types::types::LocalizedString::from(&err.message)
                             .any_text()

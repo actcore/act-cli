@@ -88,7 +88,7 @@ fn internal_error_response(message: &str) -> axum::response::Response {
 fn sse_event_to_axum(event: runtime::SseEvent) -> Option<Result<Event, std::convert::Infallible>> {
     match event {
         runtime::SseEvent::Stream(stream_event) => match stream_event {
-            runtime::act::core::types::StreamEvent::Content(part) => {
+            runtime::act::core::types::ToolEvent::Content(part) => {
                 let data = cbor::decode_content_data(&part.data, part.mime_type.as_deref());
                 let json = serde_json::json!({
                     "data": data,
@@ -99,7 +99,7 @@ fn sse_event_to_axum(event: runtime::SseEvent) -> Option<Result<Event, std::conv
                     .json_data(json)
                     .expect("json_data with serde_json::Value is infallible")))
             }
-            runtime::act::core::types::StreamEvent::Error(err) => {
+            runtime::act::core::types::ToolEvent::Error(err) => {
                 let ls = act_types::types::LocalizedString::from(&err.message);
                 let message = ls.any_text().to_string();
                 tracing::warn!(kind = %err.kind, %message, "Stream error (SSE)");
@@ -258,7 +258,7 @@ async fn call_tool_buffered(
                 .events
                 .iter()
                 .filter_map(|event| match event {
-                    runtime::act::core::types::StreamEvent::Content(part) => {
+                    runtime::act::core::types::ToolEvent::Content(part) => {
                         let data = cbor::decode_content_data(&part.data, part.mime_type.as_deref());
                         Some(act_http::ContentPart {
                             data,
@@ -266,12 +266,12 @@ async fn call_tool_buffered(
                             metadata: None,
                         })
                     }
-                    runtime::act::core::types::StreamEvent::Error(_) => None,
+                    runtime::act::core::types::ToolEvent::Error(_) => None,
                 })
                 .collect();
 
             let stream_error = result.events.iter().find_map(|event| match event {
-                runtime::act::core::types::StreamEvent::Error(e) => Some(e),
+                runtime::act::core::types::ToolEvent::Error(e) => Some(e),
                 _ => None,
             });
 

@@ -205,12 +205,12 @@ pub enum ComponentRequest {
 
 /// Collected result from call-tool (stream already consumed).
 pub struct CallToolResult {
-    pub events: Vec<act::core::types::StreamEvent>,
+    pub events: Vec<act::core::types::ToolEvent>,
 }
 
 /// Events sent through the SSE channel. Wraps stream events plus a terminal Done signal.
 pub enum SseEvent {
-    Stream(act::core::types::StreamEvent),
+    Stream(act::core::types::ToolEvent),
     Done,
     Error(ComponentError),
 }
@@ -301,20 +301,31 @@ pub fn spawn_component_actor(instance: ActWorld, mut store: Store<HostState>) ->
                 ComponentRequest::CallTool { call, reply } => {
                     let provider = instance.act_core_tool_provider().clone();
 
-                    let collected = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+                    let collected: std::sync::Arc<
+                        std::sync::Mutex<Vec<act::core::types::ToolEvent>>,
+                    > = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
                     let collected2 = collected.clone();
                     let (done_tx, done_rx) = oneshot::channel::<()>();
 
                     let result = store
                         .run_concurrent(async |accessor| {
-                            let stream = provider.call_call_tool(accessor, call).await?;
+                            let tool_result = provider.call_call_tool(accessor, call).await?;
 
-                            accessor.with(|access| {
-                                let consumer = CollectingConsumer {
-                                    collected,
-                                    done_tx: Some(done_tx),
-                                };
-                                let _ = stream.pipe(access, consumer);
+                            accessor.with(|access| match tool_result {
+                                act::core::types::ToolResult::Streaming(stream) => {
+                                    let consumer = CollectingConsumer {
+                                        collected,
+                                        done_tx: Some(done_tx),
+                                    };
+                                    let _ = stream.pipe(access, consumer);
+                                }
+                                act::core::types::ToolResult::Immediate(events) => {
+                                    collected
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner())
+                                        .extend(events);
+                                    let _ = done_tx.send(());
+                                }
                             });
 
                             let _ = done_rx.await;
@@ -347,14 +358,24 @@ pub fn spawn_component_actor(instance: ActWorld, mut store: Store<HostState>) ->
 
                     let result = store
                         .run_concurrent(async |accessor| {
-                            let stream = provider.call_call_tool(accessor, call).await?;
+                            let tool_result = provider.call_call_tool(accessor, call).await?;
 
-                            accessor.with(|access| {
-                                let consumer = ForwardingConsumer {
-                                    event_tx: event_tx.clone(),
-                                    done_tx: Some(done_tx),
-                                };
-                                let _ = stream.pipe(access, consumer);
+                            accessor.with(|access| match tool_result {
+                                act::core::types::ToolResult::Streaming(stream) => {
+                                    let consumer = ForwardingConsumer {
+                                        event_tx: event_tx.clone(),
+                                        done_tx: Some(done_tx),
+                                    };
+                                    let _ = stream.pipe(access, consumer);
+                                }
+                                act::core::types::ToolResult::Immediate(events) => {
+                                    for event in events {
+                                        if event_tx.try_send(SseEvent::Stream(event)).is_err() {
+                                            break;
+                                        }
+                                    }
+                                    let _ = done_tx.send(());
+                                }
                             });
 
                             let _ = done_rx.await;
@@ -383,12 +404,12 @@ pub fn spawn_component_actor(instance: ActWorld, mut store: Store<HostState>) ->
 
 /// A StreamConsumer that collects all items into a Vec and signals completion.
 struct CollectingConsumer {
-    collected: std::sync::Arc<std::sync::Mutex<Vec<act::core::types::StreamEvent>>>,
+    collected: std::sync::Arc<std::sync::Mutex<Vec<act::core::types::ToolEvent>>>,
     done_tx: Option<oneshot::Sender<()>>,
 }
 
 impl StreamConsumer<HostState> for CollectingConsumer {
-    type Item = act::core::types::StreamEvent;
+    type Item = act::core::types::ToolEvent;
 
     fn poll_consume(
         mut self: Pin<&mut Self>,
@@ -425,7 +446,7 @@ struct ForwardingConsumer {
 }
 
 impl StreamConsumer<HostState> for ForwardingConsumer {
-    type Item = act::core::types::StreamEvent;
+    type Item = act::core::types::ToolEvent;
 
     fn poll_consume(
         mut self: Pin<&mut Self>,
