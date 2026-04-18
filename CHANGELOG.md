@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-04-18
+
+### Changed
+
+- Upgrade to `act:core@0.3.0`. Host runtime dispatches on the new `tool-result` variant: `streaming(stream<tool-event>)` uses the existing pipe-to-consumer path; `immediate(list<tool-event>)` pushes events directly into the consumer without stream machinery.
+- Rename `StreamEvent` → `ToolEvent` throughout the runtime, HTTP, MCP, and CLI code paths.
+- Remove the hardcoded 30s stream-consumption timeout; cancellation is now driven by the protocol (dropping the stream reader) or runtime-level interruption (epoch/fuel).
+- Bump `act-types` to 0.4 and `wasmparser` / `wasm-encoder` to 0.247.
+
+### Added
+
+- `--version` flag on `act` and `act-build` binaries.
+
+### Fixed
+
+- `publish` CI steps are now idempotent and safe to re-run.
+
 ## [0.3.10] - 2026-04-15
 
 ### Fixed
