@@ -38,7 +38,87 @@ use wasmtime_wasi::p2::bindings::filesystem::types::{
 };
 use wasmtime_wasi::p2::{DynInputStream, DynOutputStream, FsError, FsResult};
 
-use crate::fs_matcher::{FsDecision, FsMatcher};
+use crate::config::{FsConfig, PolicyMode};
+use crate::runtime::fs_matcher::{FsDecision, FsMatcher};
+
+// ── Preopen derivation ────────────────────────────────────────────────────
+
+/// A (guest path → host path) pair handed to wasmtime-wasi's `preopened_dir`.
+///
+/// With the virtual-root policy model the guest always sees the whole host
+/// filesystem at `/` (Unix) or at `/c`, `/d`, ... (Windows drives); the
+/// `FsMatcher` gates per-op access. These records are the bridge between
+/// config and the wasmtime setup code.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Preopen {
+    pub guest: String,
+    pub host: PathBuf,
+}
+
+/// Derive the preopen list for an `FsConfig`.
+///
+/// - `Deny` → no preopens (guest can't name anything).
+/// - `Open` / `Allowlist` → platform root preopens. Unix: one `/` preopen.
+///   Windows: one per accessible drive letter (`/c` → `C:\`, `/d` → `D:\`, …;
+///   absent drives are skipped).
+pub fn derive_preopens(cfg: &FsConfig) -> Vec<Preopen> {
+    match cfg.mode {
+        PolicyMode::Deny => Vec::new(),
+        PolicyMode::Open | PolicyMode::Allowlist => platform_root_preopens(),
+    }
+}
+
+#[cfg(unix)]
+fn platform_root_preopens() -> Vec<Preopen> {
+    vec![Preopen {
+        guest: "/".to_string(),
+        host: PathBuf::from("/"),
+    }]
+}
+
+#[cfg(windows)]
+fn platform_root_preopens() -> Vec<Preopen> {
+    let mut mounts = Vec::new();
+    for letter in b'A'..=b'Z' {
+        let c = letter as char;
+        let host = PathBuf::from(format!("{}:\\", c));
+        // `metadata` trips DriveNotReady / access errors for absent drives;
+        // treat any failure as "skip this letter".
+        if std::fs::metadata(&host).is_ok() {
+            let guest = format!("/{}", c.to_ascii_lowercase());
+            mounts.push(Preopen { guest, host });
+        }
+    }
+    mounts
+}
+
+#[cfg(not(any(unix, windows)))]
+fn platform_root_preopens() -> Vec<Preopen> {
+    vec![Preopen {
+        guest: "/".to_string(),
+        host: PathBuf::from("/"),
+    }]
+}
+
+/// Adjust guest paths based on the component's `std:fs:mount-root` —
+/// cosmetic renaming of the preopen entries. Host paths are untouched and
+/// the policy matcher always operates on host paths.
+pub fn apply_mount_root(preopens: &mut [Preopen], mount_root: &str) {
+    if mount_root == "/" || mount_root.is_empty() {
+        return;
+    }
+    let root = mount_root.trim_end_matches('/');
+    for p in preopens {
+        if p.guest == "/" {
+            p.guest = root.to_string();
+        } else {
+            let guest = p.guest.trim_start_matches('/');
+            p.guest = format!("{}/{}", root, guest);
+        }
+    }
+}
+
+// ── Wasmtime host impl ────────────────────────────────────────────────────
 
 /// `HasData` marker for our policy-aware filesystem view.
 pub struct PolicyFilesystem;
@@ -408,5 +488,69 @@ impl HostDirectoryEntryStream for PolicyFilesystemCtxView<'_> {
 
     fn drop(&mut self, stream: Resource<types::DirectoryEntryStream>) -> wasmtime::Result<()> {
         HostDirectoryEntryStream::drop(&mut self.inner(), stream)
+    }
+}
+
+#[cfg(test)]
+mod preopen_tests {
+    use super::*;
+
+    #[test]
+    fn deny_mode_yields_no_preopens() {
+        let cfg = FsConfig::deny();
+        assert!(derive_preopens(&cfg).is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn unix_open_and_allowlist_yield_root() {
+        for mode in [PolicyMode::Open, PolicyMode::Allowlist] {
+            let cfg = FsConfig {
+                mode,
+                ..Default::default()
+            };
+            let preopens = derive_preopens(&cfg);
+            assert_eq!(preopens.len(), 1);
+            assert_eq!(preopens[0].guest, "/");
+            assert_eq!(preopens[0].host, PathBuf::from("/"));
+        }
+    }
+
+    #[test]
+    fn apply_mount_root_is_a_noop_for_root() {
+        let mut preopens = vec![Preopen {
+            guest: "/".to_string(),
+            host: PathBuf::from("/host"),
+        }];
+        apply_mount_root(&mut preopens, "/");
+        assert_eq!(preopens[0].guest, "/");
+    }
+
+    #[test]
+    fn apply_mount_root_rewrites_virtual_root() {
+        let mut preopens = vec![Preopen {
+            guest: "/".to_string(),
+            host: PathBuf::from("/host"),
+        }];
+        apply_mount_root(&mut preopens, "/data");
+        assert_eq!(preopens[0].guest, "/data");
+        assert_eq!(preopens[0].host, PathBuf::from("/host"));
+    }
+
+    #[test]
+    fn apply_mount_root_prefixes_drive_letters() {
+        let mut preopens = vec![
+            Preopen {
+                guest: "/c".to_string(),
+                host: PathBuf::from("C:\\"),
+            },
+            Preopen {
+                guest: "/d".to_string(),
+                host: PathBuf::from("D:\\"),
+            },
+        ];
+        apply_mount_root(&mut preopens, "/host");
+        assert_eq!(preopens[0].guest, "/host/c");
+        assert_eq!(preopens[1].guest, "/host/d");
     }
 }

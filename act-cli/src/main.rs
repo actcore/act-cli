@@ -1,9 +1,6 @@
 mod config;
 mod format;
-mod fs_matcher;
-mod fs_policy;
 mod http;
-mod http_policy;
 mod mcp;
 mod resolve;
 mod runtime;
@@ -299,9 +296,9 @@ async fn prepare_component(
 
     runtime::warn_missing_capabilities(&info, &fs, &http);
 
-    let mut preopens = fs.preopens()?;
+    let mut preopens = runtime::fs_policy::derive_preopens(&fs);
     let mount_root = info.std.capabilities.fs_mount_root().unwrap_or("/");
-    config::apply_mount_root(&mut preopens, mount_root);
+    runtime::fs_policy::apply_mount_root(&mut preopens, mount_root);
 
     let metadata: runtime::Metadata = resolved
         .metadata

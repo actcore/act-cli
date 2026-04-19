@@ -54,66 +54,6 @@ impl FsConfig {
             ..Default::default()
         }
     }
-
-    /// Preopens for this policy.
-    ///
-    /// For every non-`Deny` mode, the `FsMatcher` is the only enforcement
-    /// point — the guest sees the whole (platform-native) host filesystem in
-    /// its namespace but can't actually open anything the matcher denies.
-    ///
-    /// - Unix: a single virtual-root preopen `{guest: "/", host: "/"}`.
-    /// - Windows: one preopen per accessible drive, guest `/{lowercase letter}`
-    ///   → host `{uppercase letter}:\`. Drives are enumerated by attempting
-    ///   `std::fs::metadata` on each letter A–Z; inaccessible drives are
-    ///   silently skipped.
-    ///
-    /// Deny mode: no preopens at all (guest can't name anything).
-    pub fn preopens(&self) -> Result<Vec<DirMount>> {
-        match self.mode {
-            PolicyMode::Deny => Ok(vec![]),
-            PolicyMode::Open | PolicyMode::Allowlist => Ok(platform_root_preopens()),
-        }
-    }
-}
-
-#[cfg(unix)]
-fn platform_root_preopens() -> Vec<DirMount> {
-    vec![DirMount {
-        guest: "/".to_string(),
-        host: PathBuf::from("/"),
-    }]
-}
-
-#[cfg(windows)]
-fn platform_root_preopens() -> Vec<DirMount> {
-    let mut mounts = Vec::new();
-    for letter in b'A'..=b'Z' {
-        let c = letter as char;
-        let host = PathBuf::from(format!("{}:\\", c));
-        // `metadata` trips DriveNotReady / access errors for absent drives;
-        // treat any failure as "skip this letter".
-        if std::fs::metadata(&host).is_ok() {
-            let guest = format!("/{}", c.to_ascii_lowercase());
-            mounts.push(DirMount { guest, host });
-        }
-    }
-    mounts
-}
-
-#[cfg(not(any(unix, windows)))]
-fn platform_root_preopens() -> Vec<DirMount> {
-    // Fall back to a POSIX-ish root on esoteric platforms.
-    vec![DirMount {
-        guest: "/".to_string(),
-        host: PathBuf::from("/"),
-    }]
-}
-
-/// Derived directory mount for wasmtime's `preopened_dir`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct DirMount {
-    pub guest: String,
-    pub host: PathBuf,
 }
 
 /// Resolved HTTP policy for a component invocation.
@@ -410,22 +350,6 @@ pub fn resolve_metadata(
     }
 }
 
-/// Adjust guest paths in preopen mounts based on the component's `std:fs:mount-root`.
-pub fn apply_mount_root(mounts: &mut [DirMount], mount_root: &str) {
-    if mount_root == "/" || mount_root.is_empty() {
-        return;
-    }
-    let root = mount_root.trim_end_matches('/');
-    for mount in mounts {
-        if mount.guest == "/" {
-            mount.guest = root.to_string();
-        } else {
-            let guest = mount.guest.trim_start_matches('/');
-            mount.guest = format!("{}/{}", root, guest);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,38 +363,6 @@ mod tests {
         );
         assert_eq!(PolicyMode::parse("open").unwrap(), PolicyMode::Open);
         assert!(PolicyMode::parse("bogus").is_err());
-    }
-
-    #[test]
-    fn fs_deny_has_no_preopens() {
-        let cfg = FsConfig::deny();
-        assert!(cfg.preopens().unwrap().is_empty());
-    }
-
-    #[test]
-    fn fs_open_maps_root() {
-        let cfg = FsConfig {
-            mode: PolicyMode::Open,
-            ..Default::default()
-        };
-        let mounts = cfg.preopens().unwrap();
-        assert_eq!(mounts.len(), 1);
-        assert_eq!(mounts[0].host, PathBuf::from("/"));
-        assert_eq!(mounts[0].guest, "/");
-    }
-
-    #[test]
-    fn fs_allowlist_uses_virtual_root() {
-        let cfg = FsConfig {
-            mode: PolicyMode::Allowlist,
-            allow: vec!["/tmp/data/**".into(), "~/projects/{foo,bar}/**".into()],
-            ..Default::default()
-        };
-        let mounts = cfg.preopens().unwrap();
-        // Always a single virtual-root preopen; matcher handles the patterns.
-        assert_eq!(mounts.len(), 1);
-        assert_eq!(mounts[0].host, PathBuf::from("/"));
-        assert_eq!(mounts[0].guest, "/");
     }
 
     #[test]
@@ -530,16 +422,6 @@ allow = [{ host = "api.openai.com", scheme = "https" }]
         assert_eq!(http.mode, PolicyMode::Allowlist);
         assert_eq!(http.allow[0].host.as_deref(), Some("api.openai.com"));
         assert_eq!(http.allow[0].scheme.as_deref(), Some("https"));
-    }
-
-    #[test]
-    fn apply_mount_root_rewrites() {
-        let mut mounts = vec![DirMount {
-            guest: "/".to_string(),
-            host: PathBuf::from("/host"),
-        }];
-        apply_mount_root(&mut mounts, "/data");
-        assert_eq!(mounts[0].guest, "/data");
     }
 
     #[test]

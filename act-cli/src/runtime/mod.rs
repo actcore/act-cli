@@ -10,8 +10,11 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use wasmtime_wasi_http::WasiHttpCtx;
 use wasmtime_wasi_http::p3::WasiHttpCtxView;
 
+pub mod fs_matcher;
+pub mod fs_policy;
+pub mod http_policy;
+
 // Generated bindings from WIT — fully auto-generated, no manual patching.
-#[path = "bindings/mod.rs"]
 #[allow(unused_mut, unused_variables, dead_code)]
 mod bindings;
 pub use bindings::*;
@@ -22,15 +25,15 @@ pub struct HostState {
     table: ResourceTable,
     http_p2: WasiHttpCtx,
     http_p3: WasiHttpCtx,
-    http_hooks: crate::http_policy::PolicyHttpHooks,
-    fs_matcher: crate::fs_matcher::FsMatcher,
-    fd_paths: crate::fs_policy::FdPathMap,
+    http_hooks: crate::runtime::http_policy::PolicyHttpHooks,
+    fs_matcher: crate::runtime::fs_matcher::FsMatcher,
+    fd_paths: crate::runtime::fs_policy::FdPathMap,
 }
 
 impl HostState {
     /// Build a policy-aware filesystem view.
-    fn policy_fs_view(&mut self) -> crate::fs_policy::PolicyFilesystemCtxView<'_> {
-        crate::fs_policy::PolicyFilesystemCtxView {
+    fn policy_fs_view(&mut self) -> crate::runtime::fs_policy::PolicyFilesystemCtxView<'_> {
+        crate::runtime::fs_policy::PolicyFilesystemCtxView {
             ctx: self.wasi.filesystem(),
             table: &mut self.table,
             matcher: &self.fs_matcher,
@@ -96,12 +99,12 @@ pub fn create_linker(engine: &Engine) -> Result<Linker<HostState>> {
     linker.allow_shadowing(true);
     wasmtime_wasi::p2::bindings::filesystem::types::add_to_linker::<
         HostState,
-        crate::fs_policy::PolicyFilesystem,
+        crate::runtime::fs_policy::PolicyFilesystem,
     >(&mut linker, |t| t.policy_fs_view())
     .map_err(|e| anyhow::anyhow!("failed to add policy wasi:filesystem/types: {e}"))?;
     wasmtime_wasi::p2::bindings::filesystem::preopens::add_to_linker::<
         HostState,
-        crate::fs_policy::PolicyFilesystem,
+        crate::runtime::fs_policy::PolicyFilesystem,
     >(&mut linker, |t| t.policy_fs_view())
     .map_err(|e| anyhow::anyhow!("failed to add policy wasi:filesystem/preopens: {e}"))?;
     linker.allow_shadowing(false);
@@ -119,7 +122,7 @@ pub fn create_linker(engine: &Engine) -> Result<Linker<HostState>> {
 /// Create a new store with WASI context, preopening directories from resolved mounts.
 pub fn create_store(
     engine: &Engine,
-    preopens: &[crate::config::DirMount],
+    preopens: &[crate::runtime::fs_policy::Preopen],
     http: &crate::config::HttpConfig,
     fs: &crate::config::FsConfig,
 ) -> Result<Store<HostState>> {
@@ -144,15 +147,15 @@ pub fn create_store(
         preopen_pairs.push((mount.guest.clone(), mount.host.clone()));
     }
     let wasi = builder.build();
-    let matcher = crate::fs_matcher::FsMatcher::compile(fs)?;
+    let matcher = crate::runtime::fs_matcher::FsMatcher::compile(fs)?;
     let state = HostState {
         wasi,
         table: ResourceTable::new(),
         http_p2: WasiHttpCtx::new(),
         http_p3: WasiHttpCtx::new(),
-        http_hooks: crate::http_policy::PolicyHttpHooks::new(http.clone()),
+        http_hooks: crate::runtime::http_policy::PolicyHttpHooks::new(http.clone()),
         fs_matcher: matcher,
-        fd_paths: crate::fs_policy::FdPathMap {
+        fd_paths: crate::runtime::fs_policy::FdPathMap {
             preopens: preopen_pairs,
             by_rep: Default::default(),
         },
@@ -258,7 +261,7 @@ pub async fn instantiate_component(
     engine: &Engine,
     component: &Component,
     linker: &Linker<HostState>,
-    preopens: &[crate::config::DirMount],
+    preopens: &[crate::runtime::fs_policy::Preopen],
     http: &crate::config::HttpConfig,
     fs: &crate::config::FsConfig,
 ) -> Result<(ActWorld, Store<HostState>)> {
