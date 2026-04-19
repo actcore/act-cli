@@ -55,24 +55,58 @@ impl FsConfig {
         }
     }
 
-    /// Preopens for this policy. Layer 1 uses a single virtual-root preopen
-    /// at host `/` for every non-`Deny` mode — the `FsMatcher` is the only
-    /// enforcement point. The guest sees the whole host filesystem in its
-    /// namespace but can't actually open anything the matcher denies.
+    /// Preopens for this policy.
+    ///
+    /// For every non-`Deny` mode, the `FsMatcher` is the only enforcement
+    /// point — the guest sees the whole (platform-native) host filesystem in
+    /// its namespace but can't actually open anything the matcher denies.
+    ///
+    /// - Unix: a single virtual-root preopen `{guest: "/", host: "/"}`.
+    /// - Windows: one preopen per accessible drive, guest `/{lowercase letter}`
+    ///   → host `{uppercase letter}:\`. Drives are enumerated by attempting
+    ///   `std::fs::metadata` on each letter A–Z; inaccessible drives are
+    ///   silently skipped.
     ///
     /// Deny mode: no preopens at all (guest can't name anything).
-    ///
-    /// This is Unix-first: preopening `/` assumes a POSIX root. Windows
-    /// support requires preopening each drive separately and is deferred.
     pub fn preopens(&self) -> Result<Vec<DirMount>> {
         match self.mode {
             PolicyMode::Deny => Ok(vec![]),
-            PolicyMode::Open | PolicyMode::Allowlist => Ok(vec![DirMount {
-                guest: "/".to_string(),
-                host: PathBuf::from("/"),
-            }]),
+            PolicyMode::Open | PolicyMode::Allowlist => Ok(platform_root_preopens()),
         }
     }
+}
+
+#[cfg(unix)]
+fn platform_root_preopens() -> Vec<DirMount> {
+    vec![DirMount {
+        guest: "/".to_string(),
+        host: PathBuf::from("/"),
+    }]
+}
+
+#[cfg(windows)]
+fn platform_root_preopens() -> Vec<DirMount> {
+    let mut mounts = Vec::new();
+    for letter in b'A'..=b'Z' {
+        let c = letter as char;
+        let host = PathBuf::from(format!("{}:\\", c));
+        // `metadata` trips DriveNotReady / access errors for absent drives;
+        // treat any failure as "skip this letter".
+        if std::fs::metadata(&host).is_ok() {
+            let guest = format!("/{}", c.to_ascii_lowercase());
+            mounts.push(DirMount { guest, host });
+        }
+    }
+    mounts
+}
+
+#[cfg(not(any(unix, windows)))]
+fn platform_root_preopens() -> Vec<DirMount> {
+    // Fall back to a POSIX-ish root on esoteric platforms.
+    vec![DirMount {
+        guest: "/".to_string(),
+        host: PathBuf::from("/"),
+    }]
 }
 
 /// Derived directory mount for wasmtime's `preopened_dir`.

@@ -98,14 +98,28 @@ fn compile_set(label: &str, patterns: &[String]) -> Result<GlobSet> {
 /// Expand `~` and make patterns absolute. Relative patterns are resolved
 /// against the current directory; patterns beginning with `~` expand against
 /// the home directory. `**` and other globset metacharacters are left intact.
+///
+/// On Windows, backslashes are normalised to forward slashes so the pattern
+/// matches the `/`-separated paths globset operates on. User-written Windows
+/// patterns should already use forward slashes (e.g. `C:/Users/alex/**`);
+/// this normalisation only catches strays introduced by path joining.
 fn expand_pattern(pattern: &str) -> String {
     let expanded = shellexpand::tilde(pattern).into_owned();
-    if Path::new(&expanded).is_absolute() {
-        return expanded;
+    let absolute = if Path::new(&expanded).is_absolute() {
+        expanded
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(&expanded).to_string_lossy().into_owned(),
+            Err(_) => expanded,
+        }
+    };
+    #[cfg(windows)]
+    {
+        absolute.replace('\\', "/")
     }
-    match std::env::current_dir() {
-        Ok(cwd) => cwd.join(&expanded).to_string_lossy().into_owned(),
-        Err(_) => expanded,
+    #[cfg(not(windows))]
+    {
+        absolute
     }
 }
 
