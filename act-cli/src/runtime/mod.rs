@@ -13,6 +13,7 @@ use wasmtime_wasi_http::p3::WasiHttpCtxView;
 pub mod fs_matcher;
 pub mod fs_policy;
 pub mod http_policy;
+pub mod network;
 
 // Generated bindings from WIT — fully auto-generated, no manual patching.
 #[allow(unused_mut, unused_variables, dead_code)]

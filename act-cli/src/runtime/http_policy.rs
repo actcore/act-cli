@@ -33,6 +33,7 @@ use http::Uri;
 use wasmtime_wasi::TrappableError;
 
 use crate::config::{HttpConfig, HttpRule, PolicyMode};
+use crate::runtime::network::{cidr_contains, host_matches};
 
 type P2ErrorCode = wasmtime_wasi_http::p2::bindings::http::types::ErrorCode;
 type P3ErrorCode = wasmtime_wasi_http::p3::bindings::http::types::ErrorCode;
@@ -130,19 +131,6 @@ fn rule_matches(rule: &HttpRule, method: Option<&str>, uri: &Uri) -> bool {
     }
 
     true
-}
-
-fn host_matches(pattern: &str, host: &str) -> bool {
-    if let Some(suffix) = pattern.strip_prefix("*.") {
-        return host == suffix || host.ends_with(&format!(".{}", suffix));
-    }
-    host.eq_ignore_ascii_case(pattern)
-}
-
-fn cidr_contains(spec: &str, ip: IpAddr) -> bool {
-    spec.parse::<cidr::IpCidr>()
-        .map(|c| c.contains(&ip))
-        .unwrap_or(false)
 }
 
 fn deny_reason(method: Option<&str>, uri: &Uri) -> String {
@@ -316,23 +304,6 @@ mod tests {
 
     fn hooks(cfg: HttpConfig) -> PolicyHttpHooks {
         PolicyHttpHooks::new(cfg)
-    }
-
-    #[test]
-    fn host_matches_exact_and_wildcard() {
-        assert!(host_matches("api.example.com", "api.example.com"));
-        assert!(!host_matches("api.example.com", "api2.example.com"));
-        assert!(host_matches("*.example.com", "api.example.com"));
-        assert!(host_matches("*.example.com", "example.com"));
-        assert!(!host_matches("*.example.com", "api.other.com"));
-    }
-
-    #[test]
-    fn cidr_contains_basic() {
-        assert!(cidr_contains("10.0.0.0/8", "10.1.2.3".parse().unwrap()));
-        assert!(!cidr_contains("10.0.0.0/8", "11.0.0.0".parse().unwrap()));
-        assert!(cidr_contains("127.0.0.0/8", "127.1.2.3".parse().unwrap()));
-        assert!(cidr_contains("0.0.0.0/0", "8.8.8.8".parse().unwrap()));
     }
 
     #[test]
