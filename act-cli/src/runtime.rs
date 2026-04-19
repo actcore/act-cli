@@ -16,18 +16,13 @@ use wasmtime_wasi_http::p3::WasiHttpCtxView;
 mod bindings;
 pub use bindings::*;
 
-/// Default no-op hooks for WASI HTTP.
-struct NoopHttpHooks;
-impl wasmtime_wasi_http::p2::WasiHttpHooks for NoopHttpHooks {}
-impl wasmtime_wasi_http::p3::WasiHttpHooks for NoopHttpHooks {}
-
 /// Host state passed into the wasmtime store.
 pub struct HostState {
     wasi: WasiCtx,
     table: ResourceTable,
     http_p2: WasiHttpCtx,
     http_p3: WasiHttpCtx,
-    http_hooks: NoopHttpHooks,
+    http_hooks: crate::http_policy::PolicyHttpHooks,
 }
 
 impl WasiView for HostState {
@@ -96,6 +91,7 @@ pub fn create_linker(engine: &Engine) -> Result<Linker<HostState>> {
 pub fn create_store(
     engine: &Engine,
     preopens: &[crate::config::DirMount],
+    http: &crate::config::HttpConfig,
 ) -> Result<Store<HostState>> {
     let mut builder = WasiCtxBuilder::new();
     for mount in preopens {
@@ -121,7 +117,7 @@ pub fn create_store(
         table: ResourceTable::new(),
         http_p2: WasiHttpCtx::new(),
         http_p3: WasiHttpCtx::new(),
-        http_hooks: NoopHttpHooks,
+        http_hooks: crate::http_policy::PolicyHttpHooks::new(http.clone()),
     };
     Ok(Store::new(engine, state))
 }
@@ -225,8 +221,9 @@ pub async fn instantiate_component(
     component: &Component,
     linker: &Linker<HostState>,
     preopens: &[crate::config::DirMount],
+    http: &crate::config::HttpConfig,
 ) -> Result<(ActWorld, Store<HostState>)> {
-    let mut store = create_store(engine, preopens)?;
+    let mut store = create_store(engine, preopens, http)?;
     let instance = ActWorld::instantiate_async(&mut store, component, linker)
         .await
         .map_err(|e| anyhow::anyhow!("failed to instantiate component: {e}"))?;
