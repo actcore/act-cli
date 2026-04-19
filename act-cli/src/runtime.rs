@@ -259,6 +259,17 @@ pub fn warn_missing_capabilities(
             "component declares wasi:http but policy denies all HTTP access"
         );
     }
+
+    // Phase C2 limitation: FsConfig.deny is parsed but not enforced —
+    // preopens can't express path-level deny overlays. Warn so users know
+    // their overlay is silently inactive until the custom wasi:filesystem
+    // impl lands in phase C1.
+    if !fs.deny.is_empty() {
+        tracing::warn!(
+            component = %info.std.name,
+            "fs deny entries are ignored in this release; use narrower allow entries instead"
+        );
+    }
 }
 
 /// Spawn the component actor task. Owns the Store and ActWorld.
