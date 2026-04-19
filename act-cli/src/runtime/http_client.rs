@@ -37,15 +37,19 @@ impl ActHttpClient {
 /// doesn't include one (the guest may build requests with scheme-less
 /// authorities).
 ///
-/// The body is collected into [`Bytes`] before building the reqwest request
-/// because [`UnsyncBoxBody`] is `!Sync` and cannot be passed directly to
-/// [`reqwest::Body::wrap`].
-#[allow(dead_code)] // called in Task 4 (send_request impl)
-async fn p2_to_reqwest(
+/// The body streams through to reqwest via `Body::wrap_stream` — we don't
+/// buffer. `reqwest::Body::wrap` can't take `UnsyncBoxBody` directly (it
+/// requires `Send + Sync`), but `wrap_stream` only needs `Send`, so we
+/// convert via `http_body_util::BodyStream`. `Frame` data chunks pass
+/// through; trailer frames are dropped (reqwest doesn't propagate request
+/// trailers through `wrap_stream` anyway).
+#[allow(dead_code)] // called in Task 6 (send_p2)
+fn p2_to_reqwest(
     request: hyper::Request<UnsyncBoxBody<Bytes, P2ErrorCode>>,
     use_tls: bool,
 ) -> Result<reqwest::Request, P2ErrorCode> {
-    use http_body_util::BodyExt as _;
+    use futures_util::StreamExt;
+    use http_body_util::BodyStream;
 
     let (parts, body) = request.into_parts();
     let scheme = parts
@@ -75,12 +79,13 @@ async fn p2_to_reqwest(
     let method = reqwest::Method::from_bytes(parts.method.as_str().as_bytes())
         .map_err(|_| P2ErrorCode::HttpProtocolError)?;
 
-    let body_bytes = body
-        .collect()
-        .await
-        .map_err(|_| P2ErrorCode::HttpProtocolError)?
-        .to_bytes();
-    let body = reqwest::Body::from(body_bytes);
+    let data_stream = BodyStream::new(body).filter_map(|frame_res| async move {
+        match frame_res {
+            Ok(frame) => frame.into_data().ok().map(Ok::<_, std::io::Error>),
+            Err(_) => Some(Err(std::io::Error::other("wasi http body stream error"))),
+        }
+    });
+    let body = reqwest::Body::wrap_stream(data_stream);
 
     let mut builder = reqwest::Client::new().request(method, url).body(body);
     for (name, value) in parts.headers.iter() {
@@ -105,8 +110,8 @@ mod tests {
         assert!(client.is_ok(), "{:?}", client.err());
     }
 
-    #[tokio::test]
-    async fn converts_simple_get_request() {
+    #[test]
+    fn converts_simple_get_request() {
         let body: UnsyncBoxBody<bytes::Bytes, _> = Empty::<bytes::Bytes>::new()
             .map_err(|_| unreachable!())
             .boxed_unsync();
@@ -117,9 +122,7 @@ mod tests {
             .body(body)
             .expect("hyper request builds");
 
-        let reqwest_req = p2_to_reqwest(hyper_req, false)
-            .await
-            .expect("conversion succeeds");
+        let reqwest_req = p2_to_reqwest(hyper_req, false).expect("conversion succeeds");
 
         assert_eq!(reqwest_req.method(), &reqwest::Method::GET);
         assert_eq!(
@@ -135,8 +138,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn converts_post_request_with_body_and_port() {
+    #[test]
+    fn converts_post_request_with_body_and_port() {
         let body_bytes = bytes::Bytes::from_static(b"payload");
         let body: UnsyncBoxBody<bytes::Bytes, P2ErrorCode> =
             http_body_util::Full::new(body_bytes.clone())
@@ -149,9 +152,7 @@ mod tests {
             .body(body)
             .expect("hyper request builds");
 
-        let reqwest_req = p2_to_reqwest(hyper_req, false)
-            .await
-            .expect("conversion succeeds");
+        let reqwest_req = p2_to_reqwest(hyper_req, false).expect("conversion succeeds");
 
         assert_eq!(reqwest_req.method(), &reqwest::Method::POST);
         assert_eq!(
