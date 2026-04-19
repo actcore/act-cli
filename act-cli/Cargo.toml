@@ -10,7 +10,10 @@ keywords = ["act", "wasm", "component-model", "mcp", "agent"]
 categories = ["command-line-utilities", "wasm"]
 
 readme.workspace = true
-include = ["src/**", "wit/**"]
+include = ["src/**", "wit/**", "build.rs"]
+
+[build-dependencies]
+embed-manifest = "1.4"
 
 [[bin]]
 name = "act"
