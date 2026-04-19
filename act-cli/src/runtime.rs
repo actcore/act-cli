@@ -23,6 +23,20 @@ pub struct HostState {
     http_p2: WasiHttpCtx,
     http_p3: WasiHttpCtx,
     http_hooks: crate::http_policy::PolicyHttpHooks,
+    fs_matcher: crate::fs_matcher::FsMatcher,
+    fd_paths: crate::fs_policy::FdPathMap,
+}
+
+impl HostState {
+    /// Build a policy-aware filesystem view.
+    fn policy_fs_view(&mut self) -> crate::fs_policy::PolicyFilesystemCtxView<'_> {
+        crate::fs_policy::PolicyFilesystemCtxView {
+            ctx: self.wasi.filesystem(),
+            table: &mut self.table,
+            matcher: &self.fs_matcher,
+            fd_paths: &mut self.fd_paths,
+        }
+    }
 }
 
 impl WasiView for HostState {
@@ -76,6 +90,21 @@ pub fn create_linker(engine: &Engine) -> Result<Linker<HostState>> {
     // Add P2 bindings (components built with wasm32-wasip2 import P2 interfaces)
     wasmtime_wasi::p2::add_to_linker_async(&mut linker)
         .map_err(|e| anyhow::anyhow!("failed to add WASI P2 to linker: {e}"))?;
+    // Shadow the default wasi:filesystem bindings with our policy-aware
+    // PolicyFilesystem view. Must come AFTER add_to_linker_async registered
+    // the defaults.
+    linker.allow_shadowing(true);
+    wasmtime_wasi::p2::bindings::filesystem::types::add_to_linker::<
+        HostState,
+        crate::fs_policy::PolicyFilesystem,
+    >(&mut linker, |t| t.policy_fs_view())
+    .map_err(|e| anyhow::anyhow!("failed to add policy wasi:filesystem/types: {e}"))?;
+    wasmtime_wasi::p2::bindings::filesystem::preopens::add_to_linker::<
+        HostState,
+        crate::fs_policy::PolicyFilesystem,
+    >(&mut linker, |t| t.policy_fs_view())
+    .map_err(|e| anyhow::anyhow!("failed to add policy wasi:filesystem/preopens: {e}"))?;
+    linker.allow_shadowing(false);
     // Add P3 bindings on top
     wasmtime_wasi::p3::add_to_linker(&mut linker)
         .map_err(|e| anyhow::anyhow!("failed to add WASI P3 to linker: {e}"))?;
@@ -92,8 +121,10 @@ pub fn create_store(
     engine: &Engine,
     preopens: &[crate::config::DirMount],
     http: &crate::config::HttpConfig,
+    fs: &crate::config::FsConfig,
 ) -> Result<Store<HostState>> {
     let mut builder = WasiCtxBuilder::new();
+    let mut preopen_pairs = Vec::with_capacity(preopens.len());
     for mount in preopens {
         builder
             .preopened_dir(
@@ -110,14 +141,21 @@ pub fn create_store(
                     e
                 )
             })?;
+        preopen_pairs.push((mount.guest.clone(), mount.host.clone()));
     }
     let wasi = builder.build();
+    let matcher = crate::fs_matcher::FsMatcher::compile(fs)?;
     let state = HostState {
         wasi,
         table: ResourceTable::new(),
         http_p2: WasiHttpCtx::new(),
         http_p3: WasiHttpCtx::new(),
         http_hooks: crate::http_policy::PolicyHttpHooks::new(http.clone()),
+        fs_matcher: matcher,
+        fd_paths: crate::fs_policy::FdPathMap {
+            preopens: preopen_pairs,
+            by_rep: Default::default(),
+        },
     };
     Ok(Store::new(engine, state))
 }
@@ -222,8 +260,9 @@ pub async fn instantiate_component(
     linker: &Linker<HostState>,
     preopens: &[crate::config::DirMount],
     http: &crate::config::HttpConfig,
+    fs: &crate::config::FsConfig,
 ) -> Result<(ActWorld, Store<HostState>)> {
-    let mut store = create_store(engine, preopens, http)?;
+    let mut store = create_store(engine, preopens, http, fs)?;
     let instance = ActWorld::instantiate_async(&mut store, component, linker)
         .await
         .map_err(|e| anyhow::anyhow!("failed to instantiate component: {e}"))?;
@@ -257,17 +296,6 @@ pub fn warn_missing_capabilities(
         tracing::warn!(
             component = %info.std.name,
             "component declares wasi:http but policy denies all HTTP access"
-        );
-    }
-
-    // Phase C2 limitation: FsConfig.deny is parsed but not enforced —
-    // preopens can't express path-level deny overlays. Warn so users know
-    // their overlay is silently inactive until the custom wasi:filesystem
-    // impl lands in phase C1.
-    if !fs.deny.is_empty() {
-        tracing::warn!(
-            component = %info.std.name,
-            "fs deny entries are ignored in this release; use narrower allow entries instead"
         );
     }
 }

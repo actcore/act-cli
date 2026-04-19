@@ -55,18 +55,22 @@ impl FsConfig {
         }
     }
 
-    /// Preopens derived from `allow` entries. Layer 1 supports literal path
-    /// patterns and a trailing `/**` (meaning the directory and everything
-    /// under it). Other glob syntax is rejected until the Layer 1 custom WASI
-    /// impl lands and replaces preopens with per-op matching.
+    /// Preopens for this policy. Layer 1 uses a single virtual-root preopen
+    /// at host `/` for every non-`Deny` mode — the `FsMatcher` is the only
+    /// enforcement point. The guest sees the whole host filesystem in its
+    /// namespace but can't actually open anything the matcher denies.
+    ///
+    /// Deny mode: no preopens at all (guest can't name anything).
+    ///
+    /// This is Unix-first: preopening `/` assumes a POSIX root. Windows
+    /// support requires preopening each drive separately and is deferred.
     pub fn preopens(&self) -> Result<Vec<DirMount>> {
         match self.mode {
             PolicyMode::Deny => Ok(vec![]),
-            PolicyMode::Open => Ok(vec![DirMount {
+            PolicyMode::Open | PolicyMode::Allowlist => Ok(vec![DirMount {
                 guest: "/".to_string(),
                 host: PathBuf::from("/"),
             }]),
-            PolicyMode::Allowlist => self.allow.iter().map(|p| path_to_mount(p)).collect(),
         }
     }
 }
@@ -204,32 +208,6 @@ pub fn get_profile<'a>(config: &'a ConfigFile, name: &str) -> Result<&'a Profile
         .profile
         .get(name)
         .with_context(|| format!("profile '{}' not found in config", name))
-}
-
-/// Expand `~` in a path string to the user's home directory.
-fn expand_path(s: &str) -> PathBuf {
-    let expanded = shellexpand::tilde(s);
-    PathBuf::from(expanded.as_ref())
-}
-
-/// Convert an `allow` entry (literal path or `dir/**`) to a preopen mount.
-fn path_to_mount(pattern: &str) -> Result<DirMount> {
-    let trimmed = pattern
-        .strip_suffix("/**")
-        .or_else(|| pattern.strip_suffix("/*"))
-        .unwrap_or(pattern);
-    if trimmed.contains('*') || trimmed.contains('?') || trimmed.contains('[') {
-        anyhow::bail!(
-            "unsupported glob in '{}'; Layer 1 allows literal paths and a trailing '/**' only",
-            pattern
-        );
-    }
-    let host = expand_path(trimmed);
-    let guest = format!(
-        "/{}",
-        host.file_name().and_then(|n| n.to_str()).unwrap_or("")
-    );
-    Ok(DirMount { guest, host })
 }
 
 // ── Resolution ──
@@ -444,39 +422,21 @@ mod tests {
         let mounts = cfg.preopens().unwrap();
         assert_eq!(mounts.len(), 1);
         assert_eq!(mounts[0].host, PathBuf::from("/"));
+        assert_eq!(mounts[0].guest, "/");
     }
 
     #[test]
-    fn fs_allowlist_literal_path() {
+    fn fs_allowlist_uses_virtual_root() {
         let cfg = FsConfig {
             mode: PolicyMode::Allowlist,
-            allow: vec!["/tmp/data".into()],
+            allow: vec!["/tmp/data/**".into(), "~/projects/{foo,bar}/**".into()],
             ..Default::default()
         };
         let mounts = cfg.preopens().unwrap();
+        // Always a single virtual-root preopen; matcher handles the patterns.
         assert_eq!(mounts.len(), 1);
-        assert_eq!(mounts[0].host, PathBuf::from("/tmp/data"));
-    }
-
-    #[test]
-    fn fs_allowlist_trailing_double_star() {
-        let cfg = FsConfig {
-            mode: PolicyMode::Allowlist,
-            allow: vec!["/tmp/data/**".into()],
-            ..Default::default()
-        };
-        let mounts = cfg.preopens().unwrap();
-        assert_eq!(mounts[0].host, PathBuf::from("/tmp/data"));
-    }
-
-    #[test]
-    fn fs_allowlist_rejects_mid_glob() {
-        let cfg = FsConfig {
-            mode: PolicyMode::Allowlist,
-            allow: vec!["/tmp/*/x".into()],
-            ..Default::default()
-        };
-        assert!(cfg.preopens().is_err());
+        assert_eq!(mounts[0].host, PathBuf::from("/"));
+        assert_eq!(mounts[0].guest, "/");
     }
 
     #[test]

@@ -1,5 +1,7 @@
 mod config;
 mod format;
+mod fs_matcher;
+mod fs_policy;
 mod http;
 mod http_policy;
 mod mcp;
@@ -318,7 +320,7 @@ async fn prepare_component(
     let wasm = runtime::load_component(&engine, &component_path)?;
     let linker = runtime::create_linker(&engine)?;
     let (instance, store) =
-        runtime::instantiate_component(&engine, &wasm, &linker, &preopens, &http).await?;
+        runtime::instantiate_component(&engine, &wasm, &linker, &preopens, &http, &fs).await?;
     let handle = runtime::spawn_component_actor(instance, store);
 
     tracing::info!(name = %info.std.name, version = %info.std.version, "Component ready");
