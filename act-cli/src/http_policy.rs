@@ -128,40 +128,10 @@ fn host_matches(pattern: &str, host: &str) -> bool {
     host.eq_ignore_ascii_case(pattern)
 }
 
-fn cidr_contains(cidr: &str, ip: IpAddr) -> bool {
-    let Some((net, prefix_s)) = cidr.split_once('/') else {
-        return false;
-    };
-    let Ok(prefix) = prefix_s.parse::<u8>() else {
-        return false;
-    };
-    match (net.parse::<IpAddr>(), ip) {
-        (Ok(IpAddr::V4(n)), IpAddr::V4(h)) => {
-            if prefix > 32 {
-                return false;
-            }
-            let mask: u32 = if prefix == 0 {
-                0
-            } else {
-                u32::MAX << (32 - prefix)
-            };
-            (u32::from(n) & mask) == (u32::from(h) & mask)
-        }
-        (Ok(IpAddr::V6(n)), IpAddr::V6(h)) => {
-            if prefix > 128 {
-                return false;
-            }
-            let n = u128::from(n);
-            let h = u128::from(h);
-            let mask: u128 = if prefix == 0 {
-                0
-            } else {
-                u128::MAX << (128 - prefix)
-            };
-            (n & mask) == (h & mask)
-        }
-        _ => false,
-    }
+fn cidr_contains(spec: &str, ip: IpAddr) -> bool {
+    spec.parse::<cidr::IpCidr>()
+        .map(|c| c.contains(&ip))
+        .unwrap_or(false)
 }
 
 fn deny_reason(method: Option<&str>, uri: &Uri) -> String {
