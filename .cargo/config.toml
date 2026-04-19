@@ -1,0 +1,5 @@
+# reqwest's HTTP/3 support is gated behind this cfg to signal that the
+# crate's HTTP/3 API may change. Setting it workspace-wide so every build
+# picks it up. Remove when reqwest stabilises HTTP/3.
+[build]
+rustflags = ["--cfg", "reqwest_unstable"]

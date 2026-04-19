@@ -38,7 +38,7 @@ dirs = "6"
 futures-util = "0.3"
 indicatif = "0.18.4"
 regex = "1"
-reqwest = { version = "0.13.2", default-features = false, features = ["rustls", "stream"] }
+reqwest = { version = "0.13.2", default-features = false, features = ["rustls", "stream", "http2", "http3"] }
 oci-client = "0.16"
 sha2 = "0.11.0"
 tar = "0.4"
