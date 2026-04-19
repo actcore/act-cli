@@ -5,6 +5,10 @@
 
 use std::sync::Arc;
 
+use bytes::Bytes;
+use http_body_util::combinators::UnsyncBoxBody;
+use wasmtime_wasi_http::p2::bindings::http::types::ErrorCode as P2ErrorCode;
+
 use crate::config::HttpConfig;
 
 /// Reqwest client instantiated with this component's HTTP policy. Cheap to
@@ -28,15 +32,138 @@ impl ActHttpClient {
     }
 }
 
+/// Convert an outgoing `hyper::Request` from the p2 WASI HTTP binding into
+/// a `reqwest::Request`. `use_tls` controls the default scheme if the URI
+/// doesn't include one (the guest may build requests with scheme-less
+/// authorities).
+///
+/// The body is collected into [`Bytes`] before building the reqwest request
+/// because [`UnsyncBoxBody`] is `!Sync` and cannot be passed directly to
+/// [`reqwest::Body::wrap`].
+#[allow(dead_code)] // called in Task 4 (send_request impl)
+async fn p2_to_reqwest(
+    request: hyper::Request<UnsyncBoxBody<Bytes, P2ErrorCode>>,
+    use_tls: bool,
+) -> Result<reqwest::Request, P2ErrorCode> {
+    use http_body_util::BodyExt as _;
+
+    let (parts, body) = request.into_parts();
+    let scheme = parts
+        .uri
+        .scheme_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if use_tls {
+                "https".into()
+            } else {
+                "http".into()
+            }
+        });
+    let authority = parts
+        .uri
+        .authority()
+        .map(|a| a.to_string())
+        .ok_or(P2ErrorCode::HttpRequestUriInvalid)?;
+    let path_and_query = parts
+        .uri
+        .path_and_query()
+        .map(|p| p.as_str())
+        .unwrap_or("/");
+    let url_str = format!("{scheme}://{authority}{path_and_query}");
+    let url = reqwest::Url::parse(&url_str).map_err(|_| P2ErrorCode::HttpRequestUriInvalid)?;
+
+    let method = reqwest::Method::from_bytes(parts.method.as_str().as_bytes())
+        .map_err(|_| P2ErrorCode::HttpProtocolError)?;
+
+    let body_bytes = body
+        .collect()
+        .await
+        .map_err(|_| P2ErrorCode::HttpProtocolError)?
+        .to_bytes();
+    let body = reqwest::Body::from(body_bytes);
+
+    let mut builder = reqwest::Client::new().request(method, url).body(body);
+    for (name, value) in parts.headers.iter() {
+        builder = builder.header(name, value);
+    }
+    builder.build().map_err(|_| P2ErrorCode::HttpProtocolError)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::HttpConfig;
+    use http::Method;
+    use http_body_util::combinators::UnsyncBoxBody;
+    use http_body_util::{BodyExt, Empty};
+    use wasmtime_wasi_http::p2::bindings::http::types::ErrorCode as P2ErrorCode;
 
     #[test]
     fn builds_default_client() {
         let cfg = HttpConfig::default();
         let client = ActHttpClient::new(cfg);
         assert!(client.is_ok(), "{:?}", client.err());
+    }
+
+    #[tokio::test]
+    async fn converts_simple_get_request() {
+        let body: UnsyncBoxBody<bytes::Bytes, _> = Empty::<bytes::Bytes>::new()
+            .map_err(|_| unreachable!())
+            .boxed_unsync();
+        let hyper_req = hyper::Request::builder()
+            .method(Method::GET)
+            .uri("https://example.com/foo?bar=baz")
+            .header("x-custom", "hello")
+            .body(body)
+            .expect("hyper request builds");
+
+        let reqwest_req = p2_to_reqwest(hyper_req, false)
+            .await
+            .expect("conversion succeeds");
+
+        assert_eq!(reqwest_req.method(), &reqwest::Method::GET);
+        assert_eq!(
+            reqwest_req.url().as_str(),
+            "https://example.com/foo?bar=baz"
+        );
+        assert_eq!(
+            reqwest_req
+                .headers()
+                .get("x-custom")
+                .and_then(|v| v.to_str().ok()),
+            Some("hello")
+        );
+    }
+
+    #[tokio::test]
+    async fn converts_post_request_with_body_and_port() {
+        let body_bytes = bytes::Bytes::from_static(b"payload");
+        let body: UnsyncBoxBody<bytes::Bytes, P2ErrorCode> =
+            http_body_util::Full::new(body_bytes.clone())
+                .map_err(|_| unreachable!())
+                .boxed_unsync();
+        let hyper_req = hyper::Request::builder()
+            .method(Method::POST)
+            .uri("http://api.example.com:8080/v1/create")
+            .header("content-type", "application/json")
+            .body(body)
+            .expect("hyper request builds");
+
+        let reqwest_req = p2_to_reqwest(hyper_req, false)
+            .await
+            .expect("conversion succeeds");
+
+        assert_eq!(reqwest_req.method(), &reqwest::Method::POST);
+        assert_eq!(
+            reqwest_req.url().as_str(),
+            "http://api.example.com:8080/v1/create"
+        );
+        assert_eq!(
+            reqwest_req
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
     }
 }
