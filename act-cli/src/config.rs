@@ -73,18 +73,15 @@ pub struct HttpConfig {
 /// One allow-or-deny entry in an HTTP policy.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct HttpRule {
-    #[serde(default)]
-    pub host: Option<String>,
+    /// Host / port / CIDR fields. Network-level (no HTTP awareness).
+    #[serde(flatten)]
+    pub net: crate::runtime::network::NetworkRule,
+    /// Required URI scheme (`"http"` / `"https"`), if set.
     #[serde(default)]
     pub scheme: Option<String>,
+    /// Allowed HTTP methods (case-insensitive), if set.
     #[serde(default)]
     pub methods: Option<Vec<String>>,
-    #[serde(default)]
-    pub ports: Option<Vec<u16>>,
-    #[serde(default)]
-    pub cidr: Option<String>,
-    #[serde(default, rename = "except-ports")]
-    pub except_ports: Option<Vec<u16>>,
 }
 
 // ── TOML deserialization types ──
@@ -235,16 +232,22 @@ fn parse_http_toml(policy: &HttpPolicyToml) -> Result<HttpConfig> {
 }
 
 fn parse_host_or_cidr(s: &str) -> HttpRule {
-    if let Some(slash) = s.find('/')
+    use crate::runtime::network::NetworkRule;
+    let net = if let Some(slash) = s.find('/')
         && s[slash + 1..].parse::<u32>().is_ok()
     {
-        return HttpRule {
+        NetworkRule {
             cidr: Some(s.to_string()),
             ..Default::default()
-        };
-    }
+        }
+    } else {
+        NetworkRule {
+            host: Some(s.to_string()),
+            ..Default::default()
+        }
+    };
     HttpRule {
-        host: Some(s.to_string()),
+        net,
         ..Default::default()
     }
 }
@@ -373,7 +376,7 @@ mod tests {
         };
         let cfg = resolve_http_config(&ConfigFile::default(), None, &cli).unwrap();
         assert_eq!(cfg.mode, PolicyMode::Allowlist);
-        assert_eq!(cfg.allow[0].host.as_deref(), Some("api.example.com"));
+        assert_eq!(cfg.allow[0].net.host.as_deref(), Some("api.example.com"));
     }
 
     #[test]
@@ -384,7 +387,7 @@ mod tests {
         };
         let cfg = resolve_http_config(&ConfigFile::default(), None, &cli).unwrap();
         assert_eq!(cfg.mode, PolicyMode::Deny);
-        assert_eq!(cfg.deny[0].cidr.as_deref(), Some("10.0.0.0/8"));
+        assert_eq!(cfg.deny[0].net.cidr.as_deref(), Some("10.0.0.0/8"));
     }
 
     #[test]
@@ -420,7 +423,7 @@ allow = [{ host = "api.openai.com", scheme = "https" }]
         assert_eq!(fs.deny, vec!["**/.ssh/**"]);
         let http = resolve_http_config(&cfg, None, &CliPolicyOverrides::default()).unwrap();
         assert_eq!(http.mode, PolicyMode::Allowlist);
-        assert_eq!(http.allow[0].host.as_deref(), Some("api.openai.com"));
+        assert_eq!(http.allow[0].net.host.as_deref(), Some("api.openai.com"));
         assert_eq!(http.allow[0].scheme.as_deref(), Some("https"));
     }
 

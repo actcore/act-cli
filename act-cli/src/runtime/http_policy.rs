@@ -26,23 +26,16 @@
 //! - Redirect re-decision: deferred (wasi-http follows redirects inside
 //!   `default_send_request`; we'd need to disable that and resubmit).
 
-use std::net::IpAddr;
 use std::sync::Arc;
 
 use http::Uri;
 use wasmtime_wasi::TrappableError;
 
-use crate::config::{HttpConfig, HttpRule, PolicyMode};
-use crate::runtime::network::{cidr_contains, host_matches};
+use crate::config::{HttpConfig, PolicyMode};
+use crate::runtime::network::{self, Decision, NetworkCheck};
 
 type P2ErrorCode = wasmtime_wasi_http::p2::bindings::http::types::ErrorCode;
 type P3ErrorCode = wasmtime_wasi_http::p3::bindings::http::types::ErrorCode;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Decision {
-    Allow,
-    Deny,
-}
 
 /// Policy hook implementing both `p2::WasiHttpHooks` and `p3::WasiHttpHooks`.
 pub struct PolicyHttpHooks {
@@ -56,114 +49,72 @@ impl PolicyHttpHooks {
         }
     }
 
+    /// Decide an HTTP request against the config. Scheme / method checks are
+    /// HTTP-layer; the host / port / CIDR parts are delegated to
+    /// `runtime::network::decide`.
     fn decide_uri(&self, method: Option<&str>, uri: &Uri) -> Decision {
         match self.config.mode {
-            PolicyMode::Deny => Decision::Deny,
-            PolicyMode::Open => Decision::Allow,
-            PolicyMode::Allowlist => {
-                // Deny rules short-circuit even on allowlist.
-                if self
-                    .config
-                    .deny
-                    .iter()
-                    .any(|r| rule_matches(r, method, uri))
-                {
-                    return Decision::Deny;
-                }
-                if self
-                    .config
-                    .allow
-                    .iter()
-                    .any(|r| rule_matches(r, method, uri))
-                {
-                    Decision::Allow
-                } else {
-                    Decision::Deny
-                }
-            }
+            PolicyMode::Deny => return Decision::Deny,
+            PolicyMode::Open => return Decision::Allow,
+            PolicyMode::Allowlist => {}
+        }
+
+        let host = uri.host().unwrap_or("");
+        let scheme = uri.scheme_str();
+        let port = uri
+            .port_u16()
+            .unwrap_or(if scheme == Some("https") { 443 } else { 80 });
+        let check = NetworkCheck::new(host, port);
+
+        if self
+            .config
+            .deny
+            .iter()
+            .any(|r| http_rule_matches(r, scheme, method, &check))
+        {
+            return Decision::Deny;
+        }
+        if self
+            .config
+            .allow
+            .iter()
+            .any(|r| http_rule_matches(r, scheme, method, &check))
+        {
+            Decision::Allow
+        } else {
+            Decision::Deny
         }
     }
 }
 
-fn rule_matches(rule: &HttpRule, method: Option<&str>, uri: &Uri) -> bool {
-    if let Some(ref want_scheme) = rule.scheme
-        && uri.scheme_str() != Some(want_scheme.as_str())
-    {
-        return false;
+/// HTTP-layer rule match: check scheme / method first (the HTTP-only
+/// dimensions), then delegate the host / port / CIDR parts to the
+/// network-level matcher.
+fn http_rule_matches(
+    rule: &crate::config::HttpRule,
+    scheme: Option<&str>,
+    method: Option<&str>,
+    check: &NetworkCheck,
+) -> bool {
+    if let Some(want) = rule.scheme.as_deref() {
+        match scheme {
+            Some(have) if have.eq_ignore_ascii_case(want) => {}
+            _ => return false,
+        }
     }
-    if let Some(ref want_methods) = rule.methods
-        && let Some(m) = method
-        && !want_methods.iter().any(|wm| wm.eq_ignore_ascii_case(m))
-    {
-        return false;
-    }
-    let host = uri.host().unwrap_or("");
-    let port = uri.port_u16();
-
-    if let Some(ref cidr) = rule.cidr {
-        let Some(ip) = host.parse::<IpAddr>().ok() else {
+    if let Some(want_methods) = rule.methods.as_deref() {
+        let Some(have) = method else {
             return false;
         };
-        if !cidr_contains(cidr, ip) {
-            return false;
-        }
-        if let Some(except) = &rule.except_ports
-            && let Some(p) = port
-            && except.contains(&p)
-        {
-            return false;
-        }
-        // cidr matched; port check below
-    } else if let Some(ref want_host) = rule.host {
-        if !host_matches(want_host, host) {
-            return false;
-        }
-    } else {
-        // No host and no cidr — useless rule; never matches.
-        return false;
-    }
-
-    if let Some(ref want_ports) = rule.ports {
-        let Some(p) = port else { return false };
-        if !want_ports.contains(&p) {
+        if !want_methods.iter().any(|m| m.eq_ignore_ascii_case(have)) {
             return false;
         }
     }
-
-    true
+    network::rule_matches(&rule.net, check)
 }
 
 fn deny_reason(method: Option<&str>, uri: &Uri) -> String {
     format!("blocked by ACT policy: {} {}", method.unwrap_or("?"), uri)
-}
-
-/// Returns `true` if an IP address (typically the DNS-resolved peer of an
-/// outgoing HTTP request) should be refused at connect time. This closes the
-/// SSRF-by-DNS-trickery case: `deny = [{ cidr = "10.0.0.0/8" }]` catches
-/// `http://internal.example.com/` when it resolves to a 10.x host, even
-/// though the URI host is a name, not an IP.
-///
-/// Only deny rules are applied here. Allow-CIDR semantics still go through
-/// the HTTP-layer matcher (URI must have an IP literal). That's an
-/// asymmetry — deny is the security-relevant direction.
-pub fn is_ip_denied_by_cidr(cfg: &HttpConfig, ip: std::net::IpAddr, port: u16) -> bool {
-    if matches!(cfg.mode, PolicyMode::Open) {
-        return false;
-    }
-    cfg.deny.iter().any(|rule| {
-        let Some(ref spec) = rule.cidr else {
-            return false;
-        };
-        if !cidr_contains(spec, ip) {
-            return false;
-        }
-        if let Some(except) = &rule.except_ports
-            && except.contains(&port)
-        {
-            return false;
-        }
-        true
-    })
 }
 
 // ── p2 hook ───────────────────────────────────────────────────────────────
@@ -214,7 +165,7 @@ impl wasmtime_wasi_http::p2::WasiHttpHooks for PolicyHttpHooks {
 /// failure (let the downstream handler surface that with its own
 /// diagnostics), or no matching rule.
 async fn cidr_precheck(cfg: &HttpConfig, uri: &Uri, use_tls: bool) -> Result<(), ()> {
-    if cfg.deny.iter().all(|r| r.cidr.is_none()) {
+    if matches!(cfg.mode, PolicyMode::Open) {
         return Ok(());
     }
     let Some(authority) = uri.authority() else {
@@ -224,21 +175,13 @@ async fn cidr_precheck(cfg: &HttpConfig, uri: &Uri, use_tls: bool) -> Result<(),
     let port = authority
         .port_u16()
         .unwrap_or(if use_tls { 443 } else { 80 });
-    let lookup_target = format!("{host}:{port}");
-    match tokio::net::lookup_host(&lookup_target).await {
-        Ok(addrs) => {
-            for addr in addrs {
-                if is_ip_denied_by_cidr(cfg, addr.ip(), addr.port()) {
-                    tracing::warn!(%addr, uri = %uri, "http policy: connect blocked by deny CIDR");
-                    return Err(());
-                }
-            }
-            Ok(())
+    let deny_nets: Vec<_> = cfg.deny.iter().map(|r| r.net.clone()).collect();
+    match network::first_cidr_deny_hit(&deny_nets, host, port).await {
+        Some(addr) => {
+            tracing::warn!(%addr, uri = %uri, "http policy: connect blocked by deny CIDR");
+            Err(())
         }
-        Err(e) => {
-            tracing::debug!(%e, uri = %uri, "http policy: DNS precheck lookup failed; deferring to handler");
-            Ok(())
-        }
+        None => Ok(()),
     }
 }
 
@@ -308,6 +251,7 @@ impl wasmtime_wasi_http::p3::WasiHttpHooks for PolicyHttpHooks {
 mod tests {
     use super::*;
     use crate::config::{HttpConfig, HttpRule, PolicyMode};
+    use crate::runtime::network::NetworkRule;
 
     fn uri(s: &str) -> Uri {
         s.parse().unwrap()
@@ -315,6 +259,25 @@ mod tests {
 
     fn hooks(cfg: HttpConfig) -> PolicyHttpHooks {
         PolicyHttpHooks::new(cfg)
+    }
+
+    fn rule(
+        host: Option<&str>,
+        scheme: Option<&str>,
+        ports: Option<Vec<u16>>,
+        cidr: Option<&str>,
+        except_ports: Option<Vec<u16>>,
+    ) -> HttpRule {
+        HttpRule {
+            net: NetworkRule {
+                host: host.map(String::from),
+                ports,
+                cidr: cidr.map(String::from),
+                except_ports,
+            },
+            scheme: scheme.map(String::from),
+            methods: None,
+        }
     }
 
     #[test]
@@ -345,11 +308,13 @@ mod tests {
     fn allowlist_host_allow() {
         let h = hooks(HttpConfig {
             mode: PolicyMode::Allowlist,
-            allow: vec![HttpRule {
-                host: Some("api.openai.com".into()),
-                scheme: Some("https".into()),
-                ..Default::default()
-            }],
+            allow: vec![rule(
+                Some("api.openai.com"),
+                Some("https"),
+                None,
+                None,
+                None,
+            )],
             ..Default::default()
         });
         assert_eq!(
@@ -370,11 +335,7 @@ mod tests {
     fn allowlist_wildcard_host() {
         let h = hooks(HttpConfig {
             mode: PolicyMode::Allowlist,
-            allow: vec![HttpRule {
-                host: Some("*.github.com".into()),
-                scheme: Some("https".into()),
-                ..Default::default()
-            }],
+            allow: vec![rule(Some("*.github.com"), Some("https"), None, None, None)],
             ..Default::default()
         });
         assert_eq!(
@@ -395,14 +356,8 @@ mod tests {
     fn deny_rule_beats_allow() {
         let h = hooks(HttpConfig {
             mode: PolicyMode::Allowlist,
-            allow: vec![HttpRule {
-                host: Some("*.example.com".into()),
-                ..Default::default()
-            }],
-            deny: vec![HttpRule {
-                host: Some("admin.example.com".into()),
-                ..Default::default()
-            }],
+            allow: vec![rule(Some("*.example.com"), None, None, None, None)],
+            deny: vec![rule(Some("admin.example.com"), None, None, None, None)],
             ..Default::default()
         });
         assert_eq!(
@@ -419,15 +374,14 @@ mod tests {
     fn cidr_deny_with_except_port() {
         let h = hooks(HttpConfig {
             mode: PolicyMode::Allowlist,
-            allow: vec![HttpRule {
-                host: Some("localhost".into()),
-                ..Default::default()
-            }],
-            deny: vec![HttpRule {
-                cidr: Some("127.0.0.0/8".into()),
-                except_ports: Some(vec![3000]),
-                ..Default::default()
-            }],
+            allow: vec![rule(Some("localhost"), None, None, None, None)],
+            deny: vec![rule(
+                None,
+                None,
+                None,
+                Some("127.0.0.0/8"),
+                Some(vec![3000]),
+            )],
             ..Default::default()
         });
         // 127.0.0.1:80 is in the deny CIDR and not in except-ports → deny
@@ -445,62 +399,14 @@ mod tests {
     }
 
     #[test]
-    fn ip_denied_by_cidr_matches_resolved_ip() {
-        let cfg = HttpConfig {
-            mode: PolicyMode::Allowlist,
-            deny: vec![HttpRule {
-                cidr: Some("10.0.0.0/8".into()),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        // Any resolved IP under 10/8 is denied regardless of original URI host.
-        assert!(is_ip_denied_by_cidr(&cfg, "10.1.2.3".parse().unwrap(), 443));
-        assert!(!is_ip_denied_by_cidr(&cfg, "8.8.8.8".parse().unwrap(), 443));
-    }
-
-    #[test]
-    fn ip_denied_by_cidr_respects_except_ports() {
-        let cfg = HttpConfig {
-            mode: PolicyMode::Allowlist,
-            deny: vec![HttpRule {
-                cidr: Some("127.0.0.0/8".into()),
-                except_ports: Some(vec![3000]),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        assert!(is_ip_denied_by_cidr(&cfg, "127.0.0.1".parse().unwrap(), 80));
-        assert!(!is_ip_denied_by_cidr(
-            &cfg,
-            "127.0.0.1".parse().unwrap(),
-            3000
-        ));
-    }
-
-    #[test]
-    fn ip_denied_by_cidr_is_noop_for_open_mode() {
-        let cfg = HttpConfig {
-            mode: PolicyMode::Open,
-            deny: vec![HttpRule {
-                cidr: Some("10.0.0.0/8".into()),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        assert!(!is_ip_denied_by_cidr(
-            &cfg,
-            "10.1.2.3".parse().unwrap(),
-            443
-        ));
-    }
-
-    #[test]
     fn method_filter() {
         let h = hooks(HttpConfig {
             mode: PolicyMode::Allowlist,
             allow: vec![HttpRule {
-                host: Some("api.example.com".into()),
+                net: NetworkRule {
+                    host: Some("api.example.com".into()),
+                    ..Default::default()
+                },
                 methods: Some(vec!["GET".into(), "POST".into()]),
                 ..Default::default()
             }],
