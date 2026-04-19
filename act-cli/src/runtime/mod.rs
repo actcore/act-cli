@@ -12,6 +12,7 @@ use wasmtime_wasi_http::p3::WasiHttpCtxView;
 
 pub mod fs_matcher;
 pub mod fs_policy;
+pub mod http_client;
 pub mod http_policy;
 pub mod network;
 
