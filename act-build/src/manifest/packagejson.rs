@@ -12,8 +12,8 @@ struct PackageJson {
     version: Option<String>,
     #[serde(default)]
     description: Option<String>,
-    #[serde(rename = "actComponent", default)]
-    act_component: Option<serde_json::Value>,
+    #[serde(default)]
+    act: Option<serde_json::Value>,
 }
 
 /// Parse package.json for base metadata and inline ACT config.
@@ -34,5 +34,5 @@ pub fn from_json(path: &Path) -> Result<(ComponentInfo, Option<serde_json::Value
         info.std.description = desc.clone();
     }
 
-    Ok((info, manifest.act_component))
+    Ok((info, manifest.act))
 }

@@ -26,8 +26,8 @@ struct PyprojectProject {
 
 #[derive(Debug, Default, Deserialize)]
 struct PyprojectTool {
-    #[serde(rename = "act-component", default)]
-    act_component: Option<toml::Value>,
+    #[serde(default)]
+    act: Option<toml::Value>,
 }
 
 /// Parse pyproject.toml for base metadata and inline ACT config.
@@ -50,7 +50,7 @@ pub fn from_toml(path: &Path) -> Result<(ComponentInfo, Option<toml::Value>)> {
         }
     }
 
-    let inline_patch = manifest.tool.and_then(|t| t.act_component);
+    let inline_patch = manifest.tool.and_then(|t| t.act);
 
     Ok((info, inline_patch))
 }

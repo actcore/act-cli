@@ -13,8 +13,8 @@ use anyhow::{Context, Result};
 /// 1. **Base** from language manifest (`Cargo.toml`, `pyproject.toml`, or `package.json`):
 ///    `name`, `version`, `description` map to `std.*`.
 /// 2. **Inline patch** from the same manifest:
-///    `[package.metadata.act-component]` (Rust), `[tool.act-component]` (Python),
-///    or `actComponent` (JS/TS).
+///    `[package.metadata.act]` (Rust), `[tool.act]` (Python),
+///    or `act` (JS/TS).
 /// 3. **`act.toml`** — highest priority, applied last.
 ///
 /// For Rust projects, tries `cargo metadata` first (resolves workspace inheritance),
@@ -134,7 +134,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(
             dir.path().join("Cargo.toml"),
-            "[package]\nname = \"inline-test\"\nversion = \"0.3.0\"\nedition = \"2024\"\ndescription = \"Inline metadata test\"\n\n[package.metadata.act-component.std.capabilities.\"wasi:http\"]\n",
+            "[package]\nname = \"inline-test\"\nversion = \"0.3.0\"\nedition = \"2024\"\ndescription = \"Inline metadata test\"\n\n[package.metadata.act.std.capabilities.\"wasi:http\"]\n",
         ).unwrap();
 
         let info = resolve(dir.path()).unwrap();
@@ -148,7 +148,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(
             dir.path().join("pyproject.toml"),
-            "[project]\nname = \"py-component\"\nversion = \"0.1.0\"\ndescription = \"A Python component\"\n\n[tool.act-component.std.capabilities.\"wasi:filesystem\"]\n",
+            "[project]\nname = \"py-component\"\nversion = \"0.1.0\"\ndescription = \"A Python component\"\n\n[tool.act.std.capabilities.\"wasi:filesystem\"]\n",
         ).unwrap();
 
         let info = resolve(dir.path()).unwrap();

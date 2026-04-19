@@ -26,8 +26,8 @@ struct CargoPackage {
 
 #[derive(Debug, Default, Deserialize)]
 struct CargoMetadata {
-    #[serde(rename = "act-component", default)]
-    act_component: Option<toml::Value>,
+    #[serde(default)]
+    act: Option<toml::Value>,
 }
 
 // ── cargo metadata (preferred) ──
@@ -80,7 +80,7 @@ pub fn from_cargo_metadata(dir: &Path) -> Result<(ComponentInfo, Option<toml::Va
     // cargo metadata returns JSON — convert to toml::Value for consistency.
     let inline_patch = pkg
         .get("metadata")
-        .and_then(|m| m.get("act-component"))
+        .and_then(|m| m.get("act"))
         .and_then(|v| toml::Value::try_from(v.clone()).ok());
 
     Ok((info, inline_patch))
@@ -111,7 +111,7 @@ pub fn from_toml(path: &Path) -> Result<(ComponentInfo, Option<toml::Value>)> {
     let inline_patch = manifest
         .package
         .and_then(|p| p.metadata)
-        .and_then(|m| m.act_component);
+        .and_then(|m| m.act);
 
     Ok((info, inline_patch))
 }
