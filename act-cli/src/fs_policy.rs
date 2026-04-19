@@ -27,8 +27,9 @@
 //!   canonicalised child path.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
+use path_clean::PathClean;
 use wasmtime::component::{HasData, Resource, ResourceTable};
 use wasmtime_wasi::filesystem::{WasiFilesystemCtx, WasiFilesystemCtxView};
 use wasmtime_wasi::p2::bindings::filesystem::preopens;
@@ -86,8 +87,7 @@ impl<'a> PolicyFilesystemCtxView<'a> {
             tracing::warn!(fd = parent_fd.rep(), "fs policy: untracked parent fd");
             return Err(ErrorCode::NotPermitted.into());
         };
-        let candidate = parent.join(rel);
-        let canonical = canonicalize_lossy(&candidate);
+        let canonical = parent.join(rel).clean();
         match self.matcher.decide(&canonical) {
             FsDecision::Allow => Ok(canonical),
             FsDecision::Deny => {
@@ -116,24 +116,6 @@ impl<'a> PolicyFilesystemCtxView<'a> {
             self.fd_paths.by_rep.insert(res.rep(), host);
         }
     }
-}
-
-/// Collapse `..` / `.` components without touching the filesystem. We don't
-/// call `std::fs::canonicalize` because the path may not exist yet (e.g.
-/// `create_directory_at` to a new dir). cap-std prevents `..` escape at the
-/// actual OS syscall, but we want the matcher to see a stable path.
-fn canonicalize_lossy(p: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for comp in p.components() {
-        match comp {
-            std::path::Component::ParentDir => {
-                out.pop();
-            }
-            std::path::Component::CurDir => {}
-            c => out.push(c.as_os_str()),
-        }
-    }
-    out
 }
 
 // ── preopens::Host ────────────────────────────────────────────────────────

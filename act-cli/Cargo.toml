@@ -54,6 +54,7 @@ hyper = "1"
 bytes = "1"
 cidr = "0.3"
 globset = "0.4"
+path-clean = "1"
 
 [dev-dependencies]
 tempfile = "3"
