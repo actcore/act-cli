@@ -53,6 +53,11 @@ jobs:
           chmod +x npm/@actcore/act-build-darwin-x64/act-build
           chmod +x npm/@actcore/act-build-darwin-arm64/act-build
 
+      - name: Add README to wrapper packages
+        run: |
+          cp README.md npm/@actcore/act/README.md
+          cp README.md npm/@actcore/act-build/README.md
+
       - name: Pack all npm packages
         run: |
           mkdir -p packed
