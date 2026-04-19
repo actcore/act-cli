@@ -6,12 +6,23 @@
 //! `ErrorCode::HttpRequestDenied`. Deny-by-default for `allowlist` mode;
 //! `open` allows every request; `deny` blocks every request.
 //!
-//! Phase C2 scope:
+//! Enforcement scope:
 //! - Host matching: literal host, exact match or `*.suffix` wildcard.
 //! - Scheme / methods / ports matching.
-//! - IP literals matched against `cidr` entries.
-//! - DNS-resolved IPs against `cidr`: NOT IMPLEMENTED YET (requires
-//!   intercepting the connect call; deferred to Phase D).
+//! - IP literals in URI: matched against `cidr` entries at HTTP-layer.
+//! - **DNS-resolved IPs against deny CIDRs**: checked in a pre-flight
+//!   `lookup_host` before the default handler runs. Catches
+//!   SSRF-by-name ("fetch internal.example.com" where it resolves to a
+//!   10.x host). This is a second DNS lookup per request (the default
+//!   handler does its own `TcpStream::connect(authority)` which resolves
+//!   again); the OS resolver cache usually makes the second lookup a
+//!   no-op. There's a narrow TOCTOU window where a racing resolver
+//!   could return a different IP between our check and the handler's
+//!   connect — full DNS-rebinding defence requires forking the default
+//!   handler to accept a pre-resolved `SocketAddr`, which is deferred.
+//! - Allow-CIDR rules against DNS-resolved IPs: NOT IMPLEMENTED. Allow
+//!   CIDRs still require an IP literal in the URI. Deny CIDRs are the
+//!   security-critical direction.
 //! - Redirect re-decision: deferred (wasi-http follows redirects inside
 //!   `default_send_request`; we'd need to disable that and resubmit).
 
@@ -138,6 +149,35 @@ fn deny_reason(method: Option<&str>, uri: &Uri) -> String {
     format!("blocked by ACT policy: {} {}", method.unwrap_or("?"), uri)
 }
 
+/// Returns `true` if an IP address (typically the DNS-resolved peer of an
+/// outgoing HTTP request) should be refused at connect time. This closes the
+/// SSRF-by-DNS-trickery case: `deny = [{ cidr = "10.0.0.0/8" }]` catches
+/// `http://internal.example.com/` when it resolves to a 10.x host, even
+/// though the URI host is a name, not an IP.
+///
+/// Only deny rules are applied here. Allow-CIDR semantics still go through
+/// the HTTP-layer matcher (URI must have an IP literal). That's an
+/// asymmetry — deny is the security-relevant direction.
+pub fn is_ip_denied_by_cidr(cfg: &HttpConfig, ip: std::net::IpAddr, port: u16) -> bool {
+    if matches!(cfg.mode, PolicyMode::Open) {
+        return false;
+    }
+    cfg.deny.iter().any(|rule| {
+        let Some(ref spec) = rule.cidr else {
+            return false;
+        };
+        if !cidr_contains(spec, ip) {
+            return false;
+        }
+        if let Some(except) = &rule.except_ports
+            && except.contains(&port)
+        {
+            return false;
+        }
+        true
+    })
+}
+
 // ── p2 hook ───────────────────────────────────────────────────────────────
 
 impl wasmtime_wasi_http::p2::WasiHttpHooks for PolicyHttpHooks {
@@ -150,18 +190,66 @@ impl wasmtime_wasi_http::p2::WasiHttpHooks for PolicyHttpHooks {
         let method = Some(request.method().as_str());
         let uri = request.uri().clone();
         match self.decide_uri(method, &uri) {
-            Decision::Allow => {
-                tracing::debug!(?method, %uri, "http policy allow (p2)");
-                Ok(wasmtime_wasi_http::p2::default_send_request(
-                    request, config,
-                ))
-            }
             Decision::Deny => {
                 tracing::warn!(?method, %uri, "{}", deny_reason(method, &uri));
                 Err(wasmtime_wasi_http::p2::HttpError::from(
                     P2ErrorCode::HttpRequestDenied,
                 ))
             }
+            Decision::Allow => {
+                tracing::debug!(?method, %uri, "http policy allow (p2)");
+                let cfg = self.config.clone();
+                let use_tls = config.use_tls;
+                let handle = wasmtime_wasi::runtime::spawn(async move {
+                    // DNS + CIDR check before handing off to the default
+                    // handler. Catches SSRF-by-name (host resolves into a
+                    // deny CIDR) and pins the decision to the resolved IP:
+                    // if DNS flips between here and the handler's own
+                    // connect, worst case is a second resolution that
+                    // mis-steers — we've still blocked the original
+                    // resolved target.
+                    if let Err(code) = cidr_precheck(&cfg, request.uri(), use_tls).await {
+                        return Ok(Err(code));
+                    }
+                    Ok(wasmtime_wasi_http::p2::default_send_request_handler(request, config).await)
+                });
+                Ok(wasmtime_wasi_http::p2::types::HostFutureIncomingResponse::pending(handle))
+            }
+        }
+    }
+}
+
+/// Resolve the request's authority to one or more socket addresses and check
+/// each against the configured deny CIDRs. Any hit short-circuits the
+/// request with `HttpRequestDenied`.
+async fn cidr_precheck(cfg: &HttpConfig, uri: &Uri, use_tls: bool) -> Result<(), P2ErrorCode> {
+    // No CIDR deny rules → nothing to do.
+    if cfg.deny.iter().all(|r| r.cidr.is_none()) {
+        return Ok(());
+    }
+    let Some(authority) = uri.authority() else {
+        return Ok(());
+    };
+    let host = authority.host();
+    let port = authority
+        .port_u16()
+        .unwrap_or(if use_tls { 443 } else { 80 });
+    let lookup_target = format!("{host}:{port}");
+    match tokio::net::lookup_host(&lookup_target).await {
+        Ok(addrs) => {
+            for addr in addrs {
+                if is_ip_denied_by_cidr(cfg, addr.ip(), addr.port()) {
+                    tracing::warn!(%addr, uri = %uri, "http policy: connect blocked by deny CIDR");
+                    return Err(P2ErrorCode::HttpRequestDenied);
+                }
+            }
+            Ok(())
+        }
+        Err(e) => {
+            // DNS failed — let the downstream handler produce a proper DNS
+            // error with its own diagnostics.
+            tracing::debug!(%e, uri = %uri, "http policy: DNS precheck lookup failed; deferring to handler");
+            Ok(())
         }
     }
 }
@@ -372,6 +460,57 @@ mod tests {
             h.decide_uri(Some("GET"), &uri("http://127.0.0.1:3000/")),
             Decision::Deny
         );
+    }
+
+    #[test]
+    fn ip_denied_by_cidr_matches_resolved_ip() {
+        let cfg = HttpConfig {
+            mode: PolicyMode::Allowlist,
+            deny: vec![HttpRule {
+                cidr: Some("10.0.0.0/8".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        // Any resolved IP under 10/8 is denied regardless of original URI host.
+        assert!(is_ip_denied_by_cidr(&cfg, "10.1.2.3".parse().unwrap(), 443));
+        assert!(!is_ip_denied_by_cidr(&cfg, "8.8.8.8".parse().unwrap(), 443));
+    }
+
+    #[test]
+    fn ip_denied_by_cidr_respects_except_ports() {
+        let cfg = HttpConfig {
+            mode: PolicyMode::Allowlist,
+            deny: vec![HttpRule {
+                cidr: Some("127.0.0.0/8".into()),
+                except_ports: Some(vec![3000]),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(is_ip_denied_by_cidr(&cfg, "127.0.0.1".parse().unwrap(), 80));
+        assert!(!is_ip_denied_by_cidr(
+            &cfg,
+            "127.0.0.1".parse().unwrap(),
+            3000
+        ));
+    }
+
+    #[test]
+    fn ip_denied_by_cidr_is_noop_for_open_mode() {
+        let cfg = HttpConfig {
+            mode: PolicyMode::Open,
+            deny: vec![HttpRule {
+                cidr: Some("10.0.0.0/8".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(!is_ip_denied_by_cidr(
+            &cfg,
+            "10.1.2.3".parse().unwrap(),
+            443
+        ));
     }
 
     #[test]

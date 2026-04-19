@@ -146,6 +146,7 @@ pub fn create_store(
             })?;
         preopen_pairs.push((mount.guest.clone(), mount.host.clone()));
     }
+
     let wasi = builder.build();
     let matcher = crate::runtime::fs_matcher::FsMatcher::compile(fs)?;
     let state = HostState {
