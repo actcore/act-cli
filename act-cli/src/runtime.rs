@@ -92,13 +92,13 @@ pub fn create_linker(engine: &Engine) -> Result<Linker<HostState>> {
     Ok(linker)
 }
 
-/// Create a new store with WASI context, preopening directories from fs_config.
+/// Create a new store with WASI context, preopening directories from resolved mounts.
 pub fn create_store(
     engine: &Engine,
-    fs_config: &crate::config::FsConfig,
+    preopens: &[crate::config::DirMount],
 ) -> Result<Store<HostState>> {
     let mut builder = WasiCtxBuilder::new();
-    for mount in &fs_config.mounts {
+    for mount in preopens {
         builder
             .preopened_dir(
                 &mount.host,
@@ -224,9 +224,9 @@ pub async fn instantiate_component(
     engine: &Engine,
     component: &Component,
     linker: &Linker<HostState>,
-    fs_config: &crate::config::FsConfig,
+    preopens: &[crate::config::DirMount],
 ) -> Result<(ActWorld, Store<HostState>)> {
-    let mut store = create_store(engine, fs_config)?;
+    let mut store = create_store(engine, preopens)?;
     let instance = ActWorld::instantiate_async(&mut store, component, linker)
         .await
         .map_err(|e| anyhow::anyhow!("failed to instantiate component: {e}"))?;
@@ -234,17 +234,32 @@ pub async fn instantiate_component(
     Ok((instance, store))
 }
 
-/// Warn if a component declares wasi:filesystem capability but no filesystem access was granted.
-pub fn warn_missing_capabilities(info: &ComponentInfo, fs_config: &crate::config::FsConfig) {
-    if info
+/// Warn when a component declares a capability class but the host policy
+/// denies everything. The component will load and trap on first op; emit a
+/// heads-up so the user can decide whether the policy needs widening.
+pub fn warn_missing_capabilities(
+    info: &ComponentInfo,
+    fs: &crate::config::FsConfig,
+    http: &crate::config::HttpConfig,
+) {
+    use crate::config::PolicyMode;
+
+    let fs_declared = info
         .std
         .capabilities
-        .has(act_types::constants::CAP_FILESYSTEM)
-        && fs_config.mounts.is_empty()
-    {
+        .has(act_types::constants::CAP_FILESYSTEM);
+    if fs_declared && fs.mode == PolicyMode::Deny {
         tracing::warn!(
             component = %info.std.name,
-            "component declares wasi:filesystem capability but no filesystem access was granted"
+            "component declares wasi:filesystem but policy denies all filesystem access"
+        );
+    }
+
+    let http_declared = info.std.capabilities.has(act_types::constants::CAP_HTTP);
+    if http_declared && http.mode == PolicyMode::Deny {
+        tracing::warn!(
+            component = %info.std.name,
+            "component declares wasi:http but policy denies all HTTP access"
         );
     }
 }

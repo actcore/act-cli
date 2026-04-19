@@ -22,12 +22,27 @@ struct CommonOpts {
     /// Path to a JSON metadata file
     #[arg(long)]
     metadata_file: Option<PathBuf>,
-    /// Map a host directory to a guest path (guest:host). Repeatable.
-    #[arg(long = "allow-dir")]
-    allow_dir: Vec<String>,
-    /// Grant full filesystem access (host / → guest /)
-    #[arg(long = "allow-fs")]
-    allow_fs: bool,
+
+    /// Filesystem policy mode: deny | allowlist | open
+    #[arg(long = "fs-policy")]
+    fs_policy: Option<String>,
+    /// Filesystem allow entry (path or path/**). Repeatable.
+    #[arg(long = "fs-allow")]
+    fs_allow: Vec<String>,
+    /// Filesystem deny entry. Repeatable.
+    #[arg(long = "fs-deny")]
+    fs_deny: Vec<String>,
+
+    /// HTTP policy mode: deny | allowlist | open
+    #[arg(long = "http-policy")]
+    http_policy: Option<String>,
+    /// HTTP allow entry: hostname (`api.example.com`) or CIDR (`10.0.0.0/8`). Repeatable.
+    #[arg(long = "http-allow")]
+    http_allow: Vec<String>,
+    /// HTTP deny entry. Repeatable.
+    #[arg(long = "http-deny")]
+    http_deny: Vec<String>,
+
     /// Use a named profile from the config file
     #[arg(long)]
     profile: Option<String>,
@@ -200,23 +215,30 @@ fn parse_cli_metadata(
     }
 }
 
-fn resolve_opts(
-    opts: &CommonOpts,
-) -> Result<(
-    config::ConfigFile,
-    config::FsConfig,
-    Option<serde_json::Value>,
-)> {
+struct ResolvedOpts {
+    #[allow(dead_code)]
+    config_file: config::ConfigFile,
+    fs: config::FsConfig,
+    http: config::HttpConfig,
+    metadata: Option<serde_json::Value>,
+}
+
+fn resolve_opts(opts: &CommonOpts) -> Result<ResolvedOpts> {
     let config_file = config::load_config(opts.config.as_deref())?;
     let profile = match &opts.profile {
         Some(name) => Some(config::get_profile(&config_file, name)?),
         None => None,
     };
-    let cli_overrides = config::CliOverrides {
-        allow_fs: opts.allow_fs,
-        allow_dir: opts.allow_dir.clone(),
+    let cli_overrides = config::CliPolicyOverrides {
+        fs_mode: opts.fs_policy.clone(),
+        fs_allow: opts.fs_allow.clone(),
+        fs_deny: opts.fs_deny.clone(),
+        http_mode: opts.http_policy.clone(),
+        http_allow: opts.http_allow.clone(),
+        http_deny: opts.http_deny.clone(),
     };
-    let fs_config = config::resolve_fs_config(&config_file, profile, &cli_overrides)?;
+    let fs = config::resolve_fs_config(&config_file, profile, &cli_overrides)?;
+    let http = config::resolve_http_config(&config_file, profile, &cli_overrides)?;
     let cli_metadata = parse_cli_metadata(opts.metadata.clone(), opts.metadata_file.clone())?;
     let merged_metadata = config::resolve_metadata(profile, cli_metadata.as_ref());
     let metadata = if merged_metadata.is_null() {
@@ -224,7 +246,12 @@ fn resolve_opts(
     } else {
         Some(merged_metadata)
     };
-    Ok((config_file, fs_config, metadata))
+    Ok(ResolvedOpts {
+        config_file,
+        fs,
+        http,
+        metadata,
+    })
 }
 
 // ── Common component setup ───────────────────────────────────────────────────
@@ -241,17 +268,40 @@ async fn prepare_component(
     component: &ComponentRef,
     opts: &CommonOpts,
 ) -> Result<PreparedComponent> {
-    let (_config, mut fs_config, metadata_value) = resolve_opts(opts)?;
+    let resolved = resolve_opts(opts)?;
 
     let component_path = resolve::resolve(component, false).await?;
     let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
     let info = runtime::read_component_info(&wasm_bytes)?;
 
-    let mount_root = info.std.capabilities.fs_mount_root().unwrap_or("/");
-    config::apply_mount_root(&mut fs_config, mount_root);
-    runtime::warn_missing_capabilities(&info, &fs_config);
+    // Declaration gate (Layer 1): clear fs / http configs for classes the
+    // component didn't declare in `[std.capabilities.*]`, regardless of user
+    // config. Mode effectively becomes Deny.
+    let fs_declared = info
+        .std
+        .capabilities
+        .has(act_types::constants::CAP_FILESYSTEM);
+    let http_declared = info.std.capabilities.has(act_types::constants::CAP_HTTP);
 
-    let metadata: runtime::Metadata = metadata_value
+    let fs = if fs_declared {
+        resolved.fs
+    } else {
+        config::FsConfig::deny()
+    };
+    let http = if http_declared {
+        resolved.http
+    } else {
+        config::HttpConfig::default()
+    };
+
+    runtime::warn_missing_capabilities(&info, &fs, &http);
+
+    let mut preopens = fs.preopens()?;
+    let mount_root = info.std.capabilities.fs_mount_root().unwrap_or("/");
+    config::apply_mount_root(&mut preopens, mount_root);
+
+    let metadata: runtime::Metadata = resolved
+        .metadata
         .as_ref()
         .map(|v| runtime::Metadata::from(v.clone()))
         .unwrap_or_default();
@@ -267,7 +317,7 @@ async fn prepare_component(
     let wasm = runtime::load_component(&engine, &component_path)?;
     let linker = runtime::create_linker(&engine)?;
     let (instance, store) =
-        runtime::instantiate_component(&engine, &wasm, &linker, &fs_config).await?;
+        runtime::instantiate_component(&engine, &wasm, &linker, &preopens).await?;
     let handle = runtime::spawn_component_actor(instance, store);
 
     tracing::info!(name = %info.std.name, version = %info.std.version, "Component ready");

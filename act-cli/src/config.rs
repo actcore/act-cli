@@ -1,38 +1,112 @@
+//! Layer 1 of the runtime-policy design: declaration gate + static allowlist
+//! for `wasi:filesystem` and `wasi:http`. See
+//! `docs/specs/2026-04-19-runtime-policy-hooks-design.md`.
+//!
+//! This module owns the config parsing and CLI-override resolution. Runtime
+//! enforcement (custom WASI impls) lives in `runtime.rs` and consumes the
+//! resolved structs produced here.
+
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-// ── Public types ──
+// ── Public resolved types (consumed by runtime.rs) ──
 
-/// A single guest←host directory mapping.
+/// Policy mode, shared by filesystem and HTTP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PolicyMode {
+    #[default]
+    Deny,
+    Allowlist,
+    Open,
+}
+
+impl PolicyMode {
+    fn parse(s: &str) -> Result<Self> {
+        match s {
+            "deny" => Ok(Self::Deny),
+            "allowlist" => Ok(Self::Allowlist),
+            "open" => Ok(Self::Open),
+            other => anyhow::bail!(
+                "unknown policy mode '{}' (expected deny / allowlist / open)",
+                other
+            ),
+        }
+    }
+}
+
+/// Resolved filesystem policy for a component invocation.
+#[derive(Debug, Clone, Default)]
+pub struct FsConfig {
+    pub mode: PolicyMode,
+    pub allow: Vec<String>,
+    // Consumed by the per-op matcher in Layer 1 Phase C (custom WASI impl).
+    // Kept in the public struct so config + CLI parsing is end-to-end now.
+    #[allow(dead_code)]
+    pub deny: Vec<String>,
+}
+
+impl FsConfig {
+    pub fn deny() -> Self {
+        Self {
+            mode: PolicyMode::Deny,
+            ..Default::default()
+        }
+    }
+
+    /// Preopens derived from `allow` entries. Layer 1 supports literal path
+    /// patterns and a trailing `/**` (meaning the directory and everything
+    /// under it). Other glob syntax is rejected until the Layer 1 custom WASI
+    /// impl lands and replaces preopens with per-op matching.
+    pub fn preopens(&self) -> Result<Vec<DirMount>> {
+        match self.mode {
+            PolicyMode::Deny => Ok(vec![]),
+            PolicyMode::Open => Ok(vec![DirMount {
+                guest: "/".to_string(),
+                host: PathBuf::from("/"),
+            }]),
+            PolicyMode::Allowlist => self.allow.iter().map(|p| path_to_mount(p)).collect(),
+        }
+    }
+}
+
+/// Derived directory mount for wasmtime's `preopened_dir`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DirMount {
     pub guest: String,
     pub host: PathBuf,
 }
 
-/// Resolved filesystem configuration for a component invocation.
+/// Resolved HTTP policy for a component invocation.
+///
+/// `allow` / `deny` rules are consumed by the per-op matcher in Layer 1
+/// Phase C (custom `WasiHttpHooks::send_request`). Kept public so config +
+/// CLI parsing is end-to-end now.
 #[derive(Debug, Clone, Default)]
-pub struct FsConfig {
-    pub mounts: Vec<DirMount>,
+pub struct HttpConfig {
+    pub mode: PolicyMode,
+    #[allow(dead_code)]
+    pub allow: Vec<HttpRule>,
+    #[allow(dead_code)]
+    pub deny: Vec<HttpRule>,
 }
 
-impl FsConfig {
-    /// No filesystem access (default).
-    pub fn none() -> Self {
-        Self { mounts: vec![] }
-    }
-
-    /// Full filesystem: host `/` mapped to guest `/`.
-    pub fn full() -> Self {
-        Self {
-            mounts: vec![DirMount {
-                guest: "/".to_string(),
-                host: PathBuf::from("/"),
-            }],
-        }
-    }
+/// One allow-or-deny entry in an HTTP policy.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct HttpRule {
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub scheme: Option<String>,
+    #[serde(default)]
+    pub methods: Option<Vec<String>>,
+    #[serde(default)]
+    pub ports: Option<Vec<u16>>,
+    #[serde(default)]
+    pub cidr: Option<String>,
+    #[serde(default, rename = "except-ports")]
+    pub except_ports: Option<Vec<u16>>,
 }
 
 // ── TOML deserialization types ──
@@ -53,31 +127,38 @@ pub struct ConfigFile {
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct PolicyConfig {
     #[serde(default)]
-    pub filesystem: Option<FilesystemPolicy>,
+    pub filesystem: Option<FsPolicyToml>,
     #[serde(default)]
-    #[allow(dead_code)]
-    pub network: Option<bool>,
+    pub http: Option<HttpPolicyToml>,
 }
 
-/// Filesystem policy — either a simple string ("none"/"full") or a structured object.
+/// Filesystem policy in TOML: shorthand string (`"deny"` / `"allowlist"` /
+/// `"open"`) or a structured object with `mode` + `allow` + `deny` lists.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(untagged)]
-pub enum FilesystemPolicy {
+pub enum FsPolicyToml {
     Simple(String),
-    Structured(StructuredFsPolicy),
+    Structured {
+        mode: String,
+        #[serde(default)]
+        allow: Vec<String>,
+        #[serde(default)]
+        deny: Vec<String>,
+    },
 }
 
+/// HTTP policy in TOML: shorthand string or structured object.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct StructuredFsPolicy {
-    pub mode: String,
-    #[serde(rename = "allow-dir", default)]
-    pub allow_dir: Vec<DirMapping>,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct DirMapping {
-    pub guest: String,
-    pub host: String,
+#[serde(untagged)]
+pub enum HttpPolicyToml {
+    Simple(String),
+    Structured {
+        mode: String,
+        #[serde(default)]
+        allow: Vec<HttpRule>,
+        #[serde(default)]
+        deny: Vec<HttpRule>,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -131,76 +212,165 @@ fn expand_path(s: &str) -> PathBuf {
     PathBuf::from(expanded.as_ref())
 }
 
+/// Convert an `allow` entry (literal path or `dir/**`) to a preopen mount.
+fn path_to_mount(pattern: &str) -> Result<DirMount> {
+    let trimmed = pattern
+        .strip_suffix("/**")
+        .or_else(|| pattern.strip_suffix("/*"))
+        .unwrap_or(pattern);
+    if trimmed.contains('*') || trimmed.contains('?') || trimmed.contains('[') {
+        anyhow::bail!(
+            "unsupported glob in '{}'; Layer 1 allows literal paths and a trailing '/**' only",
+            pattern
+        );
+    }
+    let host = expand_path(trimmed);
+    let guest = format!(
+        "/{}",
+        host.file_name().and_then(|n| n.to_str()).unwrap_or("")
+    );
+    Ok(DirMount { guest, host })
+}
+
 // ── Resolution ──
 
-/// Resolve the final `FsConfig` from a filesystem policy.
-fn resolve_fs_policy(policy: &FilesystemPolicy) -> Result<FsConfig> {
-    match policy {
-        FilesystemPolicy::Simple(s) => match s.as_str() {
-            "none" => Ok(FsConfig::none()),
-            "full" => Ok(FsConfig::full()),
-            other => anyhow::bail!("unknown filesystem policy: '{}'", other),
-        },
-        FilesystemPolicy::Structured(s) => {
-            if s.mode != "directory" {
-                anyhow::bail!("unknown filesystem mode: '{}'", s.mode);
-            }
-            let mounts = s
-                .allow_dir
-                .iter()
-                .map(|d| DirMount {
-                    guest: d.guest.clone(),
-                    host: expand_path(&d.host),
-                })
-                .collect();
-            Ok(FsConfig { mounts })
-        }
+/// CLI-provided policy overrides, collected in one place.
+#[derive(Debug, Default)]
+pub struct CliPolicyOverrides {
+    pub fs_mode: Option<String>,
+    pub fs_allow: Vec<String>,
+    pub fs_deny: Vec<String>,
+    pub http_mode: Option<String>,
+    pub http_allow: Vec<String>,
+    pub http_deny: Vec<String>,
+}
+
+impl CliPolicyOverrides {
+    fn any_fs_override(&self) -> bool {
+        self.fs_mode.is_some() || !self.fs_allow.is_empty() || !self.fs_deny.is_empty()
+    }
+    fn any_http_override(&self) -> bool {
+        self.http_mode.is_some() || !self.http_allow.is_empty() || !self.http_deny.is_empty()
     }
 }
 
-/// CLI-provided filesystem overrides.
-pub struct CliOverrides {
-    pub allow_fs: bool,
-    pub allow_dir: Vec<String>,
+fn parse_fs_toml(policy: &FsPolicyToml) -> Result<FsConfig> {
+    match policy {
+        FsPolicyToml::Simple(s) => Ok(FsConfig {
+            mode: PolicyMode::parse(s)?,
+            ..Default::default()
+        }),
+        FsPolicyToml::Structured { mode, allow, deny } => Ok(FsConfig {
+            mode: PolicyMode::parse(mode)?,
+            allow: allow.clone(),
+            deny: deny.clone(),
+        }),
+    }
+}
+
+fn parse_http_toml(policy: &HttpPolicyToml) -> Result<HttpConfig> {
+    match policy {
+        HttpPolicyToml::Simple(s) => Ok(HttpConfig {
+            mode: PolicyMode::parse(s)?,
+            ..Default::default()
+        }),
+        HttpPolicyToml::Structured { mode, allow, deny } => Ok(HttpConfig {
+            mode: PolicyMode::parse(mode)?,
+            allow: allow.clone(),
+            deny: deny.clone(),
+        }),
+    }
+}
+
+fn parse_host_or_cidr(s: &str) -> HttpRule {
+    if let Some(slash) = s.find('/')
+        && s[slash + 1..].parse::<u32>().is_ok()
+    {
+        return HttpRule {
+            cidr: Some(s.to_string()),
+            ..Default::default()
+        };
+    }
+    HttpRule {
+        host: Some(s.to_string()),
+        ..Default::default()
+    }
 }
 
 /// Resolve the final `FsConfig` from config file + profile + CLI overrides.
-///
-/// Resolution order: CLI flags > profile > config defaults.
 pub fn resolve_fs_config(
     config: &ConfigFile,
     profile: Option<&ProfileConfig>,
-    cli: &CliOverrides,
+    cli: &CliPolicyOverrides,
 ) -> Result<FsConfig> {
-    // CLI flags take highest priority
-    if cli.allow_fs {
-        return Ok(FsConfig::full());
-    }
-    if !cli.allow_dir.is_empty() {
-        let mounts = cli
-            .allow_dir
-            .iter()
-            .map(|s| parse_allow_dir(s))
-            .collect::<Result<Vec<_>>>()?;
-        return Ok(FsConfig { mounts });
+    if cli.any_fs_override() {
+        let mode = match cli.fs_mode.as_deref() {
+            Some(m) => PolicyMode::parse(m)?,
+            None if !cli.fs_allow.is_empty() => PolicyMode::Allowlist,
+            None => PolicyMode::Deny,
+        };
+        return Ok(FsConfig {
+            mode,
+            allow: cli.fs_allow.clone(),
+            deny: cli.fs_deny.clone(),
+        });
     }
 
-    // Profile policy
     if let Some(profile) = profile
         && let Some(ref policy) = profile.policy
         && let Some(ref fs) = policy.filesystem
     {
-        return resolve_fs_policy(fs);
+        return parse_fs_toml(fs);
     }
 
-    // Config defaults
     if let Some(ref policy) = config.policy
         && let Some(ref fs) = policy.filesystem
     {
-        return resolve_fs_policy(fs);
+        return parse_fs_toml(fs);
     }
 
-    Ok(FsConfig::none())
+    Ok(FsConfig::deny())
+}
+
+/// Resolve the final `HttpConfig` from config file + profile + CLI overrides.
+pub fn resolve_http_config(
+    config: &ConfigFile,
+    profile: Option<&ProfileConfig>,
+    cli: &CliPolicyOverrides,
+) -> Result<HttpConfig> {
+    if cli.any_http_override() {
+        let mode = match cli.http_mode.as_deref() {
+            Some(m) => PolicyMode::parse(m)?,
+            None if !cli.http_allow.is_empty() => PolicyMode::Allowlist,
+            None => PolicyMode::Deny,
+        };
+        let allow: Vec<HttpRule> = cli
+            .http_allow
+            .iter()
+            .map(|s| parse_host_or_cidr(s))
+            .collect();
+        let deny: Vec<HttpRule> = cli
+            .http_deny
+            .iter()
+            .map(|s| parse_host_or_cidr(s))
+            .collect();
+        return Ok(HttpConfig { mode, allow, deny });
+    }
+
+    if let Some(profile) = profile
+        && let Some(ref policy) = profile.policy
+        && let Some(ref http) = policy.http
+    {
+        return parse_http_toml(http);
+    }
+
+    if let Some(ref policy) = config.policy
+        && let Some(ref http) = policy.http
+    {
+        return parse_http_toml(http);
+    }
+
+    Ok(HttpConfig::default())
 }
 
 /// Resolve the merged metadata from profile + CLI.
@@ -211,14 +381,12 @@ pub fn resolve_metadata(
 ) -> serde_json::Value {
     let mut merged = serde_json::Map::new();
 
-    // Profile metadata (lower priority)
     if let Some(profile) = profile
         && let Some(serde_json::Value::Object(m)) = &profile.metadata
     {
         merged.extend(m.clone());
     }
 
-    // CLI metadata (higher priority, overwrites)
     if let Some(serde_json::Value::Object(m)) = cli_metadata {
         merged.extend(m.clone());
     }
@@ -230,14 +398,13 @@ pub fn resolve_metadata(
     }
 }
 
-/// Adjust guest paths in FsConfig based on the component's `std:fs:mount-root`.
-/// All guest paths become `{mount_root}/{guest}`.
-pub fn apply_mount_root(fs_config: &mut FsConfig, mount_root: &str) {
+/// Adjust guest paths in preopen mounts based on the component's `std:fs:mount-root`.
+pub fn apply_mount_root(mounts: &mut [DirMount], mount_root: &str) {
     if mount_root == "/" || mount_root.is_empty() {
         return;
     }
     let root = mount_root.trim_end_matches('/');
-    for mount in &mut fs_config.mounts {
+    for mount in mounts {
         if mount.guest == "/" {
             mount.guest = root.to_string();
         } else {
@@ -247,348 +414,153 @@ pub fn apply_mount_root(fs_config: &mut FsConfig, mount_root: &str) {
     }
 }
 
-/// Parse `--allow-dir guest:host` flag value.
-fn parse_allow_dir(s: &str) -> Result<DirMount> {
-    let (guest, host) = s
-        .split_once(':')
-        .with_context(|| format!("invalid --allow-dir format '{}', expected guest:host", s))?;
-    Ok(DirMount {
-        guest: guest.to_string(),
-        host: expand_path(host),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // ── parse_allow_dir ──
-
     #[test]
-    fn parse_allow_dir_valid() {
-        let m = parse_allow_dir("data:/real/data").unwrap();
-        assert_eq!(m.guest, "data");
-        assert_eq!(m.host, PathBuf::from("/real/data"));
-    }
-
-    #[test]
-    fn parse_allow_dir_root() {
-        let m = parse_allow_dir("/:/").unwrap();
-        assert_eq!(m.guest, "/");
-        assert_eq!(m.host, PathBuf::from("/"));
-    }
-
-    #[test]
-    fn parse_allow_dir_no_colon() {
-        assert!(parse_allow_dir("nohost").is_err());
-    }
-
-    #[test]
-    fn parse_allow_dir_tilde_expansion() {
-        let m = parse_allow_dir("data:~/mydir").unwrap();
-        assert_eq!(m.guest, "data");
-        // ~ should be expanded; at minimum it should not start with ~
-        assert!(!m.host.starts_with("~"));
-    }
-
-    // ── FsConfig constructors ──
-
-    #[test]
-    fn fs_config_none_has_no_mounts() {
-        assert!(FsConfig::none().mounts.is_empty());
-    }
-
-    #[test]
-    fn fs_config_full_maps_root() {
-        let fs = FsConfig::full();
-        assert_eq!(fs.mounts.len(), 1);
-        assert_eq!(fs.mounts[0].guest, "/");
-        assert_eq!(fs.mounts[0].host, PathBuf::from("/"));
-    }
-
-    // ── TOML parsing ──
-
-    #[test]
-    fn parse_minimal_config() {
-        let toml_str = r#"
-listen = "[::1]:4000"
-"#;
-        let config: ConfigFile = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.listen.as_deref(), Some("[::1]:4000"));
-        assert!(config.profile.is_empty());
-    }
-
-    #[test]
-    fn parse_config_with_simple_policy() {
-        let toml_str = r#"
-[policy]
-filesystem = "none"
-network = true
-"#;
-        let config: ConfigFile = toml::from_str(toml_str).unwrap();
-        let policy = config.policy.unwrap();
+    fn policy_mode_parse() {
+        assert_eq!(PolicyMode::parse("deny").unwrap(), PolicyMode::Deny);
         assert_eq!(
-            policy.filesystem,
-            Some(FilesystemPolicy::Simple("none".to_string()))
+            PolicyMode::parse("allowlist").unwrap(),
+            PolicyMode::Allowlist
         );
-        assert_eq!(policy.network, Some(true));
+        assert_eq!(PolicyMode::parse("open").unwrap(), PolicyMode::Open);
+        assert!(PolicyMode::parse("bogus").is_err());
     }
 
     #[test]
-    fn parse_config_with_structured_policy() {
-        let toml_str = r#"
-[profile.sqlite.policy]
-filesystem = { mode = "directory", allow-dir = [
-  { guest = "/data", host = "/home/user/.local/share/act/sqlite" },
-]}
-"#;
-        let config: ConfigFile = toml::from_str(toml_str).unwrap();
-        let profile = config.profile.get("sqlite").unwrap();
-        let policy = profile.policy.as_ref().unwrap();
-        let fs = policy.filesystem.as_ref().unwrap();
-        match fs {
-            FilesystemPolicy::Structured(s) => {
-                assert_eq!(s.mode, "directory");
-                assert_eq!(s.allow_dir.len(), 1);
-                assert_eq!(s.allow_dir[0].guest, "/data");
-            }
-            _ => panic!("expected structured policy"),
-        }
+    fn fs_deny_has_no_preopens() {
+        let cfg = FsConfig::deny();
+        assert!(cfg.preopens().unwrap().is_empty());
     }
 
     #[test]
-    fn parse_structured_policy_tilde_host() {
-        let toml_str = r#"
-[profile.test.policy]
-filesystem = { mode = "directory", allow-dir = [
-  { guest = "/data", host = "~/.local/share/act/test" },
-]}
-"#;
-        let config: ConfigFile = toml::from_str(toml_str).unwrap();
-        let profile = config.profile.get("test").unwrap();
-        let cli = CliOverrides {
-            allow_fs: false,
-            allow_dir: vec![],
+    fn fs_open_maps_root() {
+        let cfg = FsConfig {
+            mode: PolicyMode::Open,
+            ..Default::default()
         };
-        let fs = resolve_fs_config(&config, Some(profile), &cli).unwrap();
-        // Tilde should be expanded
-        assert!(!fs.mounts[0].host.starts_with("~"));
+        let mounts = cfg.preopens().unwrap();
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].host, PathBuf::from("/"));
     }
 
     #[test]
-    fn parse_full_config() {
-        let toml_str = r#"
-listen = "[::1]:3000"
-log-level = "info"
+    fn fs_allowlist_literal_path() {
+        let cfg = FsConfig {
+            mode: PolicyMode::Allowlist,
+            allow: vec!["/tmp/data".into()],
+            ..Default::default()
+        };
+        let mounts = cfg.preopens().unwrap();
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].host, PathBuf::from("/tmp/data"));
+    }
 
+    #[test]
+    fn fs_allowlist_trailing_double_star() {
+        let cfg = FsConfig {
+            mode: PolicyMode::Allowlist,
+            allow: vec!["/tmp/data/**".into()],
+            ..Default::default()
+        };
+        let mounts = cfg.preopens().unwrap();
+        assert_eq!(mounts[0].host, PathBuf::from("/tmp/data"));
+    }
+
+    #[test]
+    fn fs_allowlist_rejects_mid_glob() {
+        let cfg = FsConfig {
+            mode: PolicyMode::Allowlist,
+            allow: vec!["/tmp/*/x".into()],
+            ..Default::default()
+        };
+        assert!(cfg.preopens().is_err());
+    }
+
+    #[test]
+    fn cli_http_allow_host() {
+        let cli = CliPolicyOverrides {
+            http_allow: vec!["api.example.com".into()],
+            ..Default::default()
+        };
+        let cfg = resolve_http_config(&ConfigFile::default(), None, &cli).unwrap();
+        assert_eq!(cfg.mode, PolicyMode::Allowlist);
+        assert_eq!(cfg.allow[0].host.as_deref(), Some("api.example.com"));
+    }
+
+    #[test]
+    fn cli_http_deny_cidr() {
+        let cli = CliPolicyOverrides {
+            http_deny: vec!["10.0.0.0/8".into()],
+            ..Default::default()
+        };
+        let cfg = resolve_http_config(&ConfigFile::default(), None, &cli).unwrap();
+        assert_eq!(cfg.mode, PolicyMode::Deny);
+        assert_eq!(cfg.deny[0].cidr.as_deref(), Some("10.0.0.0/8"));
+    }
+
+    #[test]
+    fn toml_policy_shorthand() {
+        let toml = r#"
 [policy]
-filesystem = "none"
-network = true
-
-[profile.sqlite]
-metadata = { database_path = "/data/app.db" }
-
-[profile.sqlite.policy]
-filesystem = { mode = "directory", allow-dir = [
-  { guest = "/data", host = "~/.local/share/act/sqlite" },
-]}
-
-[profile.filesystem]
-policy.filesystem = "full"
+filesystem = "allowlist"
+http = "deny"
 "#;
-        let config: ConfigFile = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.listen.as_deref(), Some("[::1]:3000"));
-        assert_eq!(config.profile.len(), 2);
-        assert!(config.profile.contains_key("sqlite"));
-        assert!(config.profile.contains_key("filesystem"));
+        let cfg: ConfigFile = toml::from_str(toml).unwrap();
+        let fs = resolve_fs_config(&cfg, None, &CliPolicyOverrides::default()).unwrap();
+        let http = resolve_http_config(&cfg, None, &CliPolicyOverrides::default()).unwrap();
+        assert_eq!(fs.mode, PolicyMode::Allowlist);
+        assert_eq!(http.mode, PolicyMode::Deny);
     }
 
     #[test]
-    fn parse_profile_metadata() {
-        let toml_str = r#"
-[profile.sqlite]
-metadata = { database_path = "/data/app.db", max_connections = 5 }
+    fn toml_policy_structured() {
+        let toml = r#"
+[policy.filesystem]
+mode = "allowlist"
+allow = ["/tmp/**"]
+deny = ["**/.ssh/**"]
+
+[policy.http]
+mode = "allowlist"
+allow = [{ host = "api.openai.com", scheme = "https" }]
 "#;
-        let config: ConfigFile = toml::from_str(toml_str).unwrap();
-        let profile = config.profile.get("sqlite").unwrap();
-        let meta = profile.metadata.as_ref().unwrap();
-        assert_eq!(meta["database_path"], "/data/app.db");
-        assert_eq!(meta["max_connections"], 5);
-    }
-
-    // ── Resolution ──
-
-    #[test]
-    fn resolve_cli_allow_fs_wins() {
-        let config = ConfigFile::default();
-        let cli = CliOverrides {
-            allow_fs: true,
-            allow_dir: vec![],
-        };
-        let fs = resolve_fs_config(&config, None, &cli).unwrap();
-        assert_eq!(fs.mounts.len(), 1);
-        assert_eq!(fs.mounts[0].guest, "/");
+        let cfg: ConfigFile = toml::from_str(toml).unwrap();
+        let fs = resolve_fs_config(&cfg, None, &CliPolicyOverrides::default()).unwrap();
+        assert_eq!(fs.mode, PolicyMode::Allowlist);
+        assert_eq!(fs.allow, vec!["/tmp/**"]);
+        assert_eq!(fs.deny, vec!["**/.ssh/**"]);
+        let http = resolve_http_config(&cfg, None, &CliPolicyOverrides::default()).unwrap();
+        assert_eq!(http.mode, PolicyMode::Allowlist);
+        assert_eq!(http.allow[0].host.as_deref(), Some("api.openai.com"));
+        assert_eq!(http.allow[0].scheme.as_deref(), Some("https"));
     }
 
     #[test]
-    fn resolve_cli_allow_fs_wins_over_allow_dir() {
-        let config = ConfigFile::default();
-        let cli = CliOverrides {
-            allow_fs: true,
-            allow_dir: vec!["data:/tmp".to_string()],
-        };
-        let fs = resolve_fs_config(&config, None, &cli).unwrap();
-        // --allow-fs takes priority, ignores --allow-dir
-        assert_eq!(fs.mounts.len(), 1);
-        assert_eq!(fs.mounts[0].guest, "/");
+    fn apply_mount_root_rewrites() {
+        let mut mounts = vec![DirMount {
+            guest: "/".to_string(),
+            host: PathBuf::from("/host"),
+        }];
+        apply_mount_root(&mut mounts, "/data");
+        assert_eq!(mounts[0].guest, "/data");
     }
 
     #[test]
-    fn resolve_cli_allow_dir_wins() {
-        let config = ConfigFile::default();
-        let cli = CliOverrides {
-            allow_fs: false,
-            allow_dir: vec!["data:/tmp/data".to_string()],
-        };
-        let fs = resolve_fs_config(&config, None, &cli).unwrap();
-        assert_eq!(fs.mounts.len(), 1);
-        assert_eq!(fs.mounts[0].guest, "data");
-        assert_eq!(fs.mounts[0].host, PathBuf::from("/tmp/data"));
-    }
-
-    #[test]
-    fn resolve_profile_over_default() {
-        let toml_str = r#"
+    fn cli_overrides_config_file() {
+        let toml = r#"
 [policy]
-filesystem = "none"
-
-[profile.test.policy]
-filesystem = "full"
+filesystem = "deny"
 "#;
-        let config: ConfigFile = toml::from_str(toml_str).unwrap();
-        let profile = config.profile.get("test").unwrap();
-        let cli = CliOverrides {
-            allow_fs: false,
-            allow_dir: vec![],
+        let cfg: ConfigFile = toml::from_str(toml).unwrap();
+        let cli = CliPolicyOverrides {
+            fs_allow: vec!["/tmp/work".into()],
+            ..Default::default()
         };
-        let fs = resolve_fs_config(&config, Some(profile), &cli).unwrap();
-        assert_eq!(fs.mounts.len(), 1);
-        assert_eq!(fs.mounts[0].guest, "/");
-    }
-
-    #[test]
-    fn resolve_falls_back_to_default() {
-        let toml_str = r#"
-[policy]
-filesystem = "full"
-"#;
-        let config: ConfigFile = toml::from_str(toml_str).unwrap();
-        let cli = CliOverrides {
-            allow_fs: false,
-            allow_dir: vec![],
-        };
-        let fs = resolve_fs_config(&config, None, &cli).unwrap();
-        assert_eq!(fs.mounts.len(), 1);
-    }
-
-    #[test]
-    fn resolve_no_config_no_cli_is_none() {
-        let config = ConfigFile::default();
-        let cli = CliOverrides {
-            allow_fs: false,
-            allow_dir: vec![],
-        };
-        let fs = resolve_fs_config(&config, None, &cli).unwrap();
-        assert!(fs.mounts.is_empty());
-    }
-
-    // ── Metadata resolution ──
-
-    #[test]
-    fn resolve_metadata_cli_wins() {
-        let profile = ProfileConfig {
-            metadata: Some(serde_json::json!({"key": "from_profile", "extra": 1})),
-            policy: None,
-        };
-        let cli_meta = serde_json::json!({"key": "from_cli"});
-        let merged = resolve_metadata(Some(&profile), Some(&cli_meta));
-        assert_eq!(merged["key"], "from_cli");
-        assert_eq!(merged["extra"], 1);
-    }
-
-    #[test]
-    fn resolve_metadata_profile_only() {
-        let profile = ProfileConfig {
-            metadata: Some(serde_json::json!({"db": "/data/app.db"})),
-            policy: None,
-        };
-        let merged = resolve_metadata(Some(&profile), None);
-        assert_eq!(merged["db"], "/data/app.db");
-    }
-
-    #[test]
-    fn resolve_metadata_none() {
-        let merged = resolve_metadata(None, None);
-        assert!(merged.is_null());
-    }
-
-    // ── apply_mount_root ──
-
-    #[test]
-    fn apply_mount_root_default_noop() {
-        let mut fs = FsConfig {
-            mounts: vec![DirMount {
-                guest: "/data".to_string(),
-                host: PathBuf::from("/tmp"),
-            }],
-        };
-        apply_mount_root(&mut fs, "/");
-        assert_eq!(fs.mounts[0].guest, "/data");
-    }
-
-    #[test]
-    fn apply_mount_root_empty_noop() {
-        let mut fs = FsConfig {
-            mounts: vec![DirMount {
-                guest: "/data".to_string(),
-                host: PathBuf::from("/tmp"),
-            }],
-        };
-        apply_mount_root(&mut fs, "");
-        assert_eq!(fs.mounts[0].guest, "/data");
-    }
-
-    #[test]
-    fn apply_mount_root_custom() {
-        let mut fs = FsConfig {
-            mounts: vec![DirMount {
-                guest: "data".to_string(),
-                host: PathBuf::from("/tmp"),
-            }],
-        };
-        apply_mount_root(&mut fs, "/workspace");
-        assert_eq!(fs.mounts[0].guest, "/workspace/data");
-    }
-
-    #[test]
-    fn apply_mount_root_full_fs() {
-        let mut fs = FsConfig::full();
-        apply_mount_root(&mut fs, "/app");
-        assert_eq!(fs.mounts[0].guest, "/app");
-    }
-
-    // ── load_config ──
-
-    #[test]
-    fn load_config_missing_explicit_path_errors() {
-        assert!(load_config(Some(Path::new("/nonexistent/config.toml"))).is_err());
-    }
-
-    #[test]
-    fn load_config_no_path_returns_default() {
-        // When no path given and default doesn't exist, returns empty config
-        let config = load_config(None).unwrap();
-        assert!(config.listen.is_none());
-        assert!(config.profile.is_empty());
+        let fs = resolve_fs_config(&cfg, None, &cli).unwrap();
+        assert_eq!(fs.mode, PolicyMode::Allowlist);
+        assert_eq!(fs.allow, vec!["/tmp/work"]);
     }
 }
