@@ -196,8 +196,8 @@ impl wasmtime_wasi_http::p2::WasiHttpHooks for PolicyHttpHooks {
                     // connect, worst case is a second resolution that
                     // mis-steers — we've still blocked the original
                     // resolved target.
-                    if let Err(code) = cidr_precheck(&cfg, request.uri(), use_tls).await {
-                        return Ok(Err(code));
+                    if cidr_precheck(&cfg, request.uri(), use_tls).await.is_err() {
+                        return Ok(Err(P2ErrorCode::HttpRequestDenied));
                     }
                     Ok(wasmtime_wasi_http::p2::default_send_request_handler(request, config).await)
                 });
@@ -207,11 +207,13 @@ impl wasmtime_wasi_http::p2::WasiHttpHooks for PolicyHttpHooks {
     }
 }
 
-/// Resolve the request's authority to one or more socket addresses and check
-/// each against the configured deny CIDRs. Any hit short-circuits the
-/// request with `HttpRequestDenied`.
-async fn cidr_precheck(cfg: &HttpConfig, uri: &Uri, use_tls: bool) -> Result<(), P2ErrorCode> {
-    // No CIDR deny rules → nothing to do.
+/// Resolve the request's authority to one or more socket addresses and
+/// check each against configured deny CIDRs. Returns `Err(())` on any deny
+/// hit; callers map to their p2/p3 `HttpRequestDenied` error variant.
+/// `Ok(())` on no CIDR deny rules at all, missing authority, DNS lookup
+/// failure (let the downstream handler surface that with its own
+/// diagnostics), or no matching rule.
+async fn cidr_precheck(cfg: &HttpConfig, uri: &Uri, use_tls: bool) -> Result<(), ()> {
     if cfg.deny.iter().all(|r| r.cidr.is_none()) {
         return Ok(());
     }
@@ -228,14 +230,12 @@ async fn cidr_precheck(cfg: &HttpConfig, uri: &Uri, use_tls: bool) -> Result<(),
             for addr in addrs {
                 if is_ip_denied_by_cidr(cfg, addr.ip(), addr.port()) {
                     tracing::warn!(%addr, uri = %uri, "http policy: connect blocked by deny CIDR");
-                    return Err(P2ErrorCode::HttpRequestDenied);
+                    return Err(());
                 }
             }
             Ok(())
         }
         Err(e) => {
-            // DNS failed — let the downstream handler produce a proper DNS
-            // error with its own diagnostics.
             tracing::debug!(%e, uri = %uri, "http policy: DNS precheck lookup failed; deferring to handler");
             Ok(())
         }
@@ -272,8 +272,19 @@ impl wasmtime_wasi_http::p3::WasiHttpHooks for PolicyHttpHooks {
             Decision::Allow => {
                 tracing::debug!(?method, %uri, "http policy allow (p3)");
                 let _ = fut;
+                let cfg = self.config.clone();
+                // p3 doesn't expose `use_tls` in RequestOptions; infer from
+                // the URI scheme (the default handler does the same).
+                let use_tls = uri.scheme_str() == Some("https");
                 Box::new(async move {
                     use http_body_util::BodyExt;
+                    // DNS + CIDR deny precheck mirrors the p2 path. Closes
+                    // SSRF-by-name for wasip3 HTTP clients (e.g. wasi-fetch).
+                    if cidr_precheck(&cfg, &uri, use_tls).await.is_err() {
+                        return Err(TrappableError::<P3ErrorCode>::from(
+                            P3ErrorCode::HttpRequestDenied,
+                        ));
+                    }
                     let (res, io) = wasmtime_wasi_http::p3::default_send_request(request, options)
                         .await
                         .map_err(TrappableError::<P3ErrorCode>::from)?;
