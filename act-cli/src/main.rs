@@ -274,27 +274,8 @@ async fn prepare_component(
     let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
     let info = runtime::read_component_info(&wasm_bytes)?;
 
-    // Declaration gate (Layer 1): clear fs / http configs for classes the
-    // component didn't declare in `[std.capabilities.*]`, regardless of user
-    // config. Mode effectively becomes Deny.
-    let fs_declared = info
-        .std
-        .capabilities
-        .has(act_types::constants::CAP_FILESYSTEM);
-    let http_declared = info.std.capabilities.has(act_types::constants::CAP_HTTP);
-
-    let fs = if fs_declared {
-        resolved.fs
-    } else {
-        config::FsConfig::deny()
-    };
-    let http = if http_declared {
-        resolved.http
-    } else {
-        config::HttpConfig::default()
-    };
-
-    runtime::warn_missing_capabilities(&info, &fs, &http);
+    let fs = resolved.fs;
+    let http = resolved.http;
 
     let mut preopens = runtime::fs_policy::derive_preopens(&fs);
     let mount_root = info.std.capabilities.fs_mount_root().unwrap_or("/");
@@ -317,7 +298,8 @@ async fn prepare_component(
     let wasm = runtime::load_component(&engine, &component_path)?;
     let linker = runtime::create_linker(&engine)?;
     let (instance, store) =
-        runtime::instantiate_component(&engine, &wasm, &linker, &preopens, &http, &fs).await?;
+        runtime::instantiate_component(&engine, &wasm, &linker, &preopens, &http, &fs, &info)
+            .await?;
     let handle = runtime::spawn_component_actor(instance, store);
 
     tracing::info!(name = %info.std.name, version = %info.std.version, "Component ready");

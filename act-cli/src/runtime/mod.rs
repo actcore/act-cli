@@ -139,12 +139,23 @@ pub fn create_linker(engine: &Engine) -> Result<Linker<HostState>> {
 }
 
 /// Create a new store with WASI context, preopening directories from resolved mounts.
+///
+/// `info` is used to compute the effective policy: user's `fs`/`http` configs are
+/// intersected with the component's declared capabilities before building the store.
+/// Undeclared capability classes and empty allow arrays hard-deny regardless of the
+/// user's grant.
 pub fn create_store(
     engine: &Engine,
     preopens: &[crate::runtime::fs_policy::Preopen],
     http: &crate::config::HttpConfig,
     fs: &crate::config::FsConfig,
+    info: &ComponentInfo,
 ) -> Result<Store<HostState>> {
+    // Intersect user policy with the component's declared capabilities.
+    let effective_fs = crate::runtime::effective::effective_fs(fs, &info.std.capabilities).config;
+    let effective_http =
+        crate::runtime::effective::effective_http(http, &info.std.capabilities).config;
+
     let mut builder = WasiCtxBuilder::new();
     let mut preopen_pairs = Vec::with_capacity(preopens.len());
     for mount in preopens {
@@ -167,9 +178,9 @@ pub fn create_store(
     }
 
     let wasi = builder.build();
-    let matcher = crate::runtime::fs_matcher::FsMatcher::compile(fs)?;
+    let matcher = crate::runtime::fs_matcher::FsMatcher::compile(&effective_fs)?;
     let http_client = std::sync::Arc::new(crate::runtime::http_client::ActHttpClient::new(
-        http.clone(),
+        effective_http.clone(),
     )?);
     let state = HostState {
         wasi,
@@ -177,12 +188,12 @@ pub fn create_store(
         http_p2: WasiHttpCtx::new(),
         http_p3: WasiHttpCtx::new(),
         http_hooks: crate::runtime::http_policy::PolicyHttpHooks::new(
-            http.clone(),
+            effective_http.clone(),
             http_client.clone(),
         ),
         http_client,
         fs_matcher: matcher,
-        fs_mode: fs.mode,
+        fs_mode: effective_fs.mode,
         fd_paths: crate::runtime::fs_policy::FdPathMap {
             preopens: preopen_pairs,
             by_rep: Default::default(),
@@ -292,43 +303,14 @@ pub async fn instantiate_component(
     preopens: &[crate::runtime::fs_policy::Preopen],
     http: &crate::config::HttpConfig,
     fs: &crate::config::FsConfig,
+    info: &ComponentInfo,
 ) -> Result<(ActWorld, Store<HostState>)> {
-    let mut store = create_store(engine, preopens, http, fs)?;
+    let mut store = create_store(engine, preopens, http, fs, info)?;
     let instance = ActWorld::instantiate_async(&mut store, component, linker)
         .await
         .map_err(|e| anyhow::anyhow!("failed to instantiate component: {e}"))?;
 
     Ok((instance, store))
-}
-
-/// Warn when a component declares a capability class but the host policy
-/// denies everything. The component will load and trap on first op; emit a
-/// heads-up so the user can decide whether the policy needs widening.
-pub fn warn_missing_capabilities(
-    info: &ComponentInfo,
-    fs: &crate::config::FsConfig,
-    http: &crate::config::HttpConfig,
-) {
-    use crate::config::PolicyMode;
-
-    let fs_declared = info
-        .std
-        .capabilities
-        .has(act_types::constants::CAP_FILESYSTEM);
-    if fs_declared && fs.mode == PolicyMode::Deny {
-        tracing::warn!(
-            component = %info.std.name,
-            "component declares wasi:filesystem but policy denies all filesystem access"
-        );
-    }
-
-    let http_declared = info.std.capabilities.has(act_types::constants::CAP_HTTP);
-    if http_declared && http.mode == PolicyMode::Deny {
-        tracing::warn!(
-            component = %info.std.name,
-            "component declares wasi:http but policy denies all HTTP access"
-        );
-    }
 }
 
 /// Spawn the component actor task. Owns the Store and ActWorld.
