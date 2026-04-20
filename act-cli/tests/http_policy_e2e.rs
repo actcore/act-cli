@@ -161,3 +161,91 @@ fn declaration_warning_when_policy_deny() {
         "expected capability warning; got: {stderr}"
     );
 }
+
+// ── CIDR coverage: the reqwest DNS resolver hook ─────────────────────────────
+
+#[test]
+fn deny_cidr_blocks_with_dns_error() {
+    // Allow host by name, deny every IP it could resolve to. The DNS
+    // resolver filters all addresses out and the guest sees DnsError
+    // (not ConnectionRefused — we walk reqwest's error chain to
+    // surface policy denials as DNS errors).
+    let Some(wasm) = skip_if_missing() else {
+        return;
+    };
+    let wasm_s = wasm.to_string_lossy().to_string();
+    let (ok, _stdout, stderr) = run_call(&[
+        "call",
+        "--http-allow",
+        "example.com",
+        "--http-deny",
+        "0.0.0.0/0",
+        "--http-deny",
+        "::/0",
+        &wasm_s,
+        "fetch",
+        "--args",
+        r#"{"url":"https://example.com"}"#,
+    ]);
+    assert!(!ok, "expected deny-CIDR to block; stderr: {stderr}");
+    assert!(
+        stderr.contains("DnsError"),
+        "expected DnsError mapping from DNS-deny, got: {stderr}"
+    );
+}
+
+#[test]
+fn allow_cidr_only_blocks_name_whose_ips_miss_cidr() {
+    // Closes the allow-CIDR symmetry: mode=Allowlist with only an
+    // allow-CIDR rule. HTTP layer defers to the DNS resolver for named
+    // hosts; resolver drops IPs that aren't in the allow CIDR. example.com
+    // resolves to public IPs well outside 10/8, so the request must fail
+    // with DnsError.
+    let Some(wasm) = skip_if_missing() else {
+        return;
+    };
+    let wasm_s = wasm.to_string_lossy().to_string();
+    let (ok, _stdout, stderr) = run_call(&[
+        "call",
+        "--http-allow",
+        "10.0.0.0/8",
+        &wasm_s,
+        "fetch",
+        "--args",
+        r#"{"url":"https://example.com"}"#,
+    ]);
+    assert!(!ok, "expected allow-CIDR to block; stderr: {stderr}");
+    assert!(
+        stderr.contains("DnsError"),
+        "expected DnsError from allow-CIDR filter, got: {stderr}"
+    );
+}
+
+#[test]
+fn allow_cidr_with_host_match_succeeds() {
+    // Host-anchored allow rule approves the hostname → resolver keeps
+    // every resolved IP regardless of the unrelated allow-CIDR rule.
+    let Some(wasm) = skip_if_missing() else {
+        return;
+    };
+    let wasm_s = wasm.to_string_lossy().to_string();
+    let (ok, stdout, stderr) = run_call(&[
+        "call",
+        "--http-allow",
+        "example.com",
+        "--http-allow",
+        "10.0.0.0/8",
+        &wasm_s,
+        "fetch",
+        "--args",
+        r#"{"url":"https://example.com"}"#,
+    ]);
+    assert!(
+        ok,
+        "expected host match to bypass allow-CIDR check; stderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("Example Domain") || stdout.contains("example"),
+        "expected response body; got stdout: {stdout}"
+    );
+}
