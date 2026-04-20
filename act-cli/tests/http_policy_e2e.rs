@@ -198,12 +198,14 @@ fn deny_cidr_blocks_with_dns_error() {
 }
 
 #[test]
-fn allow_cidr_only_blocks_name_whose_ips_miss_cidr() {
-    // Closes the allow-CIDR symmetry: mode=Allowlist with only an
-    // allow-CIDR rule. HTTP layer defers to the DNS resolver for named
-    // hosts; resolver drops IPs that aren't in the allow CIDR. example.com
-    // resolves to public IPs well outside 10/8, so the request must fail
-    // with DnsError.
+fn allow_cidr_only_blocks_when_no_host_match() {
+    // A user rule that's CIDR-only (no host) doesn't intersect with the
+    // component's host-based declaration (`host = "*"` or any other host
+    // pattern). After the effective-policy filter, the effective allow
+    // is empty, so the HTTP layer denies at decide_uri before DNS even
+    // runs. This is correct under the declaration-as-ceiling model:
+    // components declare peers by name, and user-policy CIDR-only rules
+    // have no declared host to pair with.
     let Some(wasm) = skip_if_not_migrated() else {
         return;
     };
@@ -217,10 +219,10 @@ fn allow_cidr_only_blocks_name_whose_ips_miss_cidr() {
         "--args",
         r#"{"url":"https://example.com"}"#,
     ]);
-    assert!(!ok, "expected allow-CIDR to block; stderr: {stderr}");
+    assert!(!ok, "expected allow-CIDR-only to block; stderr: {stderr}");
     assert!(
-        stderr.contains("DnsError"),
-        "expected DnsError from allow-CIDR filter, got: {stderr}"
+        stderr.contains("HttpRequestDenied") || stderr.contains("blocked by ACT policy"),
+        "expected HttpRequestDenied from effective-empty-allow, got: {stderr}"
     );
 }
 
