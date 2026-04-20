@@ -34,6 +34,30 @@ impl ActHttpClient {
             client: Arc::new(client),
         })
     }
+
+    /// Perform an outgoing request on the p2 WASI HTTP path.
+    #[allow(dead_code)] // wired into HostState in Task 7
+    pub async fn send_p2(
+        &self,
+        request: hyper::Request<UnsyncBoxBody<Bytes, P2ErrorCode>>,
+        config: wasmtime_wasi_http::p2::types::OutgoingRequestConfig,
+    ) -> Result<wasmtime_wasi_http::p2::types::IncomingResponse, P2ErrorCode> {
+        let reqwest_req = p2_to_reqwest(request, config.use_tls)?;
+        let resp = tokio::time::timeout(
+            config.connect_timeout + config.first_byte_timeout,
+            self.client.execute(reqwest_req),
+        )
+        .await
+        .map_err(|_| P2ErrorCode::ConnectionTimeout)?
+        .map_err(reqwest_to_p2_error)?;
+
+        let hyper_resp = reqwest_response_to_hyper(resp).await?;
+        Ok(wasmtime_wasi_http::p2::types::IncomingResponse {
+            resp: hyper_resp,
+            between_bytes_timeout: config.between_bytes_timeout,
+            worker: None,
+        })
+    }
 }
 
 /// Convert an outgoing `hyper::Request` from the p2 WASI HTTP binding into
@@ -263,6 +287,40 @@ mod tests {
                 .get("content-type")
                 .and_then(|v| v.to_str().ok()),
             Some("application/json")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn send_p2_fetches_example_dot_com() {
+        // Integration-style test: requires network.
+        let body: UnsyncBoxBody<bytes::Bytes, P2ErrorCode> = Empty::<bytes::Bytes>::new()
+            .map_err(|_| unreachable!())
+            .boxed_unsync();
+        let hyper_req = hyper::Request::builder()
+            .method(Method::GET)
+            .uri("https://example.com/")
+            .body(body)
+            .unwrap();
+
+        let cfg = HttpConfig {
+            mode: crate::config::PolicyMode::Open,
+            ..Default::default()
+        };
+        let client = ActHttpClient::new(cfg).expect("client builds");
+        let config = wasmtime_wasi_http::p2::types::OutgoingRequestConfig {
+            use_tls: true,
+            connect_timeout: std::time::Duration::from_secs(10),
+            first_byte_timeout: std::time::Duration::from_secs(10),
+            between_bytes_timeout: std::time::Duration::from_secs(10),
+        };
+        let incoming = client
+            .send_p2(hyper_req, config)
+            .await
+            .expect("send succeeds");
+        assert_eq!(
+            incoming.resp.status().as_u16(),
+            200,
+            "example.com should return 200"
         );
     }
 
