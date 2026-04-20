@@ -45,13 +45,22 @@ impl Resolve for PolicyDnsResolver {
     fn resolve(&self, name: Name) -> Resolving {
         let deny = self.deny_nets.clone();
         Box::pin(async move {
-            // Do a real resolve via tokio (what reqwest's default resolver does).
-            let addrs = tokio::net::lookup_host(format!("{}:0", name.as_str()))
+            let host = name.as_str().to_string();
+            let addrs = tokio::net::lookup_host(format!("{host}:0"))
                 .await
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-            let filtered: Vec<SocketAddr> = addrs
+            let all: Vec<SocketAddr> = addrs.collect();
+            let total = all.len();
+            let filtered: Vec<SocketAddr> = all
+                .into_iter()
                 .filter(|addr| !network::any_deny_cidr_matches(&deny, addr.ip(), addr.port()))
                 .collect();
+            tracing::debug!(
+                %host,
+                resolved = total,
+                kept = filtered.len(),
+                "http policy dns resolve",
+            );
             if filtered.is_empty() {
                 return Err("all resolved addresses matched a deny CIDR".into());
             }
@@ -272,10 +281,34 @@ async fn reqwest_response_to_hyper(
         .map_err(|_| P2ErrorCode::HttpProtocolError)
 }
 
+/// Walk the whole `source()` chain of a reqwest error, returning the first
+/// chain entry whose display string matches `needle`. reqwest wraps DNS
+/// resolver errors through multiple layers (reqwest → hyper-util → our
+/// `PolicyDnsResolver` error) so a single `.source()` hop isn't enough.
+fn error_chain_contains(err: &dyn Error, needles: &[&str]) -> bool {
+    let mut current: Option<&dyn Error> = Some(err);
+    while let Some(e) = current {
+        let msg = e.to_string().to_ascii_lowercase();
+        if needles.iter().any(|n| msg.contains(n)) {
+            return true;
+        }
+        current = e.source();
+    }
+    false
+}
+
 /// Translate a reqwest error to the closest wasi:http/types::ErrorCode.
 fn reqwest_to_p2_error(err: reqwest::Error) -> P2ErrorCode {
     if err.is_timeout() {
         return P2ErrorCode::ConnectionTimeout;
+    }
+    if error_chain_contains(&err, &["deny cidr", "failed to lookup", "dns"]) {
+        return P2ErrorCode::DnsError(
+            wasmtime_wasi_http::p2::bindings::http::types::DnsErrorPayload {
+                rcode: Some(err.to_string()),
+                info_code: None,
+            },
+        );
     }
     if err.is_connect() {
         return P2ErrorCode::ConnectionRefused;
@@ -294,17 +327,6 @@ fn reqwest_to_p2_error(err: reqwest::Error) -> P2ErrorCode {
     }
     if err.is_body() {
         return P2ErrorCode::HttpRequestBodySize(None);
-    }
-    if let Some(src) = err.source() {
-        let msg = src.to_string();
-        if msg.contains("dns") || msg.contains("failed to lookup") || msg.contains("deny CIDR") {
-            return P2ErrorCode::DnsError(
-                wasmtime_wasi_http::p2::bindings::http::types::DnsErrorPayload {
-                    rcode: Some(msg),
-                    info_code: None,
-                },
-            );
-        }
     }
     P2ErrorCode::HttpProtocolError
 }
@@ -362,6 +384,14 @@ fn p3_to_reqwest(
 fn reqwest_to_p3_error(err: reqwest::Error) -> P3ErrorCode {
     if err.is_timeout() {
         return P3ErrorCode::ConnectionTimeout;
+    }
+    if error_chain_contains(&err, &["deny cidr", "failed to lookup", "dns"]) {
+        return P3ErrorCode::DnsError(
+            wasmtime_wasi_http::p3::bindings::http::types::DnsErrorPayload {
+                rcode: Some(err.to_string()),
+                info_code: None,
+            },
+        );
     }
     if err.is_connect() {
         return P3ErrorCode::ConnectionRefused;

@@ -46,7 +46,7 @@ url = "2"
 shellexpand = "3"
 wasmparser.workspace = true
 wasmtime = { version = "43", features = ["component-model", "component-model-async"] }
-wasmtime-wasi = { version = "43", features = ["p3"] }
+wasmtime-wasi = { version = "43", default-features = false, features = ["p2", "p3"] }
 wasmtime-wasi-http = { version = "43", default-features = false, features = ["p2", "p3"] }
 http = "1"
 http-body-util = "0.1"
