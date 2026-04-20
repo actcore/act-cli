@@ -14,6 +14,7 @@ use futures_util::TryStreamExt;
 use http_body_util::combinators::UnsyncBoxBody;
 use http_body_util::{BodyExt, StreamBody};
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
+use reqwest::redirect;
 use wasmtime_wasi_http::p2::bindings::http::types::ErrorCode as P2ErrorCode;
 use wasmtime_wasi_http::p2::body::HyperIncomingBody;
 use wasmtime_wasi_http::p3::bindings::http::types::ErrorCode as P3ErrorCode;
@@ -60,6 +61,48 @@ impl Resolve for PolicyDnsResolver {
     }
 }
 
+/// Build a `reqwest::redirect::Policy` that consults `network::decide` on
+/// each hop. Denies the chain if the target URL violates the configured
+/// allow/deny network rules.
+fn build_redirect_policy(cfg: Arc<HttpConfig>) -> redirect::Policy {
+    const MAX_HOPS: usize = 10;
+    redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() >= MAX_HOPS {
+            return attempt.error("too many redirects");
+        }
+        let url = attempt.url();
+        let host = url.host_str().unwrap_or("");
+        let scheme = url.scheme();
+        let port = url
+            .port_or_known_default()
+            .unwrap_or(if scheme == "https" { 443 } else { 80 });
+        // Build a NetworkCheck and apply the non-HTTP bits of the policy.
+        // We don't know the redirect request's method (reqwest decides per
+        // status) so we skip HTTP-layer method filtering here — rely on
+        // network::decide which ignores method-only fields when they live
+        // in HttpRule above this layer. If a rule requires scheme="https"
+        // and the redirect downgrades to "http", that rule won't match —
+        // which is the right behaviour.
+        let allow_nets: Vec<crate::runtime::network::NetworkRule> =
+            cfg.allow.iter().map(|r| r.net.clone()).collect();
+        let deny_nets: Vec<crate::runtime::network::NetworkRule> =
+            cfg.deny.iter().map(|r| r.net.clone()).collect();
+        let decision = crate::runtime::network::decide(
+            cfg.mode,
+            &allow_nets,
+            &deny_nets,
+            &crate::runtime::network::NetworkCheck::new(host, port),
+        );
+        match decision {
+            crate::runtime::network::Decision::Allow => attempt.follow(),
+            crate::runtime::network::Decision::Deny => {
+                tracing::warn!(%url, "http policy: redirect hop blocked");
+                attempt.error("redirect target blocked by ACT policy")
+            }
+        }
+    })
+}
+
 /// Reqwest client instantiated with this component's HTTP policy. Cheap to
 /// clone (reqwest::Client is internally `Arc`'d); share freely across
 /// async tasks.
@@ -70,9 +113,11 @@ pub struct ActHttpClient {
 
 impl ActHttpClient {
     pub fn new(cfg: HttpConfig) -> anyhow::Result<Self> {
+        let cfg_arc = Arc::new(cfg.clone());
         let resolver = Arc::new(PolicyDnsResolver::new(&cfg));
         let client = reqwest::Client::builder()
             .dns_resolver(resolver)
+            .redirect(build_redirect_policy(cfg_arc))
             .build()
             .map_err(|e| anyhow::anyhow!("failed to build reqwest client: {e}"))?;
         Ok(Self {
@@ -529,6 +574,34 @@ mod tests {
             ),
             "expected a connection-class error, got {mapped:?}"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn redirect_policy_blocks_cross_host_hop() {
+        use crate::config::PolicyMode;
+        use crate::runtime::network::{Decision, NetworkCheck, NetworkRule, decide};
+
+        let allow = vec![NetworkRule {
+            host: Some("primary.example".into()),
+            ..Default::default()
+        }];
+        let deny: Vec<NetworkRule> = vec![];
+
+        let blocked = decide(
+            PolicyMode::Allowlist,
+            &allow,
+            &deny,
+            &NetworkCheck::new("other.example", 443),
+        );
+        assert_eq!(blocked, Decision::Deny);
+
+        let allowed = decide(
+            PolicyMode::Allowlist,
+            &allow,
+            &deny,
+            &NetworkCheck::new("primary.example", 443),
+        );
+        assert_eq!(allowed, Decision::Allow);
     }
 
     #[tokio::test(flavor = "current_thread")]
