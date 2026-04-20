@@ -160,7 +160,7 @@ impl wasmtime_wasi_http::p3::WasiHttpHooks for PolicyHttpHooks {
         request: http::Request<
             http_body_util::combinators::UnsyncBoxBody<bytes::Bytes, P3ErrorCode>,
         >,
-        _options: Option<wasmtime_wasi_http::p3::RequestOptions>,
+        options: Option<wasmtime_wasi_http::p3::RequestOptions>,
         fut: Box<dyn Future<Output = Result<(), P3ErrorCode>> + Send>,
     ) -> Box<
         dyn Future<
@@ -182,6 +182,7 @@ impl wasmtime_wasi_http::p3::WasiHttpHooks for PolicyHttpHooks {
             Decision::Allow => {
                 tracing::debug!(?method, %uri, "http policy allow (p3)");
                 let _ = fut;
+                let _ = options;
                 let client = self.client.clone();
                 Box::new(async move {
                     match client.send_p3(request).await {

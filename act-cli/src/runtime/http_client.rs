@@ -292,17 +292,19 @@ async fn reqwest_response_to_p3(
     P3ErrorCode,
 > {
     let status = resp.status();
-    let version = resp.version();
-    let headers = resp.headers().clone();
+    let mut headers = resp.headers().clone();
+    headers.remove(http::header::TRANSFER_ENCODING);
+    headers.remove(http::header::CONTENT_LENGTH);
 
-    let byte_stream = resp
-        .bytes_stream()
-        .map_ok(hyper::body::Frame::data)
-        .map_err(reqwest_to_p3_error);
+    // Use reqwest::Body as the streaming source rather than bytes_stream +
+    // StreamBody. reqwest::Body implements http_body::Body with a correct
+    // `is_end_stream()` override (StreamBody always returns `false`, which
+    // confuses wasi-fetch guests into trapping mid-read on HTTP/2 responses).
+    let reqwest_body = reqwest::Body::from(resp);
     let body: UnsyncBoxBody<Bytes, P3ErrorCode> =
-        BodyExt::boxed_unsync(StreamBody::new(byte_stream));
+        BodyExt::boxed_unsync(BodyExt::map_err(reqwest_body, reqwest_to_p3_error));
 
-    let mut builder = http::Response::builder().status(status).version(version);
+    let mut builder = http::Response::builder().status(status);
     if let Some(hdrs) = builder.headers_mut() {
         hdrs.extend(headers);
     }
