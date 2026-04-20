@@ -2,6 +2,18 @@
 //! `HostState` (per component invocation). Client config — redirect policy,
 //! DNS resolver — is baked in at construction from the component's
 //! `HttpConfig` so we don't need to thread context through each call.
+//!
+//! # Extraction boundary
+//!
+//! `http_client`, `http_policy`, and `network`, plus the `HttpConfig` /
+//! `HttpRule` / `NetworkRule` / `PolicyMode` types in `config`, form a
+//! self-contained "policy-aware reqwest backend for `wasi:http`" unit with
+//! zero act-cli-specific dependencies (no CLI, no component metadata, no
+//! ACT protocol). The boundary is maintained intentionally so this layer
+//! can be lifted into its own crate (e.g. `act-wasi-http-policy`) when a
+//! second consumer appears or when we propose the pattern upstream to
+//! `wasmtime-wasi-http`. Do not reach outside those modules from here; if
+//! you need something else, pass it in via config.
 
 use std::error::Error;
 use std::future::Future;
