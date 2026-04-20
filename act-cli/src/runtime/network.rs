@@ -49,10 +49,17 @@ pub fn cidr_contains(cidr: &str, ip: IpAddr) -> bool {
         .unwrap_or(false)
 }
 
-/// Host-pattern match. Supports exact match (case-insensitive) and
-/// `*.suffix` wildcards. `*.example.com` matches both `example.com` and any
-/// subdomain `foo.example.com` / `a.b.example.com`.
+/// Host-pattern match. Supports exact match (case-insensitive), `*.suffix`
+/// wildcards, and the bare `*` any-host wildcard.
+///
+/// - `*` matches every host (including IP literals; IP-level policy is the
+///   caller's responsibility).
+/// - `*.example.com` matches both `example.com` and any subdomain
+///   `foo.example.com` / `a.b.example.com`.
 pub fn host_matches(pattern: &str, host: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
     if let Some(suffix) = pattern.strip_prefix("*.") {
         return host.eq_ignore_ascii_case(suffix)
             || host
@@ -409,5 +416,15 @@ mod tests {
             "10.1.2.3".parse().unwrap(),
             443
         ));
+    }
+
+    #[test]
+    fn host_matches_star_wildcard() {
+        assert!(host_matches("*", "example.com"));
+        assert!(host_matches("*", "foo.bar.example.com"));
+        assert!(host_matches("*", "localhost"));
+        // Still matches an IP literal — the resolver layer handles IP policy,
+        // host_matches is just string-shape matching.
+        assert!(host_matches("*", "127.0.0.1"));
     }
 }
