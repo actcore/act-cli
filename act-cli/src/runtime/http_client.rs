@@ -3,6 +3,7 @@
 //! DNS resolver — is baked in at construction from the component's
 //! `HttpConfig` so we don't need to thread context through each call.
 
+use std::error::Error;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -124,8 +125,40 @@ async fn reqwest_response_to_hyper(
         .map_err(|_| P2ErrorCode::HttpProtocolError)
 }
 
-/// Placeholder error mapper — full mapping lands in Task 5.
-fn reqwest_to_p2_error(_err: reqwest::Error) -> P2ErrorCode {
+/// Translate a reqwest error to the closest wasi:http/types::ErrorCode.
+fn reqwest_to_p2_error(err: reqwest::Error) -> P2ErrorCode {
+    if err.is_timeout() {
+        return P2ErrorCode::ConnectionTimeout;
+    }
+    if err.is_connect() {
+        return P2ErrorCode::ConnectionRefused;
+    }
+    if err.is_redirect() {
+        // Our redirect policy stopped the chain; surface as
+        // HttpRequestDenied so callers can distinguish from protocol
+        // errors.
+        return P2ErrorCode::HttpRequestDenied;
+    }
+    if err.is_decode() {
+        return P2ErrorCode::HttpProtocolError;
+    }
+    if err.is_request() {
+        return P2ErrorCode::HttpRequestUriInvalid;
+    }
+    if err.is_body() {
+        return P2ErrorCode::HttpRequestBodySize(None);
+    }
+    if let Some(src) = err.source() {
+        let msg = src.to_string();
+        if msg.contains("dns") || msg.contains("failed to lookup") {
+            return P2ErrorCode::DnsError(
+                wasmtime_wasi_http::p2::bindings::http::types::DnsErrorPayload {
+                    rcode: Some(msg),
+                    info_code: None,
+                },
+            );
+        }
+    }
     P2ErrorCode::HttpProtocolError
 }
 
@@ -230,6 +263,39 @@ mod tests {
                 .get("content-type")
                 .and_then(|v| v.to_str().ok()),
             Some("application/json")
+        );
+    }
+
+    #[test]
+    fn maps_timeout_to_connection_timeout() {
+        // Can't directly build a reqwest::Error, so verify the logic by
+        // making a real request to an unreachable address with a tight
+        // timeout and mapping its error.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let err = rt.block_on(async {
+            let client = reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_millis(1))
+                .build()
+                .unwrap();
+            client
+                .get("http://192.0.2.1:81/") // TEST-NET-1, unroutable
+                .send()
+                .await
+                .expect_err("must fail")
+        });
+
+        let mapped = reqwest_to_p2_error(err);
+        assert!(
+            matches!(
+                mapped,
+                P2ErrorCode::ConnectionTimeout
+                    | P2ErrorCode::ConnectionRefused
+                    | P2ErrorCode::HttpResponseTimeout
+            ),
+            "expected a connection-class error, got {mapped:?}"
         );
     }
 }
