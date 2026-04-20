@@ -41,23 +41,6 @@ fn skip_if_missing() -> Option<PathBuf> {
     }
 }
 
-/// Returns the fixture path only when the http-client component has been
-/// migrated to declare `allow = [{ host = "*" }]` in its `[std.capabilities."wasi:http"]`
-/// section (Task 6). Without this, the new hard-deny enforcement will reject
-/// ALL HTTP calls from this component, causing every request-exercising test
-/// to fail. Set `ACT_TEST_HTTP_CLIENT_MIGRATED=1` after completing Task 6.
-fn skip_if_not_migrated() -> Option<PathBuf> {
-    if std::env::var("ACT_TEST_HTTP_CLIENT_MIGRATED").is_ok() {
-        skip_if_missing()
-    } else {
-        eprintln!(
-            "skipping: set ACT_TEST_HTTP_CLIENT_MIGRATED=1 after running Task 6 \
-             (http-client component needs allow entries in its wasi:http capability declaration)"
-        );
-        None
-    }
-}
-
 fn run_call(args: &[&str]) -> (bool, String, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_act"))
         .args(args)
@@ -72,7 +55,7 @@ fn run_call(args: &[&str]) -> (bool, String, String) {
 
 #[test]
 fn default_deny_blocks_http() {
-    let Some(wasm) = skip_if_not_migrated() else {
+    let Some(wasm) = skip_if_missing() else {
         return;
     };
     let wasm_s = wasm.to_string_lossy().to_string();
@@ -92,7 +75,7 @@ fn default_deny_blocks_http() {
 
 #[test]
 fn http_allow_matching_host_succeeds() {
-    let Some(wasm) = skip_if_not_migrated() else {
+    let Some(wasm) = skip_if_missing() else {
         return;
     };
     let wasm_s = wasm.to_string_lossy().to_string();
@@ -117,7 +100,7 @@ fn http_allow_matching_host_succeeds() {
 
 #[test]
 fn http_allow_mismatched_host_blocks() {
-    let Some(wasm) = skip_if_not_migrated() else {
+    let Some(wasm) = skip_if_missing() else {
         return;
     };
     let wasm_s = wasm.to_string_lossy().to_string();
@@ -142,7 +125,7 @@ fn http_allow_mismatched_host_blocks() {
 
 #[test]
 fn http_policy_open_allows_any_host() {
-    let Some(wasm) = skip_if_not_migrated() else {
+    let Some(wasm) = skip_if_missing() else {
         return;
     };
     let wasm_s = wasm.to_string_lossy().to_string();
@@ -173,7 +156,7 @@ fn deny_cidr_blocks_with_dns_error() {
     // resolver filters all addresses out and the guest sees DnsError
     // (not ConnectionRefused — we walk reqwest's error chain to
     // surface policy denials as DNS errors).
-    let Some(wasm) = skip_if_not_migrated() else {
+    let Some(wasm) = skip_if_missing() else {
         return;
     };
     let wasm_s = wasm.to_string_lossy().to_string();
@@ -206,7 +189,7 @@ fn allow_cidr_only_blocks_when_no_host_match() {
     // runs. This is correct under the declaration-as-ceiling model:
     // components declare peers by name, and user-policy CIDR-only rules
     // have no declared host to pair with.
-    let Some(wasm) = skip_if_not_migrated() else {
+    let Some(wasm) = skip_if_missing() else {
         return;
     };
     let wasm_s = wasm.to_string_lossy().to_string();
@@ -230,7 +213,7 @@ fn allow_cidr_only_blocks_when_no_host_match() {
 fn allow_cidr_with_host_match_succeeds() {
     // Host-anchored allow rule approves the hostname → resolver keeps
     // every resolved IP regardless of the unrelated allow-CIDR rule.
-    let Some(wasm) = skip_if_not_migrated() else {
+    let Some(wasm) = skip_if_missing() else {
         return;
     };
     let wasm_s = wasm.to_string_lossy().to_string();
