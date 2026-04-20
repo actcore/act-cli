@@ -1,6 +1,7 @@
 mod cargo;
 mod packagejson;
 mod pyproject;
+pub mod validate;
 
 use std::path::Path;
 

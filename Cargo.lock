@@ -10,6 +10,7 @@ dependencies = [
  "anyhow",
  "ciborium",
  "clap",
+ "globset",
  "json-patch",
  "serde",
  "serde_json",

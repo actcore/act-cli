@@ -19,12 +19,16 @@ pub fn run(wasm_path: &Path) -> Result<()> {
         "resolved component metadata"
     );
 
-    // 3. Read WASM file.
+    // 3. Validate capability declarations before touching the WASM file.
+    crate::manifest::validate::validate(&component_info.std.capabilities)
+        .context("capability declarations failed validation")?;
+
+    // 4. Read WASM file.
     let mut wasm = std::fs::read(wasm_path)
         .with_context(|| format!("reading WASM file {}", wasm_path.display()))?;
     info!(bytes = wasm.len(), "read WASM file");
 
-    // 4. Embed act:component — serialize ComponentInfo as CBOR.
+    // 5. Embed act:component — serialize ComponentInfo as CBOR.
     let mut cbor_buf = Vec::new();
     ciborium::into_writer(&component_info, &mut cbor_buf)
         .context("serializing ComponentInfo to CBOR")?;
@@ -35,7 +39,7 @@ pub fn run(wasm_path: &Path) -> Result<()> {
         "embedded act:component section"
     );
 
-    // 5. Add WASM metadata as custom sections — version and description.
+    // 6. Add WASM metadata as custom sections — version and description.
     if !component_info.std.version.is_empty() {
         wasm = crate::wasm::set_custom_section(
             &wasm,
@@ -56,7 +60,7 @@ pub fn run(wasm_path: &Path) -> Result<()> {
         info!("embedded description section");
     }
 
-    // 6. Embed act:skill — pack skill/ directory into tar if it exists.
+    // 7. Embed act:skill — pack skill/ directory into tar if it exists.
     match crate::skill::pack_skill_dir(&project_dir).context("packing skill directory")? {
         Some(tar_bytes) => {
             wasm = crate::wasm::set_custom_section(&wasm, "act:skill", &tar_bytes)
@@ -68,7 +72,7 @@ pub fn run(wasm_path: &Path) -> Result<()> {
         }
     }
 
-    // 7. Write back.
+    // 8. Write back.
     std::fs::write(wasm_path, &wasm)
         .with_context(|| format!("writing WASM file {}", wasm_path.display()))?;
     info!(bytes = wasm.len(), path = %wasm_path.display(), "wrote packed WASM component");
