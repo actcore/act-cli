@@ -31,6 +31,7 @@ pub struct HostState {
     #[allow(dead_code)] // retained for Task 10 DNS resolver hook access
     http_client: std::sync::Arc<crate::runtime::http_client::ActHttpClient>,
     fs_matcher: crate::runtime::fs_matcher::FsMatcher,
+    fs_mode: crate::config::PolicyMode,
     fd_paths: crate::runtime::fs_policy::FdPathMap,
 }
 
@@ -42,6 +43,7 @@ impl HostState {
             table: &mut self.table,
             matcher: &self.fs_matcher,
             fd_paths: &mut self.fd_paths,
+            mode: self.fs_mode,
         }
     }
 }
@@ -115,6 +117,18 @@ pub fn create_linker(engine: &Engine) -> Result<Linker<HostState>> {
     // Add P3 bindings on top
     wasmtime_wasi::p3::add_to_linker(&mut linker)
         .map_err(|e| anyhow::anyhow!("failed to add WASI P3 to linker: {e}"))?;
+    // Shadow only the p3 preopens interface. When fs mode ≠ Open, our impl
+    // returns zero preopens → p3 guests can't obtain a Descriptor::Dir and
+    // every path op fails. Matcher-level gating on individual p3 path ops
+    // isn't possible with current wasmtime-wasi public API (Dir::open_at
+    // is `pub(crate)`).
+    linker.allow_shadowing(true);
+    wasmtime_wasi::p3::bindings::filesystem::preopens::add_to_linker::<
+        HostState,
+        crate::runtime::fs_policy::PolicyFilesystem,
+    >(&mut linker, |t| t.policy_fs_view())
+    .map_err(|e| anyhow::anyhow!("failed to add policy wasi:filesystem/preopens (p3): {e}"))?;
+    linker.allow_shadowing(false);
     // Add WASI HTTP bindings (P2 for wasm32-wasip2 components, P3 for async)
     wasmtime_wasi_http::p2::add_only_http_to_linker_async(&mut linker)
         .map_err(|e| anyhow::anyhow!("failed to add WASI HTTP P2 to linker: {e}"))?;
@@ -167,6 +181,7 @@ pub fn create_store(
         ),
         http_client,
         fs_matcher: matcher,
+        fs_mode: fs.mode,
         fd_paths: crate::runtime::fs_policy::FdPathMap {
             preopens: preopen_pairs,
             by_rep: Default::default(),

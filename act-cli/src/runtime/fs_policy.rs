@@ -133,6 +133,11 @@ pub struct PolicyFilesystemCtxView<'a> {
     pub table: &'a mut ResourceTable,
     pub matcher: &'a FsMatcher,
     pub fd_paths: &'a mut FdPathMap,
+    /// Configured mode; drives the p3 preopens kill-switch. p3 path-taking
+    /// ops can't be gated (upstream `Dir::open_at` is `pub(crate)`), so when
+    /// mode is anything but `Open` we return zero preopens from p3 and p3
+    /// guests can't acquire a `Descriptor::Dir` handle at all.
+    pub mode: PolicyMode,
 }
 
 /// Tracks the host path associated with each open filesystem descriptor,
@@ -473,6 +478,44 @@ impl HostDescriptor for PolicyFilesystemCtxView<'_> {
     ) -> FsResult<types::MetadataHashValue> {
         let _checked = self.check_path(&fd, &path)?;
         self.inner().metadata_hash_at(fd, path_flags, path).await
+    }
+}
+
+// ── p3 preopens kill-switch ───────────────────────────────────────────────
+//
+// We can't mirror the full p2 matcher on p3 because `Dir::open_at` and
+// friends are `pub(crate)` in wasmtime-wasi — shadowing `HostDescriptorWithStore`
+// would need to reproject the Accessor via a `U: WasiFilesystemView` bound
+// that the trait doesn't permit, and the sibling methods we'd need to call
+// directly (`dir.open_at`, `dir.as_dir`) are gated.
+//
+// Instead we gate at preopens: if fs mode is anything other than `Open`,
+// p3 `get_directories` returns an empty vec. A p3 guest with an empty
+// preopen list can't construct a `Descriptor::Dir` resource, so every
+// p3 path op fails before it reaches cap-std. Components that genuinely
+// need p3 filesystem access must run under `policy.filesystem = "open"`.
+
+impl wasmtime_wasi::p3::bindings::filesystem::preopens::Host for PolicyFilesystemCtxView<'_> {
+    fn get_directories(
+        &mut self,
+    ) -> wasmtime::Result<
+        Vec<(
+            Resource<wasmtime_wasi::p3::bindings::filesystem::types::Descriptor>,
+            String,
+        )>,
+    > {
+        if self.mode != PolicyMode::Open {
+            tracing::warn!(
+                mode = ?self.mode,
+                "p3 wasi:filesystem/preopens: returning empty; p3 path ops can't be matcher-gated",
+            );
+            return Ok(vec![]);
+        }
+        let mut inner = WasiFilesystemCtxView {
+            ctx: self.ctx,
+            table: self.table,
+        };
+        <WasiFilesystemCtxView as wasmtime_wasi::p3::bindings::filesystem::preopens::Host>::get_directories(&mut inner)
     }
 }
 
