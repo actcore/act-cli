@@ -6,8 +6,11 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
+use futures_util::TryStreamExt;
 use http_body_util::combinators::UnsyncBoxBody;
+use http_body_util::{BodyExt, StreamBody};
 use wasmtime_wasi_http::p2::bindings::http::types::ErrorCode as P2ErrorCode;
+use wasmtime_wasi_http::p2::body::HyperIncomingBody;
 
 use crate::config::HttpConfig;
 
@@ -94,6 +97,38 @@ fn p2_to_reqwest(
     builder.build().map_err(|_| P2ErrorCode::HttpProtocolError)
 }
 
+/// Convert a `reqwest::Response` to a `hyper::Response<HyperIncomingBody>`
+/// the p2 WASI HTTP layer expects. The body is wrapped as a streaming
+/// `StreamBody` so we don't buffer — the guest reads progressively.
+#[allow(dead_code)] // called in Task 6 (send_p2)
+async fn reqwest_response_to_hyper(
+    resp: reqwest::Response,
+) -> Result<hyper::Response<HyperIncomingBody>, P2ErrorCode> {
+    let status = resp.status();
+    let version = resp.version();
+    let headers = resp.headers().clone();
+
+    let byte_stream = resp
+        .bytes_stream()
+        .map_ok(hyper::body::Frame::data)
+        .map_err(reqwest_to_p2_error);
+    let body = StreamBody::new(byte_stream);
+    let body: HyperIncomingBody = BodyExt::boxed_unsync(body);
+
+    let mut builder = hyper::Response::builder().status(status).version(version);
+    if let Some(hdrs) = builder.headers_mut() {
+        hdrs.extend(headers);
+    }
+    builder
+        .body(body)
+        .map_err(|_| P2ErrorCode::HttpProtocolError)
+}
+
+/// Placeholder error mapper — full mapping lands in Task 5.
+fn reqwest_to_p2_error(_err: reqwest::Error) -> P2ErrorCode {
+    P2ErrorCode::HttpProtocolError
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,6 +137,36 @@ mod tests {
     use http_body_util::combinators::UnsyncBoxBody;
     use http_body_util::{BodyExt, Empty};
     use wasmtime_wasi_http::p2::bindings::http::types::ErrorCode as P2ErrorCode;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn converts_reqwest_response_status_headers_body() {
+        // Build a reqwest::Response without going through the network, using
+        // http::Response::from_parts + reqwest::Response::from.
+        let http_resp = http::Response::builder()
+            .status(200)
+            .header("x-echo", "hi")
+            .body("hello".to_string())
+            .unwrap();
+        let resp = reqwest::Response::from(http_resp);
+
+        let incoming = reqwest_response_to_hyper(resp)
+            .await
+            .expect("conversion ok");
+
+        assert_eq!(incoming.status(), hyper::StatusCode::OK);
+        assert_eq!(
+            incoming
+                .headers()
+                .get("x-echo")
+                .and_then(|v| v.to_str().ok()),
+            Some("hi")
+        );
+        let body_bytes = http_body_util::BodyExt::collect(incoming.into_body())
+            .await
+            .expect("body collect")
+            .to_bytes();
+        assert_eq!(&body_bytes[..], b"hello");
+    }
 
     #[test]
     fn builds_default_client() {
