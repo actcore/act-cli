@@ -19,13 +19,11 @@ use crate::config::HttpConfig;
 /// clone (reqwest::Client is internally `Arc`'d); share freely across
 /// async tasks.
 #[derive(Clone)]
-#[allow(dead_code)] // wired into HostState in Task 7
 pub struct ActHttpClient {
     client: Arc<reqwest::Client>,
 }
 
 impl ActHttpClient {
-    #[allow(dead_code)] // wired into HostState in Task 7
     pub fn new(_cfg: HttpConfig) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
             .build()
@@ -36,7 +34,6 @@ impl ActHttpClient {
     }
 
     /// Perform an outgoing request on the p2 WASI HTTP path.
-    #[allow(dead_code)] // wired into HostState in Task 7
     pub async fn send_p2(
         &self,
         request: hyper::Request<UnsyncBoxBody<Bytes, P2ErrorCode>>,
@@ -71,7 +68,6 @@ impl ActHttpClient {
 /// convert via `http_body_util::BodyStream`. `Frame` data chunks pass
 /// through; trailer frames are dropped (reqwest doesn't propagate request
 /// trailers through `wrap_stream` anyway).
-#[allow(dead_code)] // called in Task 6 (send_p2)
 fn p2_to_reqwest(
     request: hyper::Request<UnsyncBoxBody<Bytes, P2ErrorCode>>,
     use_tls: bool,
@@ -125,7 +121,6 @@ fn p2_to_reqwest(
 /// Convert a `reqwest::Response` to a `hyper::Response<HyperIncomingBody>`
 /// the p2 WASI HTTP layer expects. The body is wrapped as a streaming
 /// `StreamBody` so we don't buffer — the guest reads progressively.
-#[allow(dead_code)] // called in Task 6 (send_p2)
 async fn reqwest_response_to_hyper(
     resp: reqwest::Response,
 ) -> Result<hyper::Response<HyperIncomingBody>, P2ErrorCode> {

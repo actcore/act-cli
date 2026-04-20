@@ -98,6 +98,7 @@ impl<'a> NetworkCheck<'a> {
     }
 
     /// Target with DNS-resolved peers already known.
+    #[allow(dead_code)] // used by upcoming DNS resolver hook in ActHttpClient (Task 10)
     pub fn with_resolved(host: &'a str, port: u16, resolved_ips: &'a [IpAddr]) -> Self {
         Self {
             host,
@@ -187,6 +188,7 @@ pub fn decide(
 /// resolver. Returns an empty Vec on lookup failure (callers decide whether
 /// to treat that as "defer to downstream" or "deny"). `host` may be an IP
 /// literal, in which case the returned Vec contains exactly that IP.
+#[allow(dead_code)] // used by upcoming DNS resolver hook in ActHttpClient (Task 10)
 pub async fn resolve_host(host: &str, port: u16) -> Vec<SocketAddr> {
     let target = format!("{host}:{port}");
     match tokio::net::lookup_host(&target).await {
@@ -200,6 +202,7 @@ pub async fn resolve_host(host: &str, port: u16) -> Vec<SocketAddr> {
 /// Returns `true` if any rule in `deny_rules` has a CIDR that matches `ip`
 /// (respecting `except_ports`). Used both at HTTP-layer after DNS resolution
 /// and by future raw-socket connect checks.
+#[allow(dead_code)] // used by upcoming DNS resolver hook in ActHttpClient (Task 10)
 pub fn any_deny_cidr_matches(deny_rules: &[NetworkRule], ip: IpAddr, port: u16) -> bool {
     let ips = [ip];
     let check = NetworkCheck::with_resolved("", port, &ips);
@@ -211,6 +214,7 @@ pub fn any_deny_cidr_matches(deny_rules: &[NetworkRule], ip: IpAddr, port: u16) 
 /// Resolve `host:port` via DNS and return the first resolved IP that is
 /// denied by any of the `deny_rules`, or `None` if no match / lookup fails
 /// / no rule uses CIDR.
+#[allow(dead_code)] // used by upcoming DNS resolver hook in ActHttpClient (Task 10)
 pub async fn first_cidr_deny_hit(
     deny_rules: &[NetworkRule],
     host: &str,

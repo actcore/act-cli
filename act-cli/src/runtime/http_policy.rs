@@ -40,12 +40,17 @@ type P3ErrorCode = wasmtime_wasi_http::p3::bindings::http::types::ErrorCode;
 /// Policy hook implementing both `p2::WasiHttpHooks` and `p3::WasiHttpHooks`.
 pub struct PolicyHttpHooks {
     config: Arc<HttpConfig>,
+    client: Arc<crate::runtime::http_client::ActHttpClient>,
 }
 
 impl PolicyHttpHooks {
-    pub fn new(config: HttpConfig) -> Self {
+    pub fn new(
+        config: HttpConfig,
+        client: Arc<crate::runtime::http_client::ActHttpClient>,
+    ) -> Self {
         Self {
             config: Arc::new(config),
+            client,
         }
     }
 
@@ -137,51 +142,13 @@ impl wasmtime_wasi_http::p2::WasiHttpHooks for PolicyHttpHooks {
             }
             Decision::Allow => {
                 tracing::debug!(?method, %uri, "http policy allow (p2)");
-                let cfg = self.config.clone();
-                let use_tls = config.use_tls;
+                let client = self.client.clone();
                 let handle = wasmtime_wasi::runtime::spawn(async move {
-                    // DNS + CIDR check before handing off to the default
-                    // handler. Catches SSRF-by-name (host resolves into a
-                    // deny CIDR) and pins the decision to the resolved IP:
-                    // if DNS flips between here and the handler's own
-                    // connect, worst case is a second resolution that
-                    // mis-steers — we've still blocked the original
-                    // resolved target.
-                    if cidr_precheck(&cfg, request.uri(), use_tls).await.is_err() {
-                        return Ok(Err(P2ErrorCode::HttpRequestDenied));
-                    }
-                    Ok(wasmtime_wasi_http::p2::default_send_request_handler(request, config).await)
+                    Ok(client.send_p2(request, config).await)
                 });
                 Ok(wasmtime_wasi_http::p2::types::HostFutureIncomingResponse::pending(handle))
             }
         }
-    }
-}
-
-/// Resolve the request's authority to one or more socket addresses and
-/// check each against configured deny CIDRs. Returns `Err(())` on any deny
-/// hit; callers map to their p2/p3 `HttpRequestDenied` error variant.
-/// `Ok(())` on no CIDR deny rules at all, missing authority, DNS lookup
-/// failure (let the downstream handler surface that with its own
-/// diagnostics), or no matching rule.
-async fn cidr_precheck(cfg: &HttpConfig, uri: &Uri, use_tls: bool) -> Result<(), ()> {
-    if matches!(cfg.mode, PolicyMode::Open) {
-        return Ok(());
-    }
-    let Some(authority) = uri.authority() else {
-        return Ok(());
-    };
-    let host = authority.host();
-    let port = authority
-        .port_u16()
-        .unwrap_or(if use_tls { 443 } else { 80 });
-    let deny_nets: Vec<_> = cfg.deny.iter().map(|r| r.net.clone()).collect();
-    match network::first_cidr_deny_hit(&deny_nets, host, port).await {
-        Some(addr) => {
-            tracing::warn!(%addr, uri = %uri, "http policy: connect blocked by deny CIDR");
-            Err(())
-        }
-        None => Ok(()),
     }
 }
 
@@ -215,19 +182,8 @@ impl wasmtime_wasi_http::p3::WasiHttpHooks for PolicyHttpHooks {
             Decision::Allow => {
                 tracing::debug!(?method, %uri, "http policy allow (p3)");
                 let _ = fut;
-                let cfg = self.config.clone();
-                // p3 doesn't expose `use_tls` in RequestOptions; infer from
-                // the URI scheme (the default handler does the same).
-                let use_tls = uri.scheme_str() == Some("https");
                 Box::new(async move {
                     use http_body_util::BodyExt;
-                    // DNS + CIDR deny precheck mirrors the p2 path. Closes
-                    // SSRF-by-name for wasip3 HTTP clients (e.g. wasi-fetch).
-                    if cidr_precheck(&cfg, &uri, use_tls).await.is_err() {
-                        return Err(TrappableError::<P3ErrorCode>::from(
-                            P3ErrorCode::HttpRequestDenied,
-                        ));
-                    }
                     let (res, io) = wasmtime_wasi_http::p3::default_send_request(request, options)
                         .await
                         .map_err(TrappableError::<P3ErrorCode>::from)?;
@@ -258,7 +214,10 @@ mod tests {
     }
 
     fn hooks(cfg: HttpConfig) -> PolicyHttpHooks {
-        PolicyHttpHooks::new(cfg)
+        let client = std::sync::Arc::new(
+            crate::runtime::http_client::ActHttpClient::new(cfg.clone()).expect("client builds"),
+        );
+        PolicyHttpHooks::new(cfg, client)
     }
 
     fn rule(

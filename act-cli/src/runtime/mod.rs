@@ -28,6 +28,8 @@ pub struct HostState {
     http_p2: WasiHttpCtx,
     http_p3: WasiHttpCtx,
     http_hooks: crate::runtime::http_policy::PolicyHttpHooks,
+    #[allow(dead_code)] // retained for Task 10 DNS resolver hook access
+    http_client: std::sync::Arc<crate::runtime::http_client::ActHttpClient>,
     fs_matcher: crate::runtime::fs_matcher::FsMatcher,
     fd_paths: crate::runtime::fs_policy::FdPathMap,
 }
@@ -151,12 +153,19 @@ pub fn create_store(
 
     let wasi = builder.build();
     let matcher = crate::runtime::fs_matcher::FsMatcher::compile(fs)?;
+    let http_client = std::sync::Arc::new(crate::runtime::http_client::ActHttpClient::new(
+        http.clone(),
+    )?);
     let state = HostState {
         wasi,
         table: ResourceTable::new(),
         http_p2: WasiHttpCtx::new(),
         http_p3: WasiHttpCtx::new(),
-        http_hooks: crate::runtime::http_policy::PolicyHttpHooks::new(http.clone()),
+        http_hooks: crate::runtime::http_policy::PolicyHttpHooks::new(
+            http.clone(),
+            http_client.clone(),
+        ),
+        http_client,
         fs_matcher: matcher,
         fd_paths: crate::runtime::fs_policy::FdPathMap {
             preopens: preopen_pairs,
