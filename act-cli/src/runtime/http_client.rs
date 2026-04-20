@@ -118,6 +118,21 @@ impl ActHttpClient {
         let client = reqwest::Client::builder()
             .dns_resolver(resolver)
             .redirect(build_redirect_policy(cfg_arc))
+            // Keep HTTP/2 multiplexed connections alive through idle
+            // periods — important for SSE and long-poll streams that
+            // may go 30+ seconds between events. Without this, NAT /
+            // LB flow timers can silently drop idle connections.
+            .http2_keep_alive_interval(Some(std::time::Duration::from_secs(30)))
+            .http2_keep_alive_while_idle(true)
+            .http2_keep_alive_timeout(std::time::Duration::from_secs(10))
+            // TCP-level keep-alive catches dead peers on HTTP/1.1 too
+            // (and the underlying TCP of HTTP/2 before ALPN).
+            .tcp_keepalive(Some(std::time::Duration::from_secs(30)))
+            // Long-lived streams shouldn't trigger pool eviction while
+            // in use — reqwest's default 90s idle-timeout is fine for
+            // one-shot requests but too aggressive for SSE reconnects.
+            // 10 minutes strikes a balance.
+            .pool_idle_timeout(Some(std::time::Duration::from_secs(600)))
             .build()
             .map_err(|e| anyhow::anyhow!("failed to build reqwest client: {e}"))?;
         Ok(Self {
@@ -446,6 +461,17 @@ mod tests {
 
     #[test]
     fn builds_default_client() {
+        let cfg = HttpConfig::default();
+        let client = ActHttpClient::new(cfg);
+        assert!(client.is_ok(), "{:?}", client.err());
+    }
+
+    #[test]
+    fn builds_client_with_keepalive_defaults() {
+        // Smoke: the builder chain for keep-alive / pool settings accepts the
+        // defaults we want to ship. Can't observe ping behaviour in a unit
+        // test without a live peer, but a regression in the builder call
+        // chain (wrong arg types, renamed methods) would surface here.
         let cfg = HttpConfig::default();
         let client = ActHttpClient::new(cfg);
         assert!(client.is_ok(), "{:?}", client.err());
