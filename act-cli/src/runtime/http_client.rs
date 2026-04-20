@@ -19,31 +19,49 @@ use wasmtime_wasi_http::p2::bindings::http::types::ErrorCode as P2ErrorCode;
 use wasmtime_wasi_http::p2::body::HyperIncomingBody;
 use wasmtime_wasi_http::p3::bindings::http::types::ErrorCode as P3ErrorCode;
 
-use crate::config::HttpConfig;
+use crate::config::{HttpConfig, PolicyMode};
 use crate::runtime::network::{self, NetworkRule};
 
-/// reqwest DNS resolver that filters resolved addresses against deny-CIDR
-/// rules. Drops every resolved `SocketAddr` whose IP matches any deny CIDR
-/// (respecting `except_ports`). If no addresses survive, returns an empty
-/// iterator — reqwest surfaces this as a DNS error, which our
-/// `reqwest_to_p2_error` / `reqwest_to_p3_error` maps to the appropriate
-/// wasi:http error variant.
+/// reqwest DNS resolver that filters resolved addresses against both deny
+/// and allow CIDR rules.
+///
+/// Logic per resolved `SocketAddr`:
+/// 1. Drop if any deny-CIDR matches (respecting `except_ports`).
+/// 2. In `Allowlist` mode, if any allow rule carries a `cidr`, the IP must
+///    be covered by either a host-anchored allow (meaning the hostname
+///    itself was allowed, so every resolved IP is OK) or an allow-CIDR.
+///    This closes the prior asymmetry where `allow = [{ cidr = "..." }]`
+///    required an IP-literal URI.
+/// 3. `Open` / `Deny` modes: no allow-side filter here (`Deny` never
+///    reaches the resolver; `Open` still honors deny-CIDR as a safety
+///    net).
+///
+/// If no addresses survive, returns an empty iterator — reqwest surfaces
+/// this as a DNS error, which our `reqwest_to_p2_error` /
+/// `reqwest_to_p3_error` maps to `ErrorCode::DnsError`.
 struct PolicyDnsResolver {
+    allow_nets: Arc<Vec<NetworkRule>>,
     deny_nets: Arc<Vec<NetworkRule>>,
+    mode: PolicyMode,
 }
 
 impl PolicyDnsResolver {
     fn new(cfg: &HttpConfig) -> Self {
+        let allow_nets = cfg.allow.iter().map(|r| r.net.clone()).collect();
         let deny_nets = cfg.deny.iter().map(|r| r.net.clone()).collect();
         Self {
+            allow_nets: Arc::new(allow_nets),
             deny_nets: Arc::new(deny_nets),
+            mode: cfg.mode,
         }
     }
 }
 
 impl Resolve for PolicyDnsResolver {
     fn resolve(&self, name: Name) -> Resolving {
+        let allow = self.allow_nets.clone();
         let deny = self.deny_nets.clone();
+        let mode = self.mode;
         Box::pin(async move {
             let host = name.as_str().to_string();
             let addrs = tokio::net::lookup_host(format!("{host}:0"))
@@ -51,18 +69,45 @@ impl Resolve for PolicyDnsResolver {
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
             let all: Vec<SocketAddr> = addrs.collect();
             let total = all.len();
+
+            // If the hostname itself matches any host-anchored allow rule,
+            // we don't need to require per-IP CIDR matches — the guest is
+            // already allowed to talk to this host. Compute once.
+            let host_allowed = allow.iter().any(|r| {
+                r.host
+                    .as_deref()
+                    .is_some_and(|pat| network::host_matches(pat, &host))
+            });
+            let require_allow_cidr = mode == PolicyMode::Allowlist
+                && !host_allowed
+                && allow.iter().any(|r| r.cidr.is_some());
+
             let filtered: Vec<SocketAddr> = all
                 .into_iter()
-                .filter(|addr| !network::any_deny_cidr_matches(&deny, addr.ip(), addr.port()))
+                .filter(|addr| {
+                    if network::any_deny_cidr_matches(&deny, addr.ip(), addr.port()) {
+                        return false;
+                    }
+                    if require_allow_cidr {
+                        return allow.iter().any(|r| {
+                            r.cidr
+                                .as_deref()
+                                .is_some_and(|c| network::cidr_contains(c, addr.ip()))
+                        });
+                    }
+                    true
+                })
                 .collect();
             tracing::debug!(
                 %host,
                 resolved = total,
                 kept = filtered.len(),
+                require_allow_cidr,
+                host_allowed,
                 "http policy dns resolve",
             );
             if filtered.is_empty() {
-                return Err("all resolved addresses matched a deny CIDR".into());
+                return Err("all resolved addresses filtered by policy CIDR rules".into());
             }
             let iter: Addrs = Box::new(filtered.into_iter());
             Ok(iter)
@@ -711,5 +756,101 @@ mod tests {
                 || matches!(err, P2ErrorCode::ConnectionRefused),
             "expected DnsError or ConnectionRefused, got {err:?}"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dns_resolver_requires_allow_cidr_match_for_hostnames() {
+        // mode=Allowlist with only an allow-CIDR rule. Any URI whose
+        // resolved IPs land outside that CIDR must fail at DNS level.
+        use crate::config::{HttpConfig, HttpRule, PolicyMode};
+        use crate::runtime::network::NetworkRule;
+
+        let cfg = HttpConfig {
+            mode: PolicyMode::Allowlist,
+            // Only permit internal RFC1918 space — example.com is public.
+            allow: vec![HttpRule {
+                net: NetworkRule {
+                    cidr: Some("10.0.0.0/8".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            deny: vec![],
+            ..Default::default()
+        };
+        let client = ActHttpClient::new(cfg).expect("client builds");
+        let body: UnsyncBoxBody<bytes::Bytes, P2ErrorCode> = Empty::<bytes::Bytes>::new()
+            .map_err(|_| unreachable!())
+            .boxed_unsync();
+        let hyper_req = hyper::Request::builder()
+            .method(Method::GET)
+            .uri("https://example.com/")
+            .body(body)
+            .unwrap();
+        let config = wasmtime_wasi_http::p2::types::OutgoingRequestConfig {
+            use_tls: true,
+            connect_timeout: std::time::Duration::from_secs(5),
+            first_byte_timeout: std::time::Duration::from_secs(5),
+            between_bytes_timeout: std::time::Duration::from_secs(5),
+        };
+        let err = client
+            .send_p2(hyper_req, config)
+            .await
+            .expect_err("example.com IPs not in 10/8, must fail at DNS");
+        assert!(
+            matches!(err, P2ErrorCode::DnsError(_)),
+            "expected DnsError, got {err:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dns_resolver_host_match_bypasses_allow_cidr() {
+        // mode=Allowlist with BOTH a host-allow AND an allow-CIDR. A
+        // request to the allowed host should succeed even if its IPs
+        // don't fall in the CIDR — the host match approves all IPs.
+        use crate::config::{HttpConfig, HttpRule, PolicyMode};
+        use crate::runtime::network::NetworkRule;
+
+        let cfg = HttpConfig {
+            mode: PolicyMode::Allowlist,
+            allow: vec![
+                HttpRule {
+                    net: NetworkRule {
+                        host: Some("example.com".into()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                HttpRule {
+                    net: NetworkRule {
+                        cidr: Some("10.0.0.0/8".into()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            ],
+            deny: vec![],
+            ..Default::default()
+        };
+        let client = ActHttpClient::new(cfg).expect("client builds");
+        let body: UnsyncBoxBody<bytes::Bytes, P2ErrorCode> = Empty::<bytes::Bytes>::new()
+            .map_err(|_| unreachable!())
+            .boxed_unsync();
+        let hyper_req = hyper::Request::builder()
+            .method(Method::GET)
+            .uri("https://example.com/")
+            .body(body)
+            .unwrap();
+        let config = wasmtime_wasi_http::p2::types::OutgoingRequestConfig {
+            use_tls: true,
+            connect_timeout: std::time::Duration::from_secs(10),
+            first_byte_timeout: std::time::Duration::from_secs(10),
+            between_bytes_timeout: std::time::Duration::from_secs(10),
+        };
+        let incoming = client
+            .send_p2(hyper_req, config)
+            .await
+            .expect("example.com allowed via host rule");
+        assert_eq!(incoming.resp.status().as_u16(), 200);
     }
 }

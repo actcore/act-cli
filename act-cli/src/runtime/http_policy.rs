@@ -10,21 +10,16 @@
 //! - Host matching: literal host, exact match or `*.suffix` wildcard.
 //! - Scheme / methods / ports matching.
 //! - IP literals in URI: matched against `cidr` entries at HTTP-layer.
-//! - **DNS-resolved IPs against deny CIDRs**: checked in a pre-flight
-//!   `lookup_host` before the default handler runs. Catches
-//!   SSRF-by-name ("fetch internal.example.com" where it resolves to a
-//!   10.x host). This is a second DNS lookup per request (the default
-//!   handler does its own `TcpStream::connect(authority)` which resolves
-//!   again); the OS resolver cache usually makes the second lookup a
-//!   no-op. There's a narrow TOCTOU window where a racing resolver
-//!   could return a different IP between our check and the handler's
-//!   connect — full DNS-rebinding defence requires forking the default
-//!   handler to accept a pre-resolved `SocketAddr`, which is deferred.
-//! - Allow-CIDR rules against DNS-resolved IPs: NOT IMPLEMENTED. Allow
-//!   CIDRs still require an IP literal in the URI. Deny CIDRs are the
-//!   security-critical direction.
-//! - Redirect re-decision: deferred (wasi-http follows redirects inside
-//!   `default_send_request`; we'd need to disable that and resubmit).
+//! - **DNS-resolved IPs against both allow and deny CIDRs**: enforced in
+//!   the reqwest `PolicyDnsResolver` hook (`runtime::http_client`). The
+//!   resolver runs once per request, filters denied IPs, and in
+//!   `Allowlist` mode additionally requires allow-CIDR coverage when the
+//!   hostname doesn't match any host-anchored allow rule. Named-host URIs
+//!   with only allow-CIDR rules defer their verdict from the HTTP layer
+//!   to the resolver. The single resolve pins the addresses for the
+//!   subsequent connect, closing the DNS-rebinding window.
+//! - Redirect re-decision: each hop re-evaluated via `reqwest::redirect`
+//!   hook (see `http_client::build_redirect_policy`).
 
 use std::sync::Arc;
 
@@ -57,6 +52,12 @@ impl PolicyHttpHooks {
     /// Decide an HTTP request against the config. Scheme / method checks are
     /// HTTP-layer; the host / port / CIDR parts are delegated to
     /// `runtime::network::decide`.
+    ///
+    /// For name-host URIs (non-IP-literal), when no allow rule matches but
+    /// there's at least one allow rule with a `cidr` field, return `Allow`
+    /// and defer the per-IP check to `PolicyDnsResolver`. This is how
+    /// `allow = [{ cidr = "..." }]` rules take effect against hostnames —
+    /// the HTTP layer doesn't know the resolved IPs yet.
     fn decide_uri(&self, method: Option<&str>, uri: &Uri) -> Decision {
         match self.config.mode {
             PolicyMode::Deny => return Decision::Deny,
@@ -65,6 +66,7 @@ impl PolicyHttpHooks {
         }
 
         let host = uri.host().unwrap_or("");
+        let host_is_ip_literal = host.parse::<std::net::IpAddr>().is_ok();
         let scheme = uri.scheme_str();
         let port = uri
             .port_u16()
@@ -85,10 +87,14 @@ impl PolicyHttpHooks {
             .iter()
             .any(|r| http_rule_matches(r, scheme, method, &check))
         {
-            Decision::Allow
-        } else {
-            Decision::Deny
+            return Decision::Allow;
         }
+        if !host_is_ip_literal && self.config.allow.iter().any(|r| r.net.cidr.is_some()) {
+            // Defer to DNS resolver: it will drop resolved IPs that don't
+            // match any allow-CIDR (see `PolicyDnsResolver`).
+            return Decision::Allow;
+        }
+        Decision::Deny
     }
 }
 
@@ -381,6 +387,49 @@ mod tests {
         );
         assert_eq!(
             h.decide_uri(Some("DELETE"), &uri("https://api.example.com/")),
+            Decision::Deny
+        );
+    }
+
+    #[test]
+    fn allow_cidr_defers_named_host_to_dns() {
+        // mode=Allowlist with only an allow-CIDR rule. Hostname URIs must
+        // reach the DNS resolver (return Allow at HTTP layer); the
+        // resolver will drop IPs not in the CIDR. IP-literal URIs still
+        // get fully checked at HTTP layer.
+        let h = hooks(HttpConfig {
+            mode: PolicyMode::Allowlist,
+            allow: vec![rule(None, None, None, Some("10.0.0.0/8"), None)],
+            ..Default::default()
+        });
+
+        // Name host: defer to DNS → Allow at HTTP layer.
+        assert_eq!(
+            h.decide_uri(Some("GET"), &uri("https://internal.corp/")),
+            Decision::Allow
+        );
+        // IP literal in allowed CIDR: Allow.
+        assert_eq!(
+            h.decide_uri(Some("GET"), &uri("http://10.1.2.3/")),
+            Decision::Allow
+        );
+        // IP literal outside CIDR: Deny (no DNS deferral for literals).
+        assert_eq!(
+            h.decide_uri(Some("GET"), &uri("http://8.8.8.8/")),
+            Decision::Deny
+        );
+    }
+
+    #[test]
+    fn allow_cidr_does_not_defer_without_cidr_rule() {
+        // No allow-CIDR rules → HTTP layer decides purely on host.
+        let h = hooks(HttpConfig {
+            mode: PolicyMode::Allowlist,
+            allow: vec![rule(Some("example.com"), None, None, None, None)],
+            ..Default::default()
+        });
+        assert_eq!(
+            h.decide_uri(Some("GET"), &uri("https://other.com/")),
             Decision::Deny
         );
     }
