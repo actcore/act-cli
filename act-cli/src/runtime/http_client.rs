@@ -4,6 +4,8 @@
 //! `HttpConfig` so we don't need to thread context through each call.
 
 use std::error::Error;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -12,6 +14,7 @@ use http_body_util::combinators::UnsyncBoxBody;
 use http_body_util::{BodyExt, StreamBody};
 use wasmtime_wasi_http::p2::bindings::http::types::ErrorCode as P2ErrorCode;
 use wasmtime_wasi_http::p2::body::HyperIncomingBody;
+use wasmtime_wasi_http::p3::bindings::http::types::ErrorCode as P3ErrorCode;
 
 use crate::config::HttpConfig;
 
@@ -54,6 +57,27 @@ impl ActHttpClient {
             between_bytes_timeout: config.between_bytes_timeout,
             worker: None,
         })
+    }
+
+    /// Perform an outgoing request on the p3 WASI HTTP path. Returns the
+    /// response plus a completion future matching the p3 hook signature.
+    pub async fn send_p3(
+        &self,
+        request: http::Request<UnsyncBoxBody<Bytes, P3ErrorCode>>,
+    ) -> Result<
+        (
+            http::Response<UnsyncBoxBody<Bytes, P3ErrorCode>>,
+            Pin<Box<dyn Future<Output = Result<(), P3ErrorCode>> + Send>>,
+        ),
+        P3ErrorCode,
+    > {
+        let reqwest_req = p3_to_reqwest(request)?;
+        let resp = self
+            .client
+            .execute(reqwest_req)
+            .await
+            .map_err(reqwest_to_p3_error)?;
+        reqwest_response_to_p3(resp).await
     }
 }
 
@@ -179,6 +203,115 @@ fn reqwest_to_p2_error(err: reqwest::Error) -> P2ErrorCode {
         }
     }
     P2ErrorCode::HttpProtocolError
+}
+
+// ── p3 helpers ────────────────────────────────────────────────────────────
+
+/// Convert an outgoing p3 request into a reqwest::Request. Streaming body,
+/// same approach as p2_to_reqwest — we wrap the UnsyncBoxBody as a Stream
+/// and feed it through reqwest::Body::wrap_stream, because UnsyncBoxBody
+/// is !Sync and wrap() requires Sync.
+fn p3_to_reqwest(
+    request: http::Request<UnsyncBoxBody<Bytes, P3ErrorCode>>,
+) -> Result<reqwest::Request, P3ErrorCode> {
+    use futures_util::StreamExt;
+    use http_body_util::BodyStream;
+
+    let (parts, body) = request.into_parts();
+    let scheme = parts
+        .uri
+        .scheme_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| "https".into());
+    let authority = parts
+        .uri
+        .authority()
+        .map(|a| a.to_string())
+        .ok_or(P3ErrorCode::HttpRequestUriInvalid)?;
+    let path_and_query = parts
+        .uri
+        .path_and_query()
+        .map(|p| p.as_str())
+        .unwrap_or("/");
+    let url_str = format!("{scheme}://{authority}{path_and_query}");
+    let url = reqwest::Url::parse(&url_str).map_err(|_| P3ErrorCode::HttpRequestUriInvalid)?;
+    let method = reqwest::Method::from_bytes(parts.method.as_str().as_bytes())
+        .map_err(|_| P3ErrorCode::HttpProtocolError)?;
+
+    let data_stream = BodyStream::new(body).filter_map(|frame_res| async move {
+        match frame_res {
+            Ok(frame) => frame.into_data().ok().map(Ok::<_, std::io::Error>),
+            Err(_) => Some(Err(std::io::Error::other("wasi http p3 body stream error"))),
+        }
+    });
+    let body = reqwest::Body::wrap_stream(data_stream);
+
+    let mut builder = reqwest::Client::new().request(method, url).body(body);
+    for (name, value) in parts.headers.iter() {
+        builder = builder.header(name, value);
+    }
+    builder.build().map_err(|_| P3ErrorCode::HttpProtocolError)
+}
+
+/// Error mapper for the p3 path. Same taxonomy as p2 but different ErrorCode
+/// enum.
+fn reqwest_to_p3_error(err: reqwest::Error) -> P3ErrorCode {
+    if err.is_timeout() {
+        return P3ErrorCode::ConnectionTimeout;
+    }
+    if err.is_connect() {
+        return P3ErrorCode::ConnectionRefused;
+    }
+    if err.is_redirect() {
+        return P3ErrorCode::HttpRequestDenied;
+    }
+    if err.is_decode() {
+        return P3ErrorCode::HttpProtocolError;
+    }
+    if err.is_request() {
+        return P3ErrorCode::HttpRequestUriInvalid;
+    }
+    if err.is_body() {
+        return P3ErrorCode::HttpRequestBodySize(None);
+    }
+    P3ErrorCode::HttpProtocolError
+}
+
+/// Convert a reqwest response to the p3 shape the hook expects:
+/// http::Response<UnsyncBoxBody<Bytes, P3ErrorCode>> plus a
+/// Future<Output = Result<(), P3ErrorCode>> representing the body
+/// completion (reqwest handles this transparently; we return Ok(())
+/// immediately since body errors surface through the stream).
+async fn reqwest_response_to_p3(
+    resp: reqwest::Response,
+) -> Result<
+    (
+        http::Response<UnsyncBoxBody<Bytes, P3ErrorCode>>,
+        Pin<Box<dyn Future<Output = Result<(), P3ErrorCode>> + Send>>,
+    ),
+    P3ErrorCode,
+> {
+    let status = resp.status();
+    let version = resp.version();
+    let headers = resp.headers().clone();
+
+    let byte_stream = resp
+        .bytes_stream()
+        .map_ok(hyper::body::Frame::data)
+        .map_err(reqwest_to_p3_error);
+    let body: UnsyncBoxBody<Bytes, P3ErrorCode> =
+        BodyExt::boxed_unsync(StreamBody::new(byte_stream));
+
+    let mut builder = http::Response::builder().status(status).version(version);
+    if let Some(hdrs) = builder.headers_mut() {
+        hdrs.extend(headers);
+    }
+    let resp = builder
+        .body(body)
+        .map_err(|_| P3ErrorCode::HttpProtocolError)?;
+    let io: Pin<Box<dyn Future<Output = Result<(), P3ErrorCode>> + Send>> =
+        Box::pin(async { Ok(()) });
+    Ok((resp, io))
 }
 
 #[cfg(test)]
