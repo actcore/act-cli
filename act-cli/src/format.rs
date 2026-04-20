@@ -310,6 +310,7 @@ mod tests {
         info.std.default_language = Some("en".to_string());
         info.std.capabilities.filesystem = Some(FilesystemCap {
             mount_root: Some("/data".to_string()),
+            ..Default::default()
         });
         info.extra.insert(
             "std:skill".to_string(),
