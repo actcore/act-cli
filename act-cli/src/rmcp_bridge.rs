@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use crate::runtime;
 
 pub struct ActRmcpBridge {
@@ -156,6 +155,47 @@ fn fold_events_to_result(result: runtime::CallToolResult) -> rmcp::model::CallTo
     } else {
         rmcp::model::CallToolResult::success(content)
     }
+}
+
+// ── Public entry point ──────────────────────────────────────────────────────
+
+pub async fn run_stdio(
+    info: runtime::ComponentInfo,
+    handle: runtime::ComponentHandle,
+    metadata: runtime::Metadata,
+) -> anyhow::Result<()> {
+    let metadata_schema = fetch_metadata_schema(&handle, &metadata).await;
+
+    let bridge = ActRmcpBridge {
+        handle,
+        info,
+        metadata,
+        metadata_schema,
+    };
+
+    let service = rmcp::serve_server(bridge, (tokio::io::stdin(), tokio::io::stdout()))
+        .await
+        .map_err(|e| anyhow::anyhow!("rmcp serve_server failed: {e}"))?;
+
+    service
+        .waiting()
+        .await
+        .map_err(|e| anyhow::anyhow!("rmcp service error: {e}"))?;
+
+    Ok(())
+}
+
+async fn fetch_metadata_schema(
+    handle: &runtime::ComponentHandle,
+    metadata: &runtime::Metadata,
+) -> Option<String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let req = runtime::ComponentRequest::GetMetadataSchema {
+        metadata: metadata.clone(),
+        reply: tx,
+    };
+    handle.send(req).await.ok()?;
+    rx.await.ok()?.ok()?
 }
 
 // ── ServerHandler impl ──────────────────────────────────────────────────────
