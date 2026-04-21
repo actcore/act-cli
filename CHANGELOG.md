@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-04-22
+
+### Fixed
+
+- **`--fs-allow` now implicitly grants traversal of ancestor directories**
+  on the path to any allowed target. WASI's path-resolver stats every
+  intermediate directory when opening nested files; without this, users
+  had to list each parent explicitly (`--fs-allow /tmp --fs-allow
+  "$DB/**"` just to reach a file under `$DB`). An allow entry for
+  `/tmp/work/db.sqlite` now implicitly permits `/tmp/work` and `/tmp`
+  for directory traversal — sibling files in those directories remain
+  denied.
+
 ## [0.5.0] - 2026-04-21
 
 ### Added

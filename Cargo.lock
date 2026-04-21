@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "act-build"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "act-types",
  "anyhow",
@@ -25,7 +25,7 @@ dependencies = [
 
 [[package]]
 name = "act-cli"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "act-types",
  "anyhow",
