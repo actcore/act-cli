@@ -19,7 +19,9 @@ impl ServerHandler for ActRmcpBridge {
 }
 
 use act_types::cbor;
-use rmcp::model::Content;
+use act_types::constants::{ERR_CAPABILITY_DENIED, ERR_INVALID_ARGS, ERR_NOT_FOUND};
+use rmcp::ErrorData;
+use rmcp::model::{Content, ErrorCode};
 use serde_json::Value;
 
 #[allow(dead_code)]
@@ -49,11 +51,32 @@ fn map_content_part(part: &runtime::act::core::types::ContentPart) -> Content {
     Content::text(text)
 }
 
+#[allow(dead_code)]
+fn component_error_to_mcp(err: runtime::ComponentError) -> ErrorData {
+    match err {
+        runtime::ComponentError::Tool(te) => {
+            let message = act_types::types::LocalizedString::from(&te.message)
+                .any_text()
+                .to_string();
+            let code = match te.kind.as_str() {
+                ERR_INVALID_ARGS => ErrorCode::INVALID_PARAMS,
+                ERR_NOT_FOUND => ErrorCode::METHOD_NOT_FOUND,
+                ERR_CAPABILITY_DENIED => ErrorCode::INVALID_REQUEST,
+                _ => ErrorCode::INTERNAL_ERROR,
+            };
+            ErrorData::new(code, message, None)
+        }
+        runtime::ComponentError::Internal(e) => {
+            ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::act::core::types::ContentPart;
-    use rmcp::model::{Content, RawContent};
+    use crate::runtime::act::core::types::{ContentPart, LocalizedString, ToolError};
+    use rmcp::model::{Content, ErrorCode, RawContent};
 
     fn part(mime: Option<&str>, data: &[u8]) -> ContentPart {
         ContentPart {
@@ -144,5 +167,47 @@ mod tests {
             info.capabilities.tools.is_some(),
             "tools capability must be advertised"
         );
+    }
+
+    #[test]
+    fn map_internal_error_becomes_internal_error_code() {
+        let err = runtime::ComponentError::Internal(anyhow::anyhow!("boom"));
+        let mapped = component_error_to_mcp(err);
+        assert_eq!(mapped.code, ErrorCode::INTERNAL_ERROR);
+        assert!(mapped.message.contains("boom"));
+    }
+
+    #[test]
+    fn map_tool_invalid_argument_becomes_invalid_params() {
+        let err = runtime::ComponentError::Tool(ToolError {
+            kind: act_types::constants::ERR_INVALID_ARGS.to_string(),
+            message: LocalizedString::Plain("bad arg".into()),
+            metadata: vec![],
+        });
+        let mapped = component_error_to_mcp(err);
+        assert_eq!(mapped.code, ErrorCode::INVALID_PARAMS);
+        assert!(mapped.message.contains("bad arg"));
+    }
+
+    #[test]
+    fn map_tool_not_found_becomes_method_not_found() {
+        let err = runtime::ComponentError::Tool(ToolError {
+            kind: act_types::constants::ERR_NOT_FOUND.to_string(),
+            message: LocalizedString::Plain("no such tool".into()),
+            metadata: vec![],
+        });
+        let mapped = component_error_to_mcp(err);
+        assert_eq!(mapped.code, ErrorCode::METHOD_NOT_FOUND);
+    }
+
+    #[test]
+    fn map_tool_capability_denied_becomes_invalid_request() {
+        let err = runtime::ComponentError::Tool(ToolError {
+            kind: act_types::constants::ERR_CAPABILITY_DENIED.to_string(),
+            message: LocalizedString::Plain("not allowed".into()),
+            metadata: vec![],
+        });
+        let mapped = component_error_to_mcp(err);
+        assert_eq!(mapped.code, ErrorCode::INVALID_REQUEST);
     }
 }
