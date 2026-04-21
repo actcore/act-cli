@@ -376,11 +376,7 @@ fn extract_params(schema: &serde_json::Value) -> Vec<(String, String, bool, Opti
         .unwrap_or_default();
 
     for (name, prop) in props {
-        let type_str = prop
-            .get("type")
-            .and_then(|t| t.as_str())
-            .unwrap_or("any")
-            .to_string();
+        let type_str = type_label(prop);
         let required = required_list.contains(&name.as_str());
         let description = prop
             .get("description")
@@ -390,6 +386,56 @@ fn extract_params(schema: &serde_json::Value) -> Vec<(String, String, bool, Opti
     }
 
     result
+}
+
+/// Derive a human label for a JSON Schema property's type.
+///
+/// Handles the common shapes schemars emits for Rust types:
+/// - scalar `"type": "string"` → `"string"`
+/// - nullable `"type": ["integer", "null"]` (schemars' `Option<T>`) → `"integer"`
+/// - union `"type": ["string", "integer"]` → `"string|integer"`
+/// - `anyOf` / `oneOf` with typed branches → joined types, `"null"` dropped
+/// - enum with homogeneous value type → inferred from the first variant
+/// - anything else → `"any"`
+fn type_label(prop: &serde_json::Value) -> String {
+    if let Some(t) = prop.get("type").and_then(|t| t.as_str()) {
+        return t.to_string();
+    }
+    if let Some(types) = prop.get("type").and_then(|t| t.as_array()) {
+        let non_null: Vec<&str> = types
+            .iter()
+            .filter_map(|v| v.as_str())
+            .filter(|s| *s != "null")
+            .collect();
+        if !non_null.is_empty() {
+            return non_null.join("|");
+        }
+    }
+    for key in ["anyOf", "oneOf"] {
+        if let Some(arr) = prop.get(key).and_then(|v| v.as_array()) {
+            let types: Vec<String> = arr
+                .iter()
+                .filter_map(|sub| sub.get("type").and_then(|t| t.as_str()).map(String::from))
+                .filter(|s| s != "null")
+                .collect();
+            if !types.is_empty() {
+                return types.join("|");
+            }
+        }
+    }
+    if let Some(first) = prop
+        .get("enum")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+    {
+        return match first {
+            serde_json::Value::String(_) => "string".into(),
+            serde_json::Value::Number(_) => "number".into(),
+            serde_json::Value::Bool(_) => "boolean".into(),
+            _ => "any".into(),
+        };
+    }
+    "any".to_string()
 }
 
 // ── Unit tests ────────────────────────────────────────────────────────────────
@@ -498,6 +544,45 @@ mod tests {
         let json_str = to_json(&data).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         assert_eq!(v["metadata_schema"]["type"], "object");
+    }
+
+    #[test]
+    fn type_label_scalar() {
+        let prop = serde_json::json!({"type": "string"});
+        assert_eq!(type_label(&prop), "string");
+    }
+
+    #[test]
+    fn type_label_nullable_from_schemars() {
+        // schemars emits this shape for Option<T>.
+        let prop = serde_json::json!({"type": ["integer", "null"]});
+        assert_eq!(type_label(&prop), "integer");
+    }
+
+    #[test]
+    fn type_label_union() {
+        let prop = serde_json::json!({"type": ["string", "integer"]});
+        assert_eq!(type_label(&prop), "string|integer");
+    }
+
+    #[test]
+    fn type_label_anyof_with_null() {
+        let prop = serde_json::json!({
+            "anyOf": [{"type": "string"}, {"type": "null"}]
+        });
+        assert_eq!(type_label(&prop), "string");
+    }
+
+    #[test]
+    fn type_label_enum_inferred() {
+        let prop = serde_json::json!({"enum": ["a", "b", "c"]});
+        assert_eq!(type_label(&prop), "string");
+    }
+
+    #[test]
+    fn type_label_missing_is_any() {
+        let prop = serde_json::json!({});
+        assert_eq!(type_label(&prop), "any");
     }
 
     #[test]
