@@ -3,6 +3,7 @@ mod format;
 mod http;
 mod mcp;
 mod resolve;
+mod rmcp_bridge;
 mod runtime;
 
 use act_types::cbor;
