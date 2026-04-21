@@ -1,6 +1,4 @@
 use crate::runtime;
-use rmcp::ServerHandler;
-use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 
 #[allow(dead_code)]
 pub struct ActRmcpBridge {
@@ -8,14 +6,6 @@ pub struct ActRmcpBridge {
     pub info: runtime::ComponentInfo,
     pub metadata: runtime::Metadata,
     pub metadata_schema: Option<String>,
-}
-
-impl ServerHandler for ActRmcpBridge {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_server_info(
-            Implementation::new(self.info.std.name.clone(), self.info.std.version.clone()),
-        )
-    }
 }
 
 use act_types::cbor;
@@ -72,10 +62,147 @@ fn component_error_to_mcp(err: runtime::ComponentError) -> ErrorData {
     }
 }
 
+// ── list_tools helpers ──────────────────────────────────────────────────────
+
+use rmcp::model::Tool;
+use std::borrow::Cow;
+use std::sync::Arc;
+
+#[allow(dead_code)]
+fn convert_tool_definitions(
+    defs: &[runtime::act::core::types::ToolDefinition],
+    metadata_schema: Option<&str>,
+) -> Vec<Tool> {
+    defs.iter()
+        .map(|td| {
+            let description = act_types::types::LocalizedString::from(&td.description)
+                .any_text()
+                .to_string();
+
+            let mut input_schema: Value = serde_json::from_str(&td.parameters_schema)
+                .unwrap_or_else(|_| serde_json::json!({"type": "object"}));
+
+            if let Some(obj) = input_schema.as_object_mut() {
+                let props = obj
+                    .entry("properties")
+                    .or_insert_with(|| Value::Object(serde_json::Map::new()));
+                if let Some(props) = props.as_object_mut() {
+                    let meta_schema = metadata_schema
+                        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                        .unwrap_or_else(|| serde_json::json!({"type": "object"}));
+                    props.insert("_metadata".to_string(), meta_schema);
+                }
+            }
+
+            let schema_map: serde_json::Map<String, Value> =
+                input_schema.as_object().cloned().unwrap_or_default();
+
+            let mut tool = Tool::new(
+                Cow::Owned(td.name.clone()),
+                Cow::Owned(description),
+                Arc::new(schema_map),
+            );
+
+            if let Some(ann) = build_annotations(&td.metadata) {
+                tool = tool.with_annotations(ann);
+            }
+
+            tool
+        })
+        .collect()
+}
+
+#[allow(dead_code)]
+fn build_annotations(metadata: &[(String, Vec<u8>)]) -> Option<rmcp::model::ToolAnnotations> {
+    use act_types::constants::*;
+    let meta = act_types::types::Metadata::from(metadata.to_vec());
+
+    let read_only_hint = meta.get_as::<bool>(META_READ_ONLY);
+    let idempotent_hint = meta.get_as::<bool>(META_IDEMPOTENT);
+    let destructive_hint = meta.get_as::<bool>(META_DESTRUCTIVE);
+
+    if read_only_hint.is_none() && idempotent_hint.is_none() && destructive_hint.is_none() {
+        return None;
+    }
+
+    Some(rmcp::model::ToolAnnotations::from_raw(
+        None,
+        read_only_hint,
+        destructive_hint,
+        idempotent_hint,
+        None,
+    ))
+}
+
+// ── ServerHandler impl ──────────────────────────────────────────────────────
+
+impl ActRmcpBridge {
+    #[allow(dead_code)]
+    async fn list_tools_impl(&self) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let req = runtime::ComponentRequest::ListTools {
+            metadata: self.metadata.clone(),
+            reply: reply_tx,
+        };
+
+        self.handle.send(req).await.map_err(|_| {
+            rmcp::ErrorData::new(
+                rmcp::model::ErrorCode::INTERNAL_ERROR,
+                "component actor unavailable",
+                None,
+            )
+        })?;
+
+        let list = reply_rx
+            .await
+            .map_err(|_| {
+                rmcp::ErrorData::new(
+                    rmcp::model::ErrorCode::INTERNAL_ERROR,
+                    "component actor dropped reply",
+                    None,
+                )
+            })?
+            .map_err(component_error_to_mcp)?;
+
+        let tools = convert_tool_definitions(&list.tools, self.metadata_schema.as_deref());
+        Ok(rmcp::model::ListToolsResult {
+            tools,
+            next_cursor: None,
+            meta: None,
+        })
+    }
+}
+
+impl rmcp::ServerHandler for ActRmcpBridge {
+    fn get_info(&self) -> rmcp::model::ServerInfo {
+        rmcp::model::ServerInfo::new(
+            rmcp::model::ServerCapabilities::builder()
+                .enable_tools()
+                .build(),
+        )
+        .with_server_info(rmcp::model::Implementation::new(
+            self.info.std.name.clone(),
+            self.info.std.version.clone(),
+        ))
+    }
+
+    fn list_tools(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> impl std::future::Future<Output = Result<rmcp::model::ListToolsResult, rmcp::ErrorData>>
+    + Send
+    + '_ {
+        self.list_tools_impl()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::act::core::types::{ContentPart, LocalizedString, ToolError};
+    use crate::runtime::act::core::types::{
+        ContentPart, LocalizedString, ToolDefinition, ToolError,
+    };
     use rmcp::model::{Content, ErrorCode, RawContent};
 
     fn part(mime: Option<&str>, data: &[u8]) -> ContentPart {
@@ -209,5 +336,51 @@ mod tests {
         });
         let mapped = component_error_to_mcp(err);
         assert_eq!(mapped.code, ErrorCode::INVALID_REQUEST);
+    }
+
+    fn fake_tool(name: &str) -> ToolDefinition {
+        ToolDefinition {
+            name: name.into(),
+            description: LocalizedString::Plain(format!("{name} tool")),
+            parameters_schema: r#"{"type":"object","properties":{"n":{"type":"integer"}}}"#.into(),
+            metadata: vec![],
+        }
+    }
+
+    #[test]
+    fn list_tools_maps_definitions_and_injects_metadata() {
+        let defs = vec![fake_tool("alpha"), fake_tool("beta")];
+        let tools = convert_tool_definitions(
+            &defs,
+            Some(r#"{"type":"object","properties":{"db":{"type":"string"}}}"#),
+        );
+
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].name.as_ref(), "alpha");
+        assert_eq!(tools[0].description.as_deref(), Some("alpha tool"));
+
+        let schema: &serde_json::Map<String, serde_json::Value> = tools[0].input_schema.as_ref();
+        let props = schema["properties"].as_object().unwrap();
+        assert!(
+            props.contains_key("n"),
+            "original property must be preserved"
+        );
+        assert!(
+            props.contains_key("_metadata"),
+            "_metadata must be injected"
+        );
+        assert_eq!(
+            props["_metadata"]["properties"]["db"]["type"],
+            serde_json::json!("string"),
+        );
+    }
+
+    #[test]
+    fn list_tools_without_metadata_schema_injects_generic_object() {
+        let defs = vec![fake_tool("alpha")];
+        let tools = convert_tool_definitions(&defs, None);
+        let schema: &serde_json::Map<String, serde_json::Value> = tools[0].input_schema.as_ref();
+        let props = schema["properties"].as_object().unwrap();
+        assert_eq!(props["_metadata"]["type"], serde_json::json!("object"));
     }
 }
