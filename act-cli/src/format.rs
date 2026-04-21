@@ -11,8 +11,10 @@ use act_types::{
     },
     types::{ComponentInfo, LocalizedString, Metadata},
 };
+use owo_colors::{OwoColorize, Stream, Style};
 use serde::Serialize;
 use serde_with::skip_serializing_none;
+use std::fmt::Write as _;
 
 // ── Data carrier ──────────────────────────────────────────────────────────────
 
@@ -122,25 +124,80 @@ fn tool_to_json(td: &crate::runtime::act::core::types::ToolDefinition) -> ToolJs
 
 // ── Text output ───────────────────────────────────────────────────────────────
 
-/// Render [`InfoData`] as a markdown-like human-readable string.
+/// Palette for human-readable `act info` output.
+///
+/// All writes go through `.if_supports_color(Stream::Stdout, …)` so the
+/// styling evaporates when stdout isn't a TTY (`act info … | cat`, CI
+/// logs) or when `NO_COLOR` is set. LLMs should use `--format json`;
+/// these styles exist only to make interactive inspection scannable.
+struct Palette {
+    name: Style,
+    version: Style,
+    description: Style,
+    section: Style,
+    tool_name: Style,
+    annotation: Style,
+    required: Style,
+    param: Style,
+    param_type: Style,
+    dim: Style,
+}
+
+impl Palette {
+    fn new() -> Self {
+        Self {
+            name: Style::new().bold().bright_yellow(),
+            version: Style::new().dimmed(),
+            description: Style::new(),
+            section: Style::new().bold(),
+            tool_name: Style::new().bold().bright_cyan(),
+            annotation: Style::new().green(),
+            required: Style::new().bold().red(),
+            param: Style::new().cyan(),
+            param_type: Style::new().dimmed(),
+            dim: Style::new().dimmed(),
+        }
+    }
+}
+
+/// Render [`InfoData`] as a human-readable string with terminal colors.
+///
+/// LLMs and scripts should prefer `--format json` — it's stable,
+/// structured, and unambiguous. This renderer is tuned for humans
+/// eyeballing a component in a terminal.
 pub fn to_text(data: &InfoData<'_>) -> String {
     let info = data.info;
+    let p = Palette::new();
     let mut out = String::new();
 
-    // Header
-    out.push_str(&format!("# {} v{}\n", info.std.name, info.std.version));
+    let styled = |value: &str, style: Style| {
+        value
+            .if_supports_color(Stream::Stdout, move |s| s.style(style))
+            .to_string()
+    };
+
+    // Header: `name vX.Y.Z`
+    writeln!(
+        out,
+        "{} {}",
+        styled(&info.std.name, p.name),
+        styled(&format!("v{}", info.std.version), p.version),
+    )
+    .unwrap();
+
+    // Description on its own line, separated by a blank line.
     if !info.std.description.is_empty() {
-        out.push_str(&info.std.description);
-        out.push('\n');
+        writeln!(out, "\n{}", styled(&info.std.description, p.description)).unwrap();
     }
 
-    // Capabilities
+    // Capabilities — one entry per line, with mount-root / other
+    // per-capability params rendered inline.
     if !info.std.capabilities.is_empty() {
-        out.push_str("\nCapabilities:\n");
+        writeln!(out, "\n{}", styled("Capabilities:", p.section)).unwrap();
         if let Some(fs) = &info.std.capabilities.filesystem {
             out.push_str("  wasi:filesystem");
             if let Some(root) = &fs.mount_root {
-                out.push_str(&format!(" (mount-root: {})", root));
+                write!(out, " {}", styled(&format!("(mount-root: {root})"), p.dim)).unwrap();
             }
             out.push('\n');
         }
@@ -151,18 +208,23 @@ pub fn to_text(data: &InfoData<'_>) -> String {
             out.push_str("  wasi:sockets\n");
         }
         for (id, params) in &info.std.capabilities.other {
-            out.push_str(&format!("  {}", id));
+            write!(out, "  {id}").unwrap();
             if let serde_json::Value::Object(map) = params
                 && !map.is_empty()
             {
                 let pairs: Vec<String> = map
                     .iter()
                     .map(|(k, v)| match v {
-                        serde_json::Value::String(s) => format!("{}: {}", k, s),
-                        other => format!("{}: {}", k, other),
+                        serde_json::Value::String(s) => format!("{k}: {s}"),
+                        other => format!("{k}: {other}"),
                     })
                     .collect();
-                out.push_str(&format!(" ({})", pairs.join(", ")));
+                write!(
+                    out,
+                    " {}",
+                    styled(&format!("({})", pairs.join(", ")), p.dim)
+                )
+                .unwrap();
             }
             out.push('\n');
         }
@@ -170,15 +232,16 @@ pub fn to_text(data: &InfoData<'_>) -> String {
 
     // Skill
     if let Some(skill) = info.extra.get("std:skill").and_then(|v| v.as_str()) {
-        out.push_str("\n## Skill\n");
+        writeln!(out, "\n{}", styled("Skill:", p.section)).unwrap();
         out.push_str(skill);
-        out.push('\n');
+        if !skill.ends_with('\n') {
+            out.push('\n');
+        }
     }
 
-    // Metadata schema
+    // Metadata schema — raw JSON block under a section label.
     if let Some(schema_str) = &data.metadata_schema {
-        out.push_str("\n## Metadata Schema\n");
-        // Pretty-print if valid JSON, otherwise print as-is
+        writeln!(out, "\n{}", styled("Metadata Schema:", p.section)).unwrap();
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(schema_str) {
             out.push_str(&serde_json::to_string_pretty(&v).unwrap_or_else(|_| schema_str.clone()));
         } else {
@@ -187,30 +250,32 @@ pub fn to_text(data: &InfoData<'_>) -> String {
         out.push('\n');
     }
 
-    // Tools
-    if let Some(tools) = &data.tools {
+    // Tools.
+    if let Some(tools) = &data.tools
+        && !tools.is_empty()
+    {
+        writeln!(out, "\n{}", styled("Tools:", p.section)).unwrap();
         for td in tools {
             out.push('\n');
-            out.push_str(&tool_to_text(td));
+            out.push_str(&tool_to_text(td, &p));
         }
     }
 
     out
 }
 
-fn tool_to_text(td: &crate::runtime::act::core::types::ToolDefinition) -> String {
+fn tool_to_text(td: &crate::runtime::act::core::types::ToolDefinition, p: &Palette) -> String {
     let mut out = String::new();
     let meta = Metadata::from(td.metadata.clone());
     let desc = LocalizedString::from(&td.description);
 
-    out.push_str(&format!("## {}\n", td.name));
-    let desc_text = desc.any_text();
-    if !desc_text.is_empty() {
-        out.push_str(desc_text);
-        out.push('\n');
-    }
+    let styled = |value: &str, style: Style| {
+        value
+            .if_supports_color(Stream::Stdout, move |s| s.style(style))
+            .to_string()
+    };
 
-    // Annotations line: [read-only, idempotent, destructive, streaming]
+    // Tool name + annotations on one line.
     let mut annotations: Vec<&str> = Vec::new();
     if meta.get_as::<bool>(META_READ_ONLY).unwrap_or(false) {
         annotations.push("read-only");
@@ -224,41 +289,71 @@ fn tool_to_text(td: &crate::runtime::act::core::types::ToolDefinition) -> String
     if meta.get_as::<bool>(META_STREAMING).unwrap_or(false) {
         annotations.push("streaming");
     }
+    write!(out, "{}", styled(&td.name, p.tool_name)).unwrap();
     if !annotations.is_empty() {
-        out.push_str(&format!("[{}]\n", annotations.join(", ")));
+        write!(
+            out,
+            " {}",
+            styled(&format!("[{}]", annotations.join(", ")), p.annotation),
+        )
+        .unwrap();
+    }
+    out.push('\n');
+
+    // Indented description.
+    let desc_text = desc.any_text();
+    if !desc_text.is_empty() {
+        writeln!(out, "  {desc_text}").unwrap();
     }
 
-    // Timeout
+    // Extras: timeout, tags, usage hints, parameters.
+    let mut opened_extras = false;
+    let ensure_blank = |out: &mut String, opened: &mut bool| {
+        if !*opened {
+            out.push('\n');
+            *opened = true;
+        }
+    };
+
     if let Some(ms) = meta.get_as::<u64>(META_TIMEOUT_MS) {
-        out.push_str(&format!("Timeout: {}ms\n", ms));
+        ensure_blank(&mut out, &mut opened_extras);
+        writeln!(out, "  {} {ms}ms", styled("Timeout:", p.section)).unwrap();
     }
-
-    // Tags
     let tags: Vec<String> = meta.get_as::<Vec<String>>(META_TAGS).unwrap_or_default();
     if !tags.is_empty() {
-        out.push_str(&format!("Tags: {}\n", tags.join(", ")));
+        ensure_blank(&mut out, &mut opened_extras);
+        writeln!(out, "  {} {}", styled("Tags:", p.section), tags.join(", ")).unwrap();
     }
-
-    // Usage hints
     if let Some(hint) = meta.get_as::<String>(META_USAGE_HINTS) {
-        out.push_str(&format!("When to use: {}\n", hint));
+        ensure_blank(&mut out, &mut opened_extras);
+        writeln!(out, "  {} {hint}", styled("When to use:", p.section)).unwrap();
     }
     if let Some(hint) = meta.get_as::<String>(META_ANTI_USAGE_HINTS) {
-        out.push_str(&format!("When NOT to use: {}\n", hint));
+        ensure_blank(&mut out, &mut opened_extras);
+        writeln!(out, "  {} {hint}", styled("When NOT to use:", p.section)).unwrap();
     }
 
-    // Parameters
     if let Ok(schema) = serde_json::from_str::<serde_json::Value>(&td.parameters_schema) {
         let params = extract_params(&schema);
         if !params.is_empty() {
-            out.push_str("Parameters:\n");
+            ensure_blank(&mut out, &mut opened_extras);
+            writeln!(out, "  {}", styled("Parameters:", p.section)).unwrap();
             for (name, type_str, required, description) in params {
-                let req_marker = if required { " (required)" } else { "" };
-                if let Some(d) = description {
-                    out.push_str(&format!("  {}: {}{} — {}\n", name, type_str, req_marker, d));
-                } else {
-                    out.push_str(&format!("  {}: {}{}\n", name, type_str, req_marker));
+                write!(
+                    out,
+                    "    {}{}{}",
+                    styled(&name, p.param),
+                    styled(": ", p.dim),
+                    styled(&type_str, p.param_type),
+                )
+                .unwrap();
+                if required {
+                    write!(out, " {}", styled("(required)", p.required)).unwrap();
                 }
+                if let Some(d) = description {
+                    write!(out, "{}{d}", styled(" — ", p.dim)).unwrap();
+                }
+                out.push('\n');
             }
         }
     }
@@ -328,7 +423,8 @@ mod tests {
             tools: None,
         };
         let text = to_text(&data);
-        assert!(text.contains("# component-sqlite v0.2.0"));
+        assert!(text.contains("component-sqlite"));
+        assert!(text.contains("v0.2.0"));
         assert!(text.contains("SQLite database access"));
     }
 
@@ -341,7 +437,9 @@ mod tests {
             tools: None,
         };
         let text = to_text(&data);
-        assert!(text.contains("wasi:filesystem (mount-root: /data)"));
+        assert!(text.contains("Capabilities:"));
+        assert!(text.contains("wasi:filesystem"));
+        assert!(text.contains("mount-root: /data"));
     }
 
     #[test]
@@ -353,7 +451,7 @@ mod tests {
             tools: None,
         };
         let text = to_text(&data);
-        assert!(text.contains("## Skill"));
+        assert!(text.contains("Skill:"));
         assert!(text.contains("Use this component for database operations..."));
     }
 
@@ -367,7 +465,7 @@ mod tests {
             tools: None,
         };
         let text = to_text(&data);
-        assert!(text.contains("## Metadata Schema"));
+        assert!(text.contains("Metadata Schema:"));
         assert!(text.contains("database_path"));
     }
 
@@ -413,7 +511,7 @@ mod tests {
         let text = to_text(&data);
         let json_str = to_json(&data).unwrap();
         // Should not panic, produce some output
-        assert!(text.contains('#'));
+        assert!(!text.is_empty());
         assert!(json_str.contains("name"));
     }
 }
