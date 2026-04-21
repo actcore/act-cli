@@ -1,4 +1,11 @@
 use crate::runtime;
+use act_types::cbor;
+use act_types::constants::{ERR_CAPABILITY_DENIED, ERR_INVALID_ARGS, ERR_NOT_FOUND};
+use rmcp::ErrorData;
+use rmcp::model::{Content, ErrorCode, Tool};
+use serde_json::Value;
+use std::borrow::Cow;
+use std::sync::Arc;
 
 pub struct ActRmcpBridge {
     pub handle: runtime::ComponentHandle,
@@ -6,12 +13,6 @@ pub struct ActRmcpBridge {
     pub metadata: runtime::Metadata,
     pub metadata_schema: Option<String>,
 }
-
-use act_types::cbor;
-use act_types::constants::{ERR_CAPABILITY_DENIED, ERR_INVALID_ARGS, ERR_NOT_FOUND};
-use rmcp::ErrorData;
-use rmcp::model::{Content, ErrorCode};
-use serde_json::Value;
 
 fn map_content_part(part: &runtime::act::core::types::ContentPart) -> Content {
     let mime = part.mime_type.as_deref().unwrap_or("");
@@ -60,10 +61,6 @@ fn component_error_to_mcp(err: runtime::ComponentError) -> ErrorData {
 }
 
 // ── list_tools helpers ──────────────────────────────────────────────────────
-
-use rmcp::model::Tool;
-use std::borrow::Cow;
-use std::sync::Arc;
 
 fn convert_tool_definitions(
     defs: &[runtime::act::core::types::ToolDefinition],

@@ -1,3 +1,7 @@
+//! Fixture `tests/fixtures/time.wasm` is a prebuilt `components/time` component
+//! (built via `cd components/time && just build && just pack`). Rebuild when the
+//! component source or its pack metadata changes.
+
 use std::path::PathBuf;
 
 use rmcp::{
