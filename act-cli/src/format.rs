@@ -137,7 +137,7 @@ struct Palette {
     section: Style,
     tool_name: Style,
     annotation: Style,
-    required: Style,
+    optional: Style,
     param: Style,
     param_type: Style,
     dim: Style,
@@ -152,7 +152,7 @@ impl Palette {
             section: Style::new().bold(),
             tool_name: Style::new().bold().bright_cyan(),
             annotation: Style::new().green(),
-            required: Style::new().bold().red(),
+            optional: Style::new().dimmed(),
             param: Style::new().cyan(),
             param_type: Style::new().dimmed(),
             dim: Style::new().dimmed(),
@@ -347,8 +347,8 @@ fn tool_to_text(td: &crate::runtime::act::core::types::ToolDefinition, p: &Palet
                     styled(&type_str, p.param_type),
                 )
                 .unwrap();
-                if required {
-                    write!(out, " {}", styled("(required)", p.required)).unwrap();
+                if !required {
+                    write!(out, " {}", styled("(optional)", p.optional)).unwrap();
                 }
                 if let Some(d) = description {
                     write!(out, "{}{d}", styled(" — ", p.dim)).unwrap();
