@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-04-21
+
+### Added
+
+- **Runtime policy (Layer 1) for outgoing HTTP and filesystem access.** Declarative `allow` / `deny` / `open` modes, configured via `~/.config/act/config.toml` or CLI flags (`--fs-allow`, `--fs-deny`, `--http-allow`, `--http-deny`, `--fs-policy`, `--http-policy`). Filesystem gates every path op through a glob matcher with a virtual-root preopen (Unix: `/`; Windows: one `/c`, `/d`, … per accessible drive). HTTP gates each request by host / scheme / method / port / CIDR and filters DNS-resolved IPs against both deny- and allow-CIDR rules via a reqwest DNS resolver hook. Per-hop redirect policy re-checks each target URL.
+- **Enforcing capability declarations.** Components' `[std.capabilities.*]` entries in `act.toml` are now a **ceiling** the host applies to the user's policy — missing declaration or declared-but-empty `allow` is a hard deny regardless of user config. `[std.capabilities."wasi:filesystem"].allow` takes `{path, mode}` entries with `mode = "ro"` / `"rw"`. `[std.capabilities."wasi:http"].allow` takes `{host, scheme?, methods?, ports?}`. Wildcards: `host = "*"` (any host), `path = "**"` (any path). `act-build pack` validates declarations at pack time.
+- **reqwest-backed HTTP client** replacing wasmtime-wasi-http's `default_send_request`. Outgoing `wasi:http` requests route through a per-component `ActHttpClient`. Negotiates HTTP/2 via ALPN; HTTP/3 compiles in (`--cfg reqwest_unstable`) but stays dormant pending alt-svc cache warmup. SSE-friendly defaults: HTTP/2 keep-alive pings every 30s, TCP keep-alive, 10-minute idle-pool timeout.
+- **Windows long-path support** via an embedded application manifest.
+- **READMEs** ship with the `act` and `act-build` release packages.
+
+### Changed
+
+- **Metadata key renamed `[act-component]` → `[act]`** across `Cargo.toml` / `pyproject.toml` / `package.json`. Components must update the one-line key.
+- **`act-types` bumped to 0.5** — required for the new `FilesystemAllow` / `HttpAllow` / `FsMode` types.
+- **Deny-CIDR denials surface as `DnsError`** instead of `ConnectionRefused` by walking the reqwest error chain. Policy-denied requests are attributable to DNS rather than a refused socket.
+- **p3 `wasi:filesystem/preopens` is shadowed** when fs policy is anything other than `open`. Returns zero preopens; p3 guests can't obtain a `Descriptor::Dir` and every path op fails at the default impl. Per-op gating for p3 filesystem awaits upstream wasmtime-wasi API changes.
+
+### Removed
+
+- **Advisory `warn_missing_capabilities` helper** — undeclared capability classes now hard-deny at policy check time, which is a stronger signal than a startup warning.
+
+### Fixed
+
+- `fs.deny` entries no longer silently ignored — unused rules now emit a warning at startup.
+
 ## [0.4.0] - 2026-04-18
 
 ### Changed
