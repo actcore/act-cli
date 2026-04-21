@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2026-04-22
+
+### Changed
+
+- **Stdio MCP server now uses the official [`rmcp`](https://docs.rs/rmcp) crate.** `act run <component> --mcp` is a thin bridge over `rmcp::ServerHandler` instead of the previous hand-rolled JSON-RPC dispatcher. No user-visible wire change — Claude Desktop, Cline, and Cursor continue to work unchanged. Enables future MCP features (new content types, streaming-HTTP transport, resources/prompts/sampling) by tracking rmcp upstream.
+
+### Removed
+
+- `act-cli/src/mcp.rs` (384-line hand-rolled JSON-RPC dispatcher). Functionality moved to `src/rmcp_bridge.rs`.
+
 ## [0.5.1] - 2026-04-22
 
 ### Fixed

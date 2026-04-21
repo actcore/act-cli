@@ -1,8 +1,8 @@
 mod config;
 mod format;
 mod http;
-mod mcp;
 mod resolve;
+mod rmcp_bridge;
 mod runtime;
 
 use act_types::cbor;
@@ -339,7 +339,7 @@ async fn cmd_run(
 
     if mcp {
         let pc = prepare_component(&component, &opts).await?;
-        return mcp::run_stdio(pc.info, pc.handle, pc.metadata).await;
+        return rmcp_bridge::run_stdio(pc.info, pc.handle, pc.metadata).await;
     }
 
     if http || listen.is_some() {
