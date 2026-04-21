@@ -1,6 +1,6 @@
+#![allow(dead_code)]
 use crate::runtime;
 
-#[allow(dead_code)]
 pub struct ActRmcpBridge {
     pub handle: runtime::ComponentHandle,
     pub info: runtime::ComponentInfo,
@@ -14,7 +14,6 @@ use rmcp::ErrorData;
 use rmcp::model::{Content, ErrorCode};
 use serde_json::Value;
 
-#[allow(dead_code)]
 fn map_content_part(part: &runtime::act::core::types::ContentPart) -> Content {
     let mime = part.mime_type.as_deref().unwrap_or("");
 
@@ -41,7 +40,6 @@ fn map_content_part(part: &runtime::act::core::types::ContentPart) -> Content {
     Content::text(text)
 }
 
-#[allow(dead_code)]
 fn component_error_to_mcp(err: runtime::ComponentError) -> ErrorData {
     match err {
         runtime::ComponentError::Tool(te) => {
@@ -68,7 +66,6 @@ use rmcp::model::Tool;
 use std::borrow::Cow;
 use std::sync::Arc;
 
-#[allow(dead_code)]
 fn convert_tool_definitions(
     defs: &[runtime::act::core::types::ToolDefinition],
     metadata_schema: Option<&str>,
@@ -112,7 +109,6 @@ fn convert_tool_definitions(
         .collect()
 }
 
-#[allow(dead_code)]
 fn build_annotations(metadata: &[(String, Vec<u8>)]) -> Option<rmcp::model::ToolAnnotations> {
     use act_types::constants::*;
     let meta = act_types::types::Metadata::from(metadata.to_vec());
@@ -134,10 +130,37 @@ fn build_annotations(metadata: &[(String, Vec<u8>)]) -> Option<rmcp::model::Tool
     ))
 }
 
+// ── fold_events_to_result ───────────────────────────────────────────────────
+
+fn fold_events_to_result(result: runtime::CallToolResult) -> rmcp::model::CallToolResult {
+    let mut content = Vec::new();
+    let mut is_error = false;
+
+    for event in &result.events {
+        match event {
+            runtime::act::core::types::ToolEvent::Content(part) => {
+                content.push(map_content_part(part));
+            }
+            runtime::act::core::types::ToolEvent::Error(err) => {
+                is_error = true;
+                let message = act_types::types::LocalizedString::from(&err.message)
+                    .any_text()
+                    .to_string();
+                content.push(rmcp::model::Content::text(message));
+            }
+        }
+    }
+
+    if is_error {
+        rmcp::model::CallToolResult::error(content)
+    } else {
+        rmcp::model::CallToolResult::success(content)
+    }
+}
+
 // ── ServerHandler impl ──────────────────────────────────────────────────────
 
 impl ActRmcpBridge {
-    #[allow(dead_code)]
     async fn list_tools_impl(&self) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let req = runtime::ComponentRequest::ListTools {
@@ -171,6 +194,62 @@ impl ActRmcpBridge {
             meta: None,
         })
     }
+
+    async fn call_tool_impl(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        use rmcp::model::ErrorCode;
+
+        let mut arguments = request
+            .arguments
+            .map(Value::Object)
+            .unwrap_or_else(|| serde_json::json!({}));
+
+        let mut call_metadata = self.metadata.clone();
+        if let Some(obj) = arguments.as_object_mut()
+            && let Some(Value::Object(extra)) = obj.remove("_metadata")
+        {
+            call_metadata.extend(act_types::types::Metadata::from(Value::Object(extra)));
+        }
+
+        let cbor_args = act_types::cbor::json_to_cbor(&arguments).map_err(|_| {
+            rmcp::ErrorData::new(ErrorCode::INVALID_PARAMS, "invalid arguments", None)
+        })?;
+
+        let tool_call = runtime::act::core::types::ToolCall {
+            name: request.name.to_string(),
+            arguments: cbor_args,
+            metadata: call_metadata.into(),
+        };
+
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let req = runtime::ComponentRequest::CallTool {
+            call: tool_call,
+            reply: reply_tx,
+        };
+
+        self.handle.send(req).await.map_err(|_| {
+            rmcp::ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                "component actor unavailable",
+                None,
+            )
+        })?;
+
+        let result = reply_rx
+            .await
+            .map_err(|_| {
+                rmcp::ErrorData::new(
+                    ErrorCode::INTERNAL_ERROR,
+                    "component actor dropped reply",
+                    None,
+                )
+            })?
+            .map_err(component_error_to_mcp)?;
+
+        Ok(fold_events_to_result(result))
+    }
 }
 
 impl rmcp::ServerHandler for ActRmcpBridge {
@@ -195,11 +274,22 @@ impl rmcp::ServerHandler for ActRmcpBridge {
     + '_ {
         self.list_tools_impl()
     }
+
+    fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> impl std::future::Future<Output = Result<rmcp::model::CallToolResult, rmcp::ErrorData>>
+    + Send
+    + '_ {
+        self.call_tool_impl(request)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::act::core::types as runtime_types;
     use crate::runtime::act::core::types::{
         ContentPart, LocalizedString, ToolDefinition, ToolError,
     };
@@ -382,5 +472,44 @@ mod tests {
         let schema: &serde_json::Map<String, serde_json::Value> = tools[0].input_schema.as_ref();
         let props = schema["properties"].as_object().unwrap();
         assert_eq!(props["_metadata"]["type"], serde_json::json!("object"));
+    }
+
+    use crate::runtime::CallToolResult as ActCallToolResult;
+
+    #[test]
+    fn fold_events_text_content_and_error_sets_is_error() {
+        let events = vec![
+            runtime_types::ToolEvent::Content(runtime_types::ContentPart {
+                data: b"partial ok".to_vec(),
+                mime_type: Some("text/plain".into()),
+                metadata: vec![],
+            }),
+            runtime_types::ToolEvent::Error(runtime_types::ToolError {
+                kind: act_types::constants::ERR_INTERNAL.to_string(),
+                message: runtime_types::LocalizedString::Plain("boom mid-stream".into()),
+                metadata: vec![],
+            }),
+        ];
+        let result = fold_events_to_result(ActCallToolResult { events });
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(result.content.len(), 2);
+        match &result.content[1].raw {
+            RawContent::Text(t) => assert!(t.text.contains("boom mid-stream")),
+            _ => panic!("expected text content for error"),
+        }
+    }
+
+    #[test]
+    fn fold_events_all_content_no_error_leaves_is_error_none_or_false() {
+        let events = vec![runtime_types::ToolEvent::Content(
+            runtime_types::ContentPart {
+                data: b"ok".to_vec(),
+                mime_type: Some("text/plain".into()),
+                metadata: vec![],
+            },
+        )];
+        let result = fold_events_to_result(ActCallToolResult { events });
+        assert!(!result.is_error.unwrap_or(false));
+        assert_eq!(result.content.len(), 1);
     }
 }
