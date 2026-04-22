@@ -116,10 +116,6 @@ enum Command {
         #[arg(short, long)]
         tools: bool,
 
-        /// Instantiate component and fetch its metadata schema. Implied by --tools.
-        #[arg(short, long)]
-        schema: bool,
-
         /// Output format
         #[arg(short, long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
@@ -205,10 +201,9 @@ async fn main() -> Result<()> {
         Command::Info {
             component,
             tools,
-            schema,
             format,
             opts,
-        } => cmd_info(component, tools, schema, format, opts).await,
+        } => cmd_info(component, tools, format, opts).await,
         Command::Skill { component, output } => cmd_skill(component, output).await,
         Command::Pull {
             reference,
@@ -402,15 +397,11 @@ async fn cmd_call(
         serde_json::from_str(&args).context("invalid --args JSON")?;
     let cbor_args = cbor::json_to_cbor(&arguments).context("encoding args as CBOR")?;
 
-    let tool_call = runtime::act::core::types::ToolCall {
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let request = runtime::ComponentRequest::CallTool {
         name: tool,
         arguments: cbor_args,
         metadata: pc.metadata.clone().into(),
-    };
-
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    let request = runtime::ComponentRequest::CallTool {
-        call: tool_call,
         reply: reply_tx,
     };
 
@@ -423,7 +414,7 @@ async fn cmd_call(
         Ok(result) => {
             for event in &result.events {
                 match event {
-                    runtime::act::core::types::ToolEvent::Content(part) => {
+                    runtime::exports::act::tools::tool_provider::ToolEvent::Content(part) => {
                         let mime = part.mime_type.as_deref().unwrap_or("application/cbor");
                         if mime.starts_with("text/")
                             || mime == "application/json"
@@ -451,7 +442,7 @@ async fn cmd_call(
                             std::io::stdout().write_all(&part.data)?;
                         }
                     }
-                    runtime::act::core::types::ToolEvent::Error(err) => {
+                    runtime::exports::act::tools::tool_provider::ToolEvent::Error(err) => {
                         let ls = act_types::types::LocalizedString::from(&err.message);
                         anyhow::bail!("{}: {}", err.kind, ls.any_text());
                     }
@@ -470,7 +461,6 @@ async fn cmd_call(
 async fn cmd_info(
     component: ComponentRef,
     show_tools: bool,
-    show_schema: bool,
     output_format: OutputFormat,
     opts: CommonOpts,
 ) -> Result<()> {
@@ -478,68 +468,37 @@ async fn cmd_info(
     // read from the `act:component` custom section without
     // instantiation — that path runs no component code and is safe
     // against adversarial .wasm files. Code only runs when the user
-    // opts in via `--schema` (get-metadata-schema) or `--tools`
-    // (list-tools, which implies --schema).
+    // opts in via `--tools` (list-tools).
     let component_path = resolve::resolve(&component, false).await?;
     let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
     let component_info = runtime::read_component_info(&wasm_bytes)?;
 
-    let need_instantiation = show_tools || show_schema;
-    let (metadata_schema, tools) = if need_instantiation {
+    let tools = if show_tools {
         let pc = prepare_component(&component, &opts).await?;
 
-        let (schema_tx, schema_rx) = tokio::sync::oneshot::channel();
+        let (tools_tx, tools_rx) = tokio::sync::oneshot::channel();
         pc.handle
-            .send(runtime::ComponentRequest::GetMetadataSchema {
-                metadata: pc.metadata.clone(),
-                reply: schema_tx,
+            .send(runtime::ComponentRequest::ListTools {
+                metadata: pc.metadata,
+                reply: tools_tx,
             })
             .await
             .map_err(|_| anyhow::anyhow!("component actor unavailable"))?;
 
-        let metadata_schema = match schema_rx.await? {
-            Ok(schema) => schema,
+        match tools_rx.await? {
+            Ok(list_response) => Some(list_response.tools),
             Err(runtime::ComponentError::Tool(te)) => {
                 let ls = act_types::types::LocalizedString::from(&te.message);
-                tracing::warn!("get-metadata-schema error: {}: {}", te.kind, ls.any_text());
-                None
+                anyhow::bail!("list-tools error: {}: {}", te.kind, ls.any_text());
             }
-            Err(runtime::ComponentError::Internal(e)) => {
-                tracing::warn!("get-metadata-schema internal error: {e}");
-                None
-            }
-        };
-
-        let tools = if show_tools {
-            let (tools_tx, tools_rx) = tokio::sync::oneshot::channel();
-            pc.handle
-                .send(runtime::ComponentRequest::ListTools {
-                    metadata: pc.metadata,
-                    reply: tools_tx,
-                })
-                .await
-                .map_err(|_| anyhow::anyhow!("component actor unavailable"))?;
-
-            match tools_rx.await? {
-                Ok(list_response) => Some(list_response.tools),
-                Err(runtime::ComponentError::Tool(te)) => {
-                    let ls = act_types::types::LocalizedString::from(&te.message);
-                    anyhow::bail!("list-tools error: {}: {}", te.kind, ls.any_text());
-                }
-                Err(runtime::ComponentError::Internal(e)) => return Err(e),
-            }
-        } else {
-            None
-        };
-
-        (metadata_schema, tools)
+            Err(runtime::ComponentError::Internal(e)) => return Err(e),
+        }
     } else {
-        (None, None)
+        None
     };
 
     let data = format::InfoData {
         info: &component_info,
-        metadata_schema,
         tools,
     };
 

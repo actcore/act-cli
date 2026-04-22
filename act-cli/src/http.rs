@@ -88,7 +88,7 @@ fn internal_error_response(message: &str) -> axum::response::Response {
 fn sse_event_to_axum(event: runtime::SseEvent) -> Option<Result<Event, std::convert::Infallible>> {
     match event {
         runtime::SseEvent::Stream(stream_event) => match stream_event {
-            runtime::act::core::types::ToolEvent::Content(part) => {
+            runtime::exports::act::tools::tool_provider::ToolEvent::Content(part) => {
                 let data = cbor::decode_content_data(&part.data, part.mime_type.as_deref());
                 let json = serde_json::json!({
                     "data": data,
@@ -99,7 +99,7 @@ fn sse_event_to_axum(event: runtime::SseEvent) -> Option<Result<Event, std::conv
                     .json_data(json)
                     .expect("json_data with serde_json::Value is infallible")))
             }
-            runtime::act::core::types::ToolEvent::Error(err) => {
+            runtime::exports::act::tools::tool_provider::ToolEvent::Error(err) => {
                 let ls = act_types::types::LocalizedString::from(&err.message);
                 let message = ls.any_text().to_string();
                 tracing::warn!(kind = %err.kind, %message, "Stream error (SSE)");
@@ -141,48 +141,6 @@ fn sse_event_to_axum(event: runtime::SseEvent) -> Option<Result<Event, std::conv
 
 async fn get_info(State(state): State<Arc<AppState>>) -> Json<act_types::ComponentInfo> {
     Json(state.info.clone())
-}
-
-async fn post_metadata_schema(
-    State(state): State<Arc<AppState>>,
-    request: Request,
-) -> axum::response::Response {
-    let body_bytes = match axum::body::to_bytes(request.into_body(), 1024 * 1024).await {
-        Ok(b) => b,
-        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
-    };
-
-    let mut metadata = state.metadata.clone();
-    if !body_bytes.is_empty() {
-        let body: act_http::MetadataSchemaRequest = match serde_json::from_slice(&body_bytes) {
-            Ok(b) => b,
-            Err(_) => return StatusCode::BAD_REQUEST.into_response(),
-        };
-        if let Some(value) = body.metadata {
-            metadata.extend(runtime::Metadata::from(value));
-        }
-    }
-
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    let request = runtime::ComponentRequest::GetMetadataSchema {
-        metadata,
-        reply: reply_tx,
-    };
-
-    if state.component.send(request).await.is_err() {
-        return internal_error_response("component actor unavailable");
-    }
-
-    match reply_rx.await {
-        Ok(Ok(Some(schema))) => {
-            (StatusCode::OK, [("content-type", MIME_JSON)], schema).into_response()
-        }
-        Ok(Ok(None)) => StatusCode::NO_CONTENT.into_response(),
-        Ok(Err(e)) => component_error_response(e),
-        Err(_) => component_error_response(runtime::ComponentError::Internal(anyhow::anyhow!(
-            "component actor dropped reply"
-        ))),
-    }
 }
 
 async fn list_tools_inner(
@@ -240,11 +198,15 @@ async fn list_tools_inner(
 
 async fn call_tool_buffered(
     state: Arc<AppState>,
-    tool_call: runtime::act::core::types::ToolCall,
+    name: String,
+    arguments: Vec<u8>,
+    metadata: Vec<(String, Vec<u8>)>,
 ) -> axum::response::Response {
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     let request = runtime::ComponentRequest::CallTool {
-        call: tool_call,
+        name,
+        arguments,
+        metadata,
         reply: reply_tx,
     };
 
@@ -258,7 +220,7 @@ async fn call_tool_buffered(
                 .events
                 .iter()
                 .filter_map(|event| match event {
-                    runtime::act::core::types::ToolEvent::Content(part) => {
+                    runtime::exports::act::tools::tool_provider::ToolEvent::Content(part) => {
                         let data = cbor::decode_content_data(&part.data, part.mime_type.as_deref());
                         Some(act_http::ContentPart {
                             data,
@@ -266,12 +228,12 @@ async fn call_tool_buffered(
                             metadata: None,
                         })
                     }
-                    runtime::act::core::types::ToolEvent::Error(_) => None,
+                    runtime::exports::act::tools::tool_provider::ToolEvent::Error(_) => None,
                 })
                 .collect();
 
             let stream_error = result.events.iter().find_map(|event| match event {
-                runtime::act::core::types::ToolEvent::Error(e) => Some(e),
+                runtime::exports::act::tools::tool_provider::ToolEvent::Error(e) => Some(e),
                 _ => None,
             });
 
@@ -307,14 +269,18 @@ async fn call_tool_buffered(
 
 async fn call_tool_sse(
     state: Arc<AppState>,
-    tool_call: runtime::act::core::types::ToolCall,
+    name: String,
+    arguments: Vec<u8>,
+    metadata: Vec<(String, Vec<u8>)>,
 ) -> axum::response::Response {
-    tracing::debug!(tool = %tool_call.name, "SSE streaming requested");
+    tracing::debug!(tool = %name, "SSE streaming requested");
 
     let (event_tx, event_rx) = tokio::sync::mpsc::channel(32);
 
     let request = runtime::ComponentRequest::CallToolStreaming {
-        call: tool_call,
+        name,
+        arguments,
+        metadata,
         event_tx,
     };
 
@@ -396,16 +362,12 @@ async fn tool_call_dispatcher(
         metadata.extend(Metadata::from(value));
     }
 
-    let tool_call = runtime::act::core::types::ToolCall {
-        name,
-        arguments: cbor_args,
-        metadata: metadata.clone().into(),
-    };
+    let metadata_wit: Vec<(String, Vec<u8>)> = metadata.into();
 
     if wants_sse {
-        call_tool_sse(state, tool_call).await
+        call_tool_sse(state, name, cbor_args, metadata_wit).await
     } else {
-        call_tool_buffered(state, tool_call).await
+        call_tool_buffered(state, name, cbor_args, metadata_wit).await
     }
 }
 
@@ -464,10 +426,6 @@ mod tests {
 pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/info", get(get_info))
-        .route(
-            "/metadata-schema",
-            axum::routing::post(post_metadata_schema),
-        )
         .route("/tools", axum::routing::any(tools_dispatcher))
         .route("/tools/{name}", axum::routing::any(tool_call_dispatcher))
         .layer(middleware::from_fn(protocol_version_layer))

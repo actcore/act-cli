@@ -21,10 +21,8 @@ use std::fmt::Write as _;
 /// All data needed to render `act info` output.
 pub struct InfoData<'a> {
     pub info: &'a ComponentInfo,
-    /// JSON string returned by `get-metadata-schema`, if requested.
-    pub metadata_schema: Option<String>,
     /// Tool list from `list-tools`, if requested.
-    pub tools: Option<Vec<crate::runtime::act::core::types::ToolDefinition>>,
+    pub tools: Option<Vec<crate::runtime::exports::act::tools::tool_provider::ToolDefinition>>,
 }
 
 // ── JSON output ───────────────────────────────────────────────────────────────
@@ -38,7 +36,6 @@ pub struct InfoJson {
     pub default_language: Option<String>,
     pub capabilities: serde_json::Value,
     pub skill: Option<String>,
-    pub metadata_schema: Option<serde_json::Value>,
     pub tools: Option<Vec<ToolJson>>,
 }
 
@@ -72,13 +69,6 @@ pub fn to_json(data: &InfoData<'_>) -> anyhow::Result<String> {
     let capabilities = serde_json::to_value(&info.std.capabilities)
         .unwrap_or_else(|_| serde_json::Value::Object(Default::default()));
 
-    let metadata_schema_value: Option<serde_json::Value> = data
-        .metadata_schema
-        .as_deref()
-        .map(serde_json::from_str)
-        .transpose()
-        .unwrap_or(None);
-
     let tools_json = data
         .tools
         .as_ref()
@@ -91,14 +81,15 @@ pub fn to_json(data: &InfoData<'_>) -> anyhow::Result<String> {
         default_language: info.std.default_language.clone(),
         capabilities,
         skill,
-        metadata_schema: metadata_schema_value,
         tools: tools_json,
     };
 
     Ok(serde_json::to_string_pretty(&out)?)
 }
 
-fn tool_to_json(td: &crate::runtime::act::core::types::ToolDefinition) -> ToolJson {
+fn tool_to_json(
+    td: &crate::runtime::exports::act::tools::tool_provider::ToolDefinition,
+) -> ToolJson {
     let meta = Metadata::from(td.metadata.clone());
     let desc = LocalizedString::from(&td.description);
 
@@ -239,17 +230,6 @@ pub fn to_text(data: &InfoData<'_>) -> String {
         }
     }
 
-    // Metadata schema — raw JSON block under a section label.
-    if let Some(schema_str) = &data.metadata_schema {
-        writeln!(out, "\n{}", styled("Metadata Schema:", p.section)).unwrap();
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(schema_str) {
-            out.push_str(&serde_json::to_string_pretty(&v).unwrap_or_else(|_| schema_str.clone()));
-        } else {
-            out.push_str(schema_str);
-        }
-        out.push('\n');
-    }
-
     // Tools.
     if let Some(tools) = &data.tools
         && !tools.is_empty()
@@ -264,7 +244,10 @@ pub fn to_text(data: &InfoData<'_>) -> String {
     out
 }
 
-fn tool_to_text(td: &crate::runtime::act::core::types::ToolDefinition, p: &Palette) -> String {
+fn tool_to_text(
+    td: &crate::runtime::exports::act::tools::tool_provider::ToolDefinition,
+    p: &Palette,
+) -> String {
     let mut out = String::new();
     let meta = Metadata::from(td.metadata.clone());
     let desc = LocalizedString::from(&td.description);
@@ -465,7 +448,6 @@ mod tests {
         let info = sample_info();
         let data = InfoData {
             info: &info,
-            metadata_schema: None,
             tools: None,
         };
         let text = to_text(&data);
@@ -479,7 +461,6 @@ mod tests {
         let info = sample_info();
         let data = InfoData {
             info: &info,
-            metadata_schema: None,
             tools: None,
         };
         let text = to_text(&data);
@@ -493,7 +474,6 @@ mod tests {
         let info = sample_info();
         let data = InfoData {
             info: &info,
-            metadata_schema: None,
             tools: None,
         };
         let text = to_text(&data);
@@ -502,25 +482,10 @@ mod tests {
     }
 
     #[test]
-    fn text_metadata_schema() {
-        let info = sample_info();
-        let schema = r#"{"type":"object","properties":{"database_path":{"type":"string"}}}"#;
-        let data = InfoData {
-            info: &info,
-            metadata_schema: Some(schema.to_string()),
-            tools: None,
-        };
-        let text = to_text(&data);
-        assert!(text.contains("Metadata Schema:"));
-        assert!(text.contains("database_path"));
-    }
-
-    #[test]
     fn json_output_basic() {
         let info = sample_info();
         let data = InfoData {
             info: &info,
-            metadata_schema: None,
             tools: None,
         };
         let json_str = to_json(&data).unwrap();
@@ -530,20 +495,6 @@ mod tests {
         assert_eq!(v["description"], "SQLite database access");
         assert_eq!(v["skill"], "Use this component for database operations...");
         assert_eq!(v["capabilities"]["wasi:filesystem"]["mount-root"], "/data");
-    }
-
-    #[test]
-    fn json_metadata_schema_parsed() {
-        let info = sample_info();
-        let schema = r#"{"type":"object"}"#;
-        let data = InfoData {
-            info: &info,
-            metadata_schema: Some(schema.to_string()),
-            tools: None,
-        };
-        let json_str = to_json(&data).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
-        assert_eq!(v["metadata_schema"]["type"], "object");
     }
 
     #[test]
@@ -590,7 +541,6 @@ mod tests {
         let info = ComponentInfo::default();
         let data = InfoData {
             info: &info,
-            metadata_schema: None,
             tools: None,
         };
         let text = to_text(&data);

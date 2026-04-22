@@ -238,11 +238,15 @@ pub fn read_component_info(component_bytes: &[u8]) -> Result<ComponentInfo> {
 
 // ── Conversion helpers ──
 
-impl From<&act::core::types::LocalizedString> for act_types::types::LocalizedString {
-    fn from(ls: &act::core::types::LocalizedString) -> Self {
+impl From<&exports::act::tools::tool_provider::LocalizedString>
+    for act_types::types::LocalizedString
+{
+    fn from(ls: &exports::act::tools::tool_provider::LocalizedString) -> Self {
         match ls {
-            act::core::types::LocalizedString::Plain(s) => Self::Plain(s.clone()),
-            act::core::types::LocalizedString::Localized(pairs) => Self::from(pairs.clone()),
+            exports::act::tools::tool_provider::LocalizedString::Plain(s) => Self::Plain(s.clone()),
+            exports::act::tools::tool_provider::LocalizedString::Localized(pairs) => {
+                Self::from(pairs.clone())
+            }
         }
     }
 }
@@ -252,7 +256,7 @@ impl From<&act::core::types::LocalizedString> for act_types::types::LocalizedStr
 /// Errors from component calls.
 pub enum ComponentError {
     /// Structured tool error from the component (has kind, message, metadata).
-    Tool(act::core::types::ToolError),
+    Tool(exports::act::tools::tool_provider::Error),
     /// Infrastructure error (wasmtime, actor channel, etc.).
     Internal(anyhow::Error),
 }
@@ -261,32 +265,34 @@ pub use act_types::Metadata;
 
 /// Requests that can be sent to the component actor.
 pub enum ComponentRequest {
-    GetMetadataSchema {
-        metadata: Metadata,
-        reply: oneshot::Sender<Result<Option<String>, ComponentError>>,
-    },
     ListTools {
         metadata: Metadata,
-        reply: oneshot::Sender<Result<act::core::types::ListToolsResponse, ComponentError>>,
+        reply: oneshot::Sender<
+            Result<exports::act::tools::tool_provider::ListToolsResponse, ComponentError>,
+        >,
     },
     CallTool {
-        call: act::core::types::ToolCall,
+        name: String,
+        arguments: Vec<u8>,
+        metadata: Vec<(String, Vec<u8>)>,
         reply: oneshot::Sender<Result<CallToolResult, ComponentError>>,
     },
     CallToolStreaming {
-        call: act::core::types::ToolCall,
+        name: String,
+        arguments: Vec<u8>,
+        metadata: Vec<(String, Vec<u8>)>,
         event_tx: mpsc::Sender<SseEvent>,
     },
 }
 
 /// Collected result from call-tool (stream already consumed).
 pub struct CallToolResult {
-    pub events: Vec<act::core::types::ToolEvent>,
+    pub events: Vec<exports::act::tools::tool_provider::ToolEvent>,
 }
 
 /// Events sent through the SSE channel. Wraps stream events plus a terminal Done signal.
 pub enum SseEvent {
-    Stream(act::core::types::ToolEvent),
+    Stream(exports::act::tools::tool_provider::ToolEvent),
     Done,
     Error(ComponentError),
 }
@@ -321,28 +327,8 @@ pub fn spawn_component_actor(instance: ActWorld, mut store: Store<HostState>) ->
     tokio::spawn(async move {
         while let Some(request) = rx.recv().await {
             match request {
-                ComponentRequest::GetMetadataSchema { metadata, reply } => {
-                    let provider = instance.act_core_tool_provider().clone();
-                    let result = store
-                        .run_concurrent(async |accessor| {
-                            provider
-                                .call_get_metadata_schema(accessor, metadata.clone().into())
-                                .await
-                        })
-                        .await;
-                    let response = match result {
-                        Ok(Ok(schema)) => Ok(schema),
-                        Ok(Err(e)) => Err(ComponentError::Internal(anyhow::anyhow!(
-                            "get-metadata-schema failed: {e}"
-                        ))),
-                        Err(e) => Err(ComponentError::Internal(anyhow::anyhow!(
-                            "run_concurrent failed: {e}"
-                        ))),
-                    };
-                    let _ = reply.send(response);
-                }
                 ComponentRequest::ListTools { metadata, reply } => {
-                    let provider = instance.act_core_tool_provider().clone();
+                    let provider = instance.act_tools_tool_provider().clone();
                     let result = store
                         .run_concurrent(async |accessor| {
                             provider
@@ -362,28 +348,44 @@ pub fn spawn_component_actor(instance: ActWorld, mut store: Store<HostState>) ->
                     };
                     let _ = reply.send(response);
                 }
-                ComponentRequest::CallTool { call, reply } => {
-                    let provider = instance.act_core_tool_provider().clone();
+                ComponentRequest::CallTool {
+                    name,
+                    arguments,
+                    metadata,
+                    reply,
+                } => {
+                    let provider = instance.act_tools_tool_provider().clone();
 
                     let collected: std::sync::Arc<
-                        std::sync::Mutex<Vec<act::core::types::ToolEvent>>,
+                        std::sync::Mutex<Vec<exports::act::tools::tool_provider::ToolEvent>>,
                     > = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
                     let collected2 = collected.clone();
                     let (done_tx, done_rx) = oneshot::channel::<()>();
 
                     let result = store
                         .run_concurrent(async |accessor| {
-                            let tool_result = provider.call_call_tool(accessor, call).await?;
+                            let tool_result = provider
+                                .call_call_tool(
+                                    accessor,
+                                    name.clone(),
+                                    arguments.clone(),
+                                    metadata.clone(),
+                                )
+                                .await?;
 
                             accessor.with(|access| match tool_result {
-                                act::core::types::ToolResult::Streaming(stream) => {
+                                exports::act::tools::tool_provider::ToolResult::Streaming(
+                                    stream,
+                                ) => {
                                     let consumer = CollectingConsumer {
                                         collected,
                                         done_tx: Some(done_tx),
                                     };
                                     let _ = stream.pipe(access, consumer);
                                 }
-                                act::core::types::ToolResult::Immediate(events) => {
+                                exports::act::tools::tool_provider::ToolResult::Immediate(
+                                    events,
+                                ) => {
                                     collected
                                         .lock()
                                         .unwrap_or_else(|e| e.into_inner())
@@ -416,23 +418,39 @@ pub fn spawn_component_actor(instance: ActWorld, mut store: Store<HostState>) ->
                     };
                     let _ = reply.send(response);
                 }
-                ComponentRequest::CallToolStreaming { call, event_tx } => {
-                    let provider = instance.act_core_tool_provider().clone();
+                ComponentRequest::CallToolStreaming {
+                    name,
+                    arguments,
+                    metadata,
+                    event_tx,
+                } => {
+                    let provider = instance.act_tools_tool_provider().clone();
                     let (done_tx, done_rx) = oneshot::channel::<()>();
 
                     let result = store
                         .run_concurrent(async |accessor| {
-                            let tool_result = provider.call_call_tool(accessor, call).await?;
+                            let tool_result = provider
+                                .call_call_tool(
+                                    accessor,
+                                    name.clone(),
+                                    arguments.clone(),
+                                    metadata.clone(),
+                                )
+                                .await?;
 
                             accessor.with(|access| match tool_result {
-                                act::core::types::ToolResult::Streaming(stream) => {
+                                exports::act::tools::tool_provider::ToolResult::Streaming(
+                                    stream,
+                                ) => {
                                     let consumer = ForwardingConsumer {
                                         event_tx: event_tx.clone(),
                                         done_tx: Some(done_tx),
                                     };
                                     let _ = stream.pipe(access, consumer);
                                 }
-                                act::core::types::ToolResult::Immediate(events) => {
+                                exports::act::tools::tool_provider::ToolResult::Immediate(
+                                    events,
+                                ) => {
                                     for event in events {
                                         if event_tx.try_send(SseEvent::Stream(event)).is_err() {
                                             break;
@@ -468,12 +486,12 @@ pub fn spawn_component_actor(instance: ActWorld, mut store: Store<HostState>) ->
 
 /// A StreamConsumer that collects all items into a Vec and signals completion.
 struct CollectingConsumer {
-    collected: std::sync::Arc<std::sync::Mutex<Vec<act::core::types::ToolEvent>>>,
+    collected: std::sync::Arc<std::sync::Mutex<Vec<exports::act::tools::tool_provider::ToolEvent>>>,
     done_tx: Option<oneshot::Sender<()>>,
 }
 
 impl StreamConsumer<HostState> for CollectingConsumer {
-    type Item = act::core::types::ToolEvent;
+    type Item = exports::act::tools::tool_provider::ToolEvent;
 
     fn poll_consume(
         mut self: Pin<&mut Self>,
@@ -510,7 +528,7 @@ struct ForwardingConsumer {
 }
 
 impl StreamConsumer<HostState> for ForwardingConsumer {
-    type Item = act::core::types::ToolEvent;
+    type Item = exports::act::tools::tool_provider::ToolEvent;
 
     fn poll_consume(
         mut self: Pin<&mut Self>,

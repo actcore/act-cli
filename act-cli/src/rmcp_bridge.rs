@@ -11,10 +11,9 @@ pub struct ActRmcpBridge {
     pub handle: runtime::ComponentHandle,
     pub info: runtime::ComponentInfo,
     pub metadata: runtime::Metadata,
-    pub metadata_schema: Option<String>,
 }
 
-fn map_content_part(part: &runtime::act::core::types::ContentPart) -> Content {
+fn map_content_part(part: &runtime::exports::act::tools::tool_provider::ContentPart) -> Content {
     let mime = part.mime_type.as_deref().unwrap_or("");
 
     if mime.starts_with("text/") {
@@ -63,8 +62,7 @@ fn component_error_to_mcp(err: runtime::ComponentError) -> ErrorData {
 // ── list_tools helpers ──────────────────────────────────────────────────────
 
 fn convert_tool_definitions(
-    defs: &[runtime::act::core::types::ToolDefinition],
-    metadata_schema: Option<&str>,
+    defs: &[runtime::exports::act::tools::tool_provider::ToolDefinition],
 ) -> Vec<Tool> {
     defs.iter()
         .map(|td| {
@@ -72,20 +70,8 @@ fn convert_tool_definitions(
                 .any_text()
                 .to_string();
 
-            let mut input_schema: Value = serde_json::from_str(&td.parameters_schema)
+            let input_schema: Value = serde_json::from_str(&td.parameters_schema)
                 .unwrap_or_else(|_| serde_json::json!({"type": "object"}));
-
-            if let Some(obj) = input_schema.as_object_mut() {
-                let props = obj
-                    .entry("properties")
-                    .or_insert_with(|| Value::Object(serde_json::Map::new()));
-                if let Some(props) = props.as_object_mut() {
-                    let meta_schema = metadata_schema
-                        .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                        .unwrap_or_else(|| serde_json::json!({"type": "object"}));
-                    props.insert("_metadata".to_string(), meta_schema);
-                }
-            }
 
             let schema_map: serde_json::Map<String, Value> =
                 input_schema.as_object().cloned().unwrap_or_default();
@@ -134,10 +120,10 @@ fn fold_events_to_result(result: runtime::CallToolResult) -> rmcp::model::CallTo
 
     for event in &result.events {
         match event {
-            runtime::act::core::types::ToolEvent::Content(part) => {
+            runtime::exports::act::tools::tool_provider::ToolEvent::Content(part) => {
                 content.push(map_content_part(part));
             }
-            runtime::act::core::types::ToolEvent::Error(err) => {
+            runtime::exports::act::tools::tool_provider::ToolEvent::Error(err) => {
                 is_error = true;
                 let message = act_types::types::LocalizedString::from(&err.message)
                     .any_text()
@@ -161,13 +147,10 @@ pub async fn run_stdio(
     handle: runtime::ComponentHandle,
     metadata: runtime::Metadata,
 ) -> anyhow::Result<()> {
-    let metadata_schema = fetch_metadata_schema(&handle, &metadata).await;
-
     let bridge = ActRmcpBridge {
         handle,
         info,
         metadata,
-        metadata_schema,
     };
 
     let service = rmcp::serve_server(bridge, (tokio::io::stdin(), tokio::io::stdout()))
@@ -180,19 +163,6 @@ pub async fn run_stdio(
         .map_err(|e| anyhow::anyhow!("rmcp service error: {e}"))?;
 
     Ok(())
-}
-
-async fn fetch_metadata_schema(
-    handle: &runtime::ComponentHandle,
-    metadata: &runtime::Metadata,
-) -> Option<String> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let req = runtime::ComponentRequest::GetMetadataSchema {
-        metadata: metadata.clone(),
-        reply: tx,
-    };
-    handle.send(req).await.ok()?;
-    rx.await.ok()?.ok()?
 }
 
 // ── ServerHandler impl ──────────────────────────────────────────────────────
@@ -224,7 +194,7 @@ impl ActRmcpBridge {
             })?
             .map_err(component_error_to_mcp)?;
 
-        let tools = convert_tool_definitions(&list.tools, self.metadata_schema.as_deref());
+        let tools = convert_tool_definitions(&list.tools);
         Ok(rmcp::model::ListToolsResult {
             tools,
             next_cursor: None,
@@ -254,15 +224,11 @@ impl ActRmcpBridge {
             rmcp::ErrorData::new(ErrorCode::INVALID_PARAMS, "invalid arguments", None)
         })?;
 
-        let tool_call = runtime::act::core::types::ToolCall {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let req = runtime::ComponentRequest::CallTool {
             name: request.name.to_string(),
             arguments: cbor_args,
             metadata: call_metadata.into(),
-        };
-
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        let req = runtime::ComponentRequest::CallTool {
-            call: tool_call,
             reply: reply_tx,
         };
 
@@ -326,9 +292,9 @@ impl rmcp::ServerHandler for ActRmcpBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::act::core::types as runtime_types;
-    use crate::runtime::act::core::types::{
-        ContentPart, LocalizedString, ToolDefinition, ToolError,
+    use crate::runtime::exports::act::tools::tool_provider as runtime_types;
+    use crate::runtime::exports::act::tools::tool_provider::{
+        ContentPart, Error, LocalizedString, ToolDefinition,
     };
     use rmcp::model::{Content, ErrorCode, RawContent};
 
@@ -412,7 +378,6 @@ mod tests {
             handle: fake_handle(),
             info: fake_info(),
             metadata: runtime::Metadata::default(),
-            metadata_schema: None,
         };
         let info = rmcp::ServerHandler::get_info(&bridge);
         assert_eq!(info.server_info.name, "example");
@@ -433,7 +398,7 @@ mod tests {
 
     #[test]
     fn map_tool_invalid_argument_becomes_invalid_params() {
-        let err = runtime::ComponentError::Tool(ToolError {
+        let err = runtime::ComponentError::Tool(Error {
             kind: act_types::constants::ERR_INVALID_ARGS.to_string(),
             message: LocalizedString::Plain("bad arg".into()),
             metadata: vec![],
@@ -445,7 +410,7 @@ mod tests {
 
     #[test]
     fn map_tool_not_found_becomes_method_not_found() {
-        let err = runtime::ComponentError::Tool(ToolError {
+        let err = runtime::ComponentError::Tool(Error {
             kind: act_types::constants::ERR_NOT_FOUND.to_string(),
             message: LocalizedString::Plain("no such tool".into()),
             metadata: vec![],
@@ -456,7 +421,7 @@ mod tests {
 
     #[test]
     fn map_tool_capability_denied_becomes_invalid_request() {
-        let err = runtime::ComponentError::Tool(ToolError {
+        let err = runtime::ComponentError::Tool(Error {
             kind: act_types::constants::ERR_CAPABILITY_DENIED.to_string(),
             message: LocalizedString::Plain("not allowed".into()),
             metadata: vec![],
@@ -475,12 +440,9 @@ mod tests {
     }
 
     #[test]
-    fn list_tools_maps_definitions_and_injects_metadata() {
+    fn list_tools_maps_definitions() {
         let defs = vec![fake_tool("alpha"), fake_tool("beta")];
-        let tools = convert_tool_definitions(
-            &defs,
-            Some(r#"{"type":"object","properties":{"db":{"type":"string"}}}"#),
-        );
+        let tools = convert_tool_definitions(&defs);
 
         assert_eq!(tools.len(), 2);
         assert_eq!(tools[0].name.as_ref(), "alpha");
@@ -492,23 +454,6 @@ mod tests {
             props.contains_key("n"),
             "original property must be preserved"
         );
-        assert!(
-            props.contains_key("_metadata"),
-            "_metadata must be injected"
-        );
-        assert_eq!(
-            props["_metadata"]["properties"]["db"]["type"],
-            serde_json::json!("string"),
-        );
-    }
-
-    #[test]
-    fn list_tools_without_metadata_schema_injects_generic_object() {
-        let defs = vec![fake_tool("alpha")];
-        let tools = convert_tool_definitions(&defs, None);
-        let schema: &serde_json::Map<String, serde_json::Value> = tools[0].input_schema.as_ref();
-        let props = schema["properties"].as_object().unwrap();
-        assert_eq!(props["_metadata"]["type"], serde_json::json!("object"));
     }
 
     use crate::runtime::CallToolResult as ActCallToolResult;
@@ -521,7 +466,7 @@ mod tests {
                 mime_type: Some("text/plain".into()),
                 metadata: vec![],
             }),
-            runtime_types::ToolEvent::Error(runtime_types::ToolError {
+            runtime_types::ToolEvent::Error(runtime_types::Error {
                 kind: act_types::constants::ERR_INTERNAL.to_string(),
                 message: runtime_types::LocalizedString::Plain("boom mid-stream".into()),
                 metadata: vec![],

@@ -52,7 +52,6 @@ act info --tools --format json <component>
 - Local file: `./component.wasm`
 
 The output contains:
-- `metadata_schema` — required configuration keys (pass via `--metadata`)
 - `tools` — list of tool names, descriptions, and `parameters_schema`
 
 Use `--format text` for a human-readable summary instead of JSON.
@@ -66,7 +65,7 @@ act call <component> <tool-name> --args '<json>' [options]
 | Option | Purpose |
 |--------|---------|
 | `--args '<json>'` | Tool parameters (matches `parameters_schema`) |
-| `--metadata '<json>'` | Component config (matches `metadata_schema`) |
+| `--metadata '<json>'` | Per-call metadata (component-defined keys) |
 | `--allow-dir guest:host` | Grant directory access to the sandbox |
 | `--allow-fs` | Grant full filesystem access |
 
@@ -116,7 +115,7 @@ Components run sandboxed — no host filesystem access by default. If a tool fai
 --allow-fs                         # full access (use with caution)
 ```
 
-If a component works with files (paths in `metadata_schema` or tool `parameters_schema`), it needs `--allow-dir`. The guest path must match the path passed in `--metadata` or `--args`.
+If a component works with files (paths in tool `parameters_schema` or component-defined metadata keys), it needs `--allow-dir`. The guest path must match the path passed in `--args` or `--metadata`.
 
 Example: if you use path `/data/app.db`, grant access with `--allow-dir /data:./data`.
 
