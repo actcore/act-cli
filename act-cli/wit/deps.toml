@@ -1,1 +1,7 @@
-act-core = "https://github.com/actcore/act-spec/archive/main.tar.gz"
+[act-core]
+url = "https://github.com/actcore/act-spec/archive/main.tar.gz"
+prefix = "act-spec-main/wit/act-core"
+
+[act-tools]
+url = "https://github.com/actcore/act-spec/archive/main.tar.gz"
+prefix = "act-spec-main/wit/act-tools"
