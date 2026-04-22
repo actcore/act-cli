@@ -60,7 +60,18 @@ enum OutputFormat {
 
 #[derive(Parser)]
 #[command(name = "act", version, about = "ACT — Agent Component Tools CLI")]
-enum Cli {
+struct Cli {
+    /// Increase logging verbosity: -v = debug, -vv = trace
+    /// (overridden by `RUST_LOG` if set)
+    #[arg(short, long, action = clap::ArgAction::Count, global = true)]
+    verbose: u8,
+
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(clap::Subcommand)]
+enum Command {
     /// Load a .wasm component and serve it (HTTP or MCP)
     Run {
         /// Component reference (path, URL, OCI ref, or name)
@@ -141,16 +152,22 @@ enum Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Resolve log level: RUST_LOG env > config file log-level > default "act_cli=info"
+    // Log-filter priority: RUST_LOG env > -v flag > config `log-level` > default.
     let env_filter = if std::env::var("RUST_LOG").is_ok() {
         tracing_subscriber::EnvFilter::from_default_env()
+    } else if cli.verbose > 0 {
+        let level = match cli.verbose {
+            1 => "debug",
+            _ => "trace",
+        };
+        format!("act={level}").parse().expect("valid log filter")
     } else {
-        // Try loading config to get log-level (best effort — don't fail on missing config)
-        let config_path = match &cli {
-            Cli::Run { opts, .. } | Cli::Call { opts, .. } | Cli::Info { opts, .. } => {
+        // Try loading config for an override (best effort — don't fail on missing config).
+        let config_path = match &cli.command {
+            Command::Run { opts, .. } | Command::Call { opts, .. } | Command::Info { opts, .. } => {
                 opts.config.as_deref()
             }
-            Cli::Skill { .. } | Cli::Pull { .. } => None,
+            Command::Skill { .. } | Command::Pull { .. } => None,
         };
         let log_level = config::load_config(config_path)
             .ok()
@@ -167,28 +184,28 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    match cli {
-        Cli::Run {
+    match cli.command {
+        Command::Run {
             component,
             mcp,
             http,
             listen,
             opts,
         } => cmd_run(component, mcp, http, listen, opts).await,
-        Cli::Call {
+        Command::Call {
             component,
             tool,
             args,
             opts,
         } => cmd_call(component, tool, args, opts).await,
-        Cli::Info {
+        Command::Info {
             component,
             tools,
             format,
             opts,
         } => cmd_info(component, tools, format, opts).await,
-        Cli::Skill { component, output } => cmd_skill(component, output).await,
-        Cli::Pull {
+        Command::Skill { component, output } => cmd_skill(component, output).await,
+        Command::Pull {
             reference,
             output,
             output_from_ref,
@@ -287,7 +304,7 @@ async fn prepare_component(
         .map(|v| runtime::Metadata::from(v.clone()))
         .unwrap_or_default();
 
-    tracing::info!(
+    tracing::debug!(
         name = %info.std.name,
         version = %info.std.version,
         path = %component_path.display(),
@@ -302,7 +319,7 @@ async fn prepare_component(
             .await?;
     let handle = runtime::spawn_component_actor(instance, store);
 
-    tracing::info!(name = %info.std.name, version = %info.std.version, "Component ready");
+    tracing::debug!(name = %info.std.name, version = %info.std.version, "Component ready");
 
     Ok(PreparedComponent {
         info,

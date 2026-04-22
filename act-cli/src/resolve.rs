@@ -112,7 +112,7 @@ async fn cache_path(input: &str) -> Result<PathBuf> {
 /// If `fresh` is true, bypass cache and re-download.
 /// Returns the path to the .wasm file.
 pub async fn resolve(component_ref: &ComponentRef, fresh: bool) -> Result<PathBuf> {
-    tracing::info!(ref = %component_ref, "Resolving component");
+    tracing::debug!(ref = %component_ref, "Resolving component");
     match component_ref {
         ComponentRef::Local(path) => {
             anyhow::ensure!(
@@ -164,7 +164,7 @@ fn make_progress_bar(total: Option<u64>, message: &str) -> ProgressBar {
 async fn resolve_http(url: &str, fresh: bool) -> Result<PathBuf> {
     let cached = cache_path(url).await?;
     if !fresh && tokio::fs::try_exists(&cached).await.unwrap_or(false) {
-        tracing::info!(%url, path = %cached.display(), "Using cached component");
+        tracing::debug!(%url, path = %cached.display(), "Using cached component");
         return Ok(cached);
     }
 
@@ -198,7 +198,7 @@ async fn resolve_http(url: &str, fresh: bool) -> Result<PathBuf> {
 async fn resolve_oci(reference: &str, fresh: bool) -> Result<PathBuf> {
     let cached = cache_path(reference).await?;
     if !fresh && tokio::fs::try_exists(&cached).await.unwrap_or(false) {
-        tracing::info!(%reference, path = %cached.display(), "Using cached component");
+        tracing::debug!(%reference, path = %cached.display(), "Using cached component");
         return Ok(cached);
     }
 
