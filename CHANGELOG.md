@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-04-29
+
+### Breaking — WIT package layout
+- World now imports `act:tools/tool-provider@0.1.0` instead of
+  `act:core/tool-provider@0.3.0`. Components built against the old WIT
+  will not load — rebuild with `act-sdk` 0.6.x (Rust) or `act-sdk-py`
+  0.2.x.
+- `call-tool` takes flat `(name, arguments, metadata)` instead of a
+  `tool-call` record.
+- `Error` replaces `ToolError` (the type lives in `act:core/types` now
+  and is shared by non-tool providers).
+
+### Added
+- `-v` / `-vv` verbosity flag — opt-in plumbing logs (default level
+  demoted to `info`).
+
+### Changed
+- **MCP transport rewritten on rmcp 1.5**: hand-rolled `src/mcp.rs`
+  replaced with a thin `ActRmcpBridge` over the official Anthropic
+  crate. Tool discovery, calls, content mapping, and error mapping
+  go through `rmcp::model` types. Includes a stdio round-trip
+  integration test.
+- **`act info` text output restyled** with terminal colors (yellow
+  component name, dimmed version, cyan tool names, green annotations).
+  Output evaporates to plain text when stdout isn't a TTY or
+  `NO_COLOR` is set. Tool parameters show `(optional)` markers; the
+  `Option<T>` wrapper is stripped from rendered types.
+
+### Removed
+- The `--schema` flag on `act info`, the `/metadata-schema` HTTP
+  route, the `metadata_schema` field on `act info` JSON output, and
+  the rmcp bridge's metadata-schema fetch/inject path. The WIT
+  function is gone in `act:tools@0.1.0`; a discovery mechanism is
+  planned for a future minor version.
+
+### Fixed
+- `act info --tools --format text` now extracts the real inner type
+  from schemars' `Option<T>` JSON Schema instead of rendering the
+  union.
+
 ## [0.5.2] - 2026-04-22
 
 ### Changed
