@@ -5,7 +5,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::sync::{mpsc, oneshot};
 use wasmtime::component::{Component, Linker, ResourceTable, Source, StreamConsumer, StreamResult};
-use wasmtime::{Config, Engine, Store, StoreContextMut};
+use wasmtime::{AsContextMut, Config, Engine, Store, StoreContextMut};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use wasmtime_wasi_http::WasiHttpCtx;
 use wasmtime_wasi_http::p3::WasiHttpCtxView;
@@ -16,6 +16,7 @@ pub mod fs_policy;
 pub mod http_client;
 pub mod http_policy;
 pub mod network;
+pub mod sessions;
 
 // Generated bindings from WIT — fully auto-generated, no manual patching.
 #[allow(unused_mut, unused_variables, dead_code)]
@@ -283,6 +284,26 @@ pub enum ComponentRequest {
         metadata: Vec<(String, Vec<u8>)>,
         event_tx: mpsc::Sender<SseEvent>,
     },
+    /// Returns a JSON Schema string. Errors with `std:not-found` if the
+    /// component does not export `session-provider`.
+    GetOpenSessionArgsSchema {
+        metadata: Vec<(String, Vec<u8>)>,
+        reply: oneshot::Sender<Result<String, ComponentError>>,
+    },
+    /// Errors with `std:not-found` if the component does not export
+    /// `session-provider`.
+    OpenSession {
+        args: Vec<(String, Vec<u8>)>,
+        metadata: Vec<(String, Vec<u8>)>,
+        reply: oneshot::Sender<Result<sessions::Session, ComponentError>>,
+    },
+    /// Errors with `std:not-found` if the component does not export
+    /// `session-provider`. The reply carries `()` so callers can wait for
+    /// the close to complete.
+    CloseSession {
+        session_id: String,
+        reply: oneshot::Sender<Result<(), ComponentError>>,
+    },
 }
 
 /// Collected result from call-tool (stream already consumed).
@@ -300,8 +321,12 @@ pub enum SseEvent {
 /// Handle to send requests to the component actor.
 pub type ComponentHandle = mpsc::Sender<ComponentRequest>;
 
-/// Instantiate the component. Returns the ActWorld and the store.
-/// Component info is read from custom sections (no instantiation needed for that).
+/// Instantiate the component. Returns the ActWorld, an optional
+/// SessionProvider (present iff the component exports
+/// `act:sessions/session-provider`), and the store.
+///
+/// Component info is read from custom sections (no instantiation needed
+/// for that).
 pub async fn instantiate_component(
     engine: &Engine,
     component: &Component,
@@ -310,19 +335,49 @@ pub async fn instantiate_component(
     http: &crate::config::HttpConfig,
     fs: &crate::config::FsConfig,
     info: &ComponentInfo,
-) -> Result<(ActWorld, Store<HostState>)> {
+) -> Result<(
+    ActWorld,
+    Option<sessions::SessionProvider>,
+    Store<HostState>,
+)> {
     let mut store = create_store(engine, preopens, http, fs, info)?;
-    let instance = ActWorld::instantiate_async(&mut store, component, linker)
+
+    // Manual instantiation flow (replicates ActWorld::instantiate_async)
+    // so we keep access to the raw `Instance` for session-provider lookup.
+    let pre = linker
+        .instantiate_pre(component)
+        .map_err(|e| anyhow::anyhow!("failed to pre-instantiate component: {e}"))?;
+    let indices =
+        ActWorldIndices::new(&pre).map_err(|e| anyhow::anyhow!("ActWorld indices: {e}"))?;
+    let instance = pre
+        .instantiate_async(&mut store)
         .await
         .map_err(|e| anyhow::anyhow!("failed to instantiate component: {e}"))?;
+    let act_world = indices
+        .load(&mut store, &instance)
+        .map_err(|e| anyhow::anyhow!("failed to load ActWorld: {e}"))?;
 
-    Ok((instance, store))
+    let session_provider = sessions::SessionProvider::lookup(&instance, store.as_context_mut())?;
+
+    Ok((act_world, session_provider, store))
 }
 
-/// Spawn the component actor task. Owns the Store and ActWorld.
+/// Spawn the component actor task. Owns the Store, ActWorld, and the
+/// optional SessionProvider (present iff the component supports
+/// `act:sessions/session-provider`).
+///
 /// Returns a handle for sending requests.
-pub fn spawn_component_actor(instance: ActWorld, mut store: Store<HostState>) -> ComponentHandle {
+pub fn spawn_component_actor(
+    instance: ActWorld,
+    session_provider: Option<sessions::SessionProvider>,
+    mut store: Store<HostState>,
+) -> ComponentHandle {
     let (tx, mut rx) = mpsc::channel::<ComponentRequest>(32);
+
+    // Session-ids opened through this actor. Closed on actor shutdown
+    // per ACT-SESSIONS §2.5 ("host MUST call close-session for every
+    // still-open session before deinit").
+    let mut tracked_sessions: Vec<String> = Vec::new();
 
     tokio::spawn(async move {
         while let Some(request) = rx.recv().await {
@@ -477,11 +532,129 @@ pub fn spawn_component_actor(instance: ActWorld, mut store: Store<HostState>) ->
                     };
                     let _ = event_tx.send(terminal).await;
                 }
+
+                ComponentRequest::GetOpenSessionArgsSchema { metadata, reply } => {
+                    let response = match &session_provider {
+                        Some(sp) => {
+                            let sp = sp.clone();
+                            let result = store
+                                .run_concurrent(async |accessor| {
+                                    sp.get_open_session_args_schema
+                                        .call_concurrent(&accessor, (metadata,))
+                                        .await
+                                })
+                                .await;
+                            session_call_to_response(result, |(r,)| r)
+                        }
+                        None => Err(ComponentError::Internal(anyhow::anyhow!(
+                            "component does not export act:sessions/session-provider"
+                        ))),
+                    };
+                    let _ = reply.send(response);
+                }
+
+                ComponentRequest::OpenSession {
+                    args,
+                    metadata,
+                    reply,
+                } => {
+                    let response = match &session_provider {
+                        Some(sp) => {
+                            let sp = sp.clone();
+                            let result = store
+                                .run_concurrent(async |accessor| {
+                                    sp.open_session
+                                        .call_concurrent(&accessor, (args, metadata))
+                                        .await
+                                })
+                                .await;
+                            let inner = session_call_to_response(result, |(r,)| r);
+                            // Track open id so we can close on deinit.
+                            if let Ok(s) = &inner {
+                                tracked_sessions.push(s.id.clone());
+                            }
+                            inner
+                        }
+                        None => Err(ComponentError::Internal(anyhow::anyhow!(
+                            "component does not export act:sessions/session-provider"
+                        ))),
+                    };
+                    let _ = reply.send(response);
+                }
+
+                ComponentRequest::CloseSession { session_id, reply } => {
+                    let response: Result<(), ComponentError> = match &session_provider {
+                        Some(sp) => {
+                            let sp = sp.clone();
+                            let id = session_id.clone();
+                            let result = store
+                                .run_concurrent(async |accessor| {
+                                    sp.close_session.call_concurrent(&accessor, (id,)).await
+                                })
+                                .await;
+                            // Untrack regardless of error.
+                            tracked_sessions.retain(|sid| sid != &session_id);
+                            match result {
+                                Ok(Ok(())) => Ok(()),
+                                Ok(Err(e)) => Err(ComponentError::Internal(anyhow::anyhow!(
+                                    "close-session failed: {e}"
+                                ))),
+                                Err(e) => Err(ComponentError::Internal(anyhow::anyhow!(
+                                    "run_concurrent failed: {e}"
+                                ))),
+                            }
+                        }
+                        None => Err(ComponentError::Internal(anyhow::anyhow!(
+                            "component does not export act:sessions/session-provider"
+                        ))),
+                    };
+                    let _ = reply.send(response);
+                }
+            }
+        }
+
+        // Actor channel closed → component is shutting down. Close any
+        // sessions we still track, best-effort. ACT-SESSIONS §2.5.
+        if let Some(sp) = &session_provider {
+            for id in std::mem::take(&mut tracked_sessions) {
+                let sp = sp.clone();
+                let _ = store
+                    .run_concurrent(async |accessor| {
+                        sp.close_session.call_concurrent(&accessor, (id,)).await
+                    })
+                    .await;
             }
         }
     });
 
     tx
+}
+
+/// Helper for unwrapping `result<R, error>` returns from session-provider
+/// typed-func calls.
+fn session_call_to_response<R, F>(
+    raw: wasmtime::Result<
+        wasmtime::Result<(Result<R, exports::act::tools::tool_provider::Error>,)>,
+    >,
+    extract: F,
+) -> Result<R, ComponentError>
+where
+    F: FnOnce(
+        (Result<R, exports::act::tools::tool_provider::Error>,),
+    ) -> Result<R, exports::act::tools::tool_provider::Error>,
+{
+    match raw {
+        Ok(Ok(tuple)) => match extract(tuple) {
+            Ok(r) => Ok(r),
+            Err(e) => Err(ComponentError::Tool(e)),
+        },
+        Ok(Err(e)) => Err(ComponentError::Internal(anyhow::anyhow!(
+            "session-provider call failed: {e}"
+        ))),
+        Err(e) => Err(ComponentError::Internal(anyhow::anyhow!(
+            "run_concurrent failed: {e}"
+        ))),
+    }
 }
 
 /// A StreamConsumer that collects all items into a Vec and signals completion.

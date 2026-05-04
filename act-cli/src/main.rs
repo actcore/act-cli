@@ -146,6 +146,35 @@ enum Command {
         #[arg(short = 'O', conflicts_with = "output")]
         output_from_ref: bool,
     },
+    /// Manage component sessions (`act:sessions/session-provider`).
+    #[command(subcommand)]
+    Session(SessionCommand),
+}
+
+#[derive(clap::Subcommand)]
+enum SessionCommand {
+    /// Print the JSON Schema for `open-session` args.
+    OpenArgsSchema {
+        component: ComponentRef,
+        #[command(flatten)]
+        opts: CommonOpts,
+    },
+    /// Open a new session, print the session record (id + metadata) as JSON.
+    Open {
+        component: ComponentRef,
+        /// JSON object with session-args.
+        #[arg(long, default_value = "{}")]
+        args: String,
+        #[command(flatten)]
+        opts: CommonOpts,
+    },
+    /// Close a session by id.
+    Close {
+        component: ComponentRef,
+        session_id: String,
+        #[command(flatten)]
+        opts: CommonOpts,
+    },
 }
 
 #[tokio::main]
@@ -168,6 +197,11 @@ async fn main() -> Result<()> {
                 opts.config.as_deref()
             }
             Command::Skill { .. } | Command::Pull { .. } => None,
+            Command::Session(sub) => match sub {
+                SessionCommand::OpenArgsSchema { opts, .. }
+                | SessionCommand::Open { opts, .. }
+                | SessionCommand::Close { opts, .. } => opts.config.as_deref(),
+            },
         };
         let log_level = config::load_config(config_path)
             .ok()
@@ -210,6 +244,21 @@ async fn main() -> Result<()> {
             output,
             output_from_ref,
         } => cmd_pull(reference, output, output_from_ref).await,
+        Command::Session(sub) => match sub {
+            SessionCommand::OpenArgsSchema { component, opts } => {
+                cmd_session_open_args_schema(component, opts).await
+            }
+            SessionCommand::Open {
+                component,
+                args,
+                opts,
+            } => cmd_session_open(component, args, opts).await,
+            SessionCommand::Close {
+                component,
+                session_id,
+                opts,
+            } => cmd_session_close(component, session_id, opts).await,
+        },
     }
 }
 
@@ -314,10 +363,10 @@ async fn prepare_component(
     let engine = runtime::create_engine()?;
     let wasm = runtime::load_component(&engine, &component_path)?;
     let linker = runtime::create_linker(&engine)?;
-    let (instance, store) =
+    let (instance, session_provider, store) =
         runtime::instantiate_component(&engine, &wasm, &linker, &preopens, &http, &fs, &info)
             .await?;
-    let handle = runtime::spawn_component_actor(instance, store);
+    let handle = runtime::spawn_component_actor(instance, session_provider, store);
 
     tracing::debug!(name = %info.std.name, version = %info.std.version, "Component ready");
 
@@ -450,6 +499,110 @@ async fn cmd_call(
             }
             Ok(())
         }
+        Err(runtime::ComponentError::Tool(te)) => {
+            let ls = act_types::types::LocalizedString::from(&te.message);
+            anyhow::bail!("{}: {}", te.kind, ls.any_text());
+        }
+        Err(runtime::ComponentError::Internal(e)) => Err(e),
+    }
+}
+
+// ── Session subcommands ────────────────────────────────────────────────────
+
+async fn cmd_session_open_args_schema(component: ComponentRef, opts: CommonOpts) -> Result<()> {
+    let pc = prepare_component(&component, &opts).await?;
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    pc.handle
+        .send(runtime::ComponentRequest::GetOpenSessionArgsSchema {
+            metadata: pc.metadata.clone().into(),
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("component actor unavailable"))?;
+    match reply_rx.await? {
+        Ok(schema) => {
+            // Pretty-print if it's valid JSON; otherwise print as-is.
+            match serde_json::from_str::<serde_json::Value>(&schema) {
+                Ok(v) => println!("{}", serde_json::to_string_pretty(&v)?),
+                Err(_) => println!("{schema}"),
+            }
+            Ok(())
+        }
+        Err(runtime::ComponentError::Tool(te)) => {
+            let ls = act_types::types::LocalizedString::from(&te.message);
+            anyhow::bail!("{}: {}", te.kind, ls.any_text());
+        }
+        Err(runtime::ComponentError::Internal(e)) => Err(e),
+    }
+}
+
+async fn cmd_session_open(component: ComponentRef, args: String, opts: CommonOpts) -> Result<()> {
+    let pc = prepare_component(&component, &opts).await?;
+
+    // Args are a JSON object; convert to metadata-shaped (key, cbor) pairs.
+    let args_value: serde_json::Value =
+        serde_json::from_str(&args).context("invalid --args JSON")?;
+    let serde_json::Value::Object(args_obj) = args_value else {
+        anyhow::bail!("--args must be a JSON object");
+    };
+    let mut wit_args: Vec<(String, Vec<u8>)> = Vec::with_capacity(args_obj.len());
+    for (key, value) in args_obj {
+        let cbor = act_types::cbor::json_to_cbor(&value).context("encoding arg as CBOR")?;
+        wit_args.push((key, cbor));
+    }
+
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    pc.handle
+        .send(runtime::ComponentRequest::OpenSession {
+            args: wit_args,
+            metadata: pc.metadata.clone().into(),
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("component actor unavailable"))?;
+
+    match reply_rx.await? {
+        Ok(session) => {
+            // Re-emit metadata as JSON object for human consumption.
+            let metadata_json: serde_json::Map<String, serde_json::Value> = session
+                .metadata
+                .iter()
+                .filter_map(|(k, v)| {
+                    let val = act_types::cbor::cbor_to_json(v).ok()?;
+                    Some((k.clone(), val))
+                })
+                .collect();
+            let out = serde_json::json!({
+                "id": session.id,
+                "metadata": metadata_json,
+            });
+            println!("{}", serde_json::to_string_pretty(&out)?);
+            Ok(())
+        }
+        Err(runtime::ComponentError::Tool(te)) => {
+            let ls = act_types::types::LocalizedString::from(&te.message);
+            anyhow::bail!("{}: {}", te.kind, ls.any_text());
+        }
+        Err(runtime::ComponentError::Internal(e)) => Err(e),
+    }
+}
+
+async fn cmd_session_close(
+    component: ComponentRef,
+    session_id: String,
+    opts: CommonOpts,
+) -> Result<()> {
+    let pc = prepare_component(&component, &opts).await?;
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    pc.handle
+        .send(runtime::ComponentRequest::CloseSession {
+            session_id,
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("component actor unavailable"))?;
+    match reply_rx.await? {
+        Ok(()) => Ok(()),
         Err(runtime::ComponentError::Tool(te)) => {
             let ls = act_types::types::LocalizedString::from(&te.message);
             anyhow::bail!("{}: {}", te.kind, ls.any_text());
