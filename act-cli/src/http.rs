@@ -13,6 +13,7 @@ use axum::{
     },
     routing::get,
 };
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -377,6 +378,153 @@ fn query_method() -> &'static Method {
     &QUERY
 }
 
+// ── Session wire types ─────────────────────────────────────────────────────
+//
+// Defined inline (not in act-types) until we publish act-types 0.7 with
+// session support. Per ACT-SESSIONS.md §6.2.
+
+/// Request body for `POST /sessions`. `args` is a JSON object whose keys map
+/// 1:1 to `metadata` entries (CBOR-encoded host-side).
+#[derive(Debug, Deserialize)]
+struct OpenSessionRequest {
+    arguments: serde_json::Value,
+    #[serde(default)]
+    metadata: Option<serde_json::Value>,
+}
+
+/// Response body for `POST /sessions`.
+#[derive(Debug, Serialize)]
+struct OpenSessionResponse {
+    id: String,
+    metadata: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Convert `Metadata` (Vec<(String, CborBytes)>) to a JSON object, dropping
+/// entries whose CBOR can't be decoded.
+fn metadata_pairs_to_json(
+    pairs: &[(String, Vec<u8>)],
+) -> serde_json::Map<String, serde_json::Value> {
+    pairs
+        .iter()
+        .filter_map(|(k, v)| Some((k.clone(), cbor::cbor_to_json(v).ok()?)))
+        .collect()
+}
+
+// ── Session handlers ───────────────────────────────────────────────────────
+
+async fn session_open_args_schema_dispatcher(
+    state: State<Arc<AppState>>,
+    request: Request,
+) -> axum::response::Response {
+    if request.method() != Method::POST && request.method() != query_method() {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    }
+    let metadata_value = match parse_metadata_body(request).await {
+        Ok(m) => m,
+        Err(status) => return status.into_response(),
+    };
+
+    let mut meta = state.metadata.clone();
+    if let Some(value) = metadata_value {
+        meta.extend(Metadata::from(value));
+    }
+
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let request = runtime::ComponentRequest::GetOpenSessionArgsSchema {
+        metadata: meta.into(),
+        reply: reply_tx,
+    };
+
+    if state.component.send(request).await.is_err() {
+        return internal_error_response("component actor unavailable");
+    }
+
+    match reply_rx.await {
+        Ok(Ok(schema)) => match serde_json::from_str::<serde_json::Value>(&schema) {
+            Ok(v) => Json(v).into_response(),
+            Err(_) => internal_error_response("component returned non-JSON schema"),
+        },
+        Ok(Err(e)) => component_error_response(e),
+        Err(_) => internal_error_response("component actor dropped reply"),
+    }
+}
+
+async fn session_open(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<OpenSessionRequest>,
+) -> axum::response::Response {
+    let serde_json::Value::Object(args_obj) = body.arguments else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(act_http::ErrorResponse {
+                error: act_http::ToolError {
+                    kind: ERR_INVALID_ARGS.to_string(),
+                    message: "arguments must be a JSON object".to_string(),
+                    metadata: None,
+                },
+            }),
+        )
+            .into_response();
+    };
+
+    let mut wit_args: Vec<(String, Vec<u8>)> = Vec::with_capacity(args_obj.len());
+    for (key, value) in args_obj {
+        match cbor::json_to_cbor(&value) {
+            Ok(bytes) => wit_args.push((key, bytes)),
+            Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+        }
+    }
+
+    let mut meta = state.metadata.clone();
+    if let Some(value) = body.metadata {
+        meta.extend(Metadata::from(value));
+    }
+
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let request = runtime::ComponentRequest::OpenSession {
+        args: wit_args,
+        metadata: meta.into(),
+        reply: reply_tx,
+    };
+
+    if state.component.send(request).await.is_err() {
+        return internal_error_response("component actor unavailable");
+    }
+
+    match reply_rx.await {
+        Ok(Ok(session)) => {
+            let resp = OpenSessionResponse {
+                id: session.id,
+                metadata: metadata_pairs_to_json(&session.metadata),
+            };
+            (StatusCode::CREATED, Json(resp)).into_response()
+        }
+        Ok(Err(e)) => component_error_response(e),
+        Err(_) => internal_error_response("component actor dropped reply"),
+    }
+}
+
+async fn session_close(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> axum::response::Response {
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let request = runtime::ComponentRequest::CloseSession {
+        session_id,
+        reply: reply_tx,
+    };
+
+    if state.component.send(request).await.is_err() {
+        return internal_error_response("component actor unavailable");
+    }
+
+    match reply_rx.await {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(e)) => component_error_response(e),
+        Err(_) => internal_error_response("component actor dropped reply"),
+    }
+}
+
 // ── Protocol version middleware ──
 
 async fn protocol_version_layer(request: Request, next: Next) -> axum::response::Response {
@@ -428,6 +576,12 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/info", get(get_info))
         .route("/tools", axum::routing::any(tools_dispatcher))
         .route("/tools/{name}", axum::routing::any(tool_call_dispatcher))
+        .route(
+            "/sessions/open-args-schema",
+            axum::routing::any(session_open_args_schema_dispatcher),
+        )
+        .route("/sessions", axum::routing::post(session_open))
+        .route("/sessions/{id}", axum::routing::delete(session_close))
         .layer(middleware::from_fn(protocol_version_layer))
         .with_state(state)
 }
