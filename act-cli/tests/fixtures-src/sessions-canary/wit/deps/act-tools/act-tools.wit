@@ -1,0 +1,97 @@
+/// Tool-provider interface — named, callable operations.
+///
+/// The most common ACT surface: simple tool components (crypto, time,
+/// encoding, random, filesystem, sqlite, http-client, …) export only
+/// this interface. A component MAY export `tool-provider` together with
+/// other capability interfaces (`event-provider`, `resource-provider`,
+/// …) or in isolation; capability packages are independent and opt-in.
+///
+/// This package defines the tool data model and the `tool-provider`
+/// interface (list-tools, call-tool). It depends on `act:core` for the
+/// cross-cutting types (`cbor`, `metadata`, `error`, `localized-string`).
+///
+/// Component-level metadata (name, version, description, capabilities)
+/// is stored in the `act:component` WASM custom section (CBOR-encoded)
+/// — not as an exported function.
+package act:tools@0.1.0;
+
+interface tool-provider {
+  use act:core/types@0.4.0.{cbor, localized-string, metadata, error};
+
+  /// Full definition of a tool, returned by list-tools.
+  record tool-definition {
+    name: string,
+    description: localized-string,
+    /// Parameter schema as a JSON Schema string (default).
+    /// Hosts MAY also accept JSON Structure (json-structure.org),
+    /// detected via the `$schema` field.
+    parameters-schema: string,
+    /// Well-known keys: std:read-only, std:idempotent, std:destructive,
+    /// std:usage-hints, std:anti-usage-hints, std:examples, std:tags, std:timeout-ms.
+    metadata: metadata,
+  }
+
+  /// A single piece of content in a tool's result stream.
+  record content-part {
+    /// Payload bytes. Interpretation depends on `mime-type`:
+    /// - `text/*` — raw UTF-8 text
+    /// - `application/cbor` — CBOR-encoded structured data
+    /// - `application/json` — JSON
+    /// - `image/*` — binary image data
+    /// - absent or other — opaque bytes (application/octet-stream)
+    data: list<u8>,
+    /// MIME type of the data. If absent, data is treated as opaque bytes.
+    mime-type: option<string>,
+    metadata: metadata,
+  }
+
+  /// A single event in a tool's result.
+  /// A `tool-event::error` is terminal — no further events follow.
+  variant tool-event {
+    content(content-part),
+    error(error),
+  }
+
+  /// The result of a tool call.
+  ///
+  /// Two shapes exist to accommodate different guest capabilities; they are
+  /// semantically equivalent. Both carry an ordered sequence of `tool-event`s
+  /// with identical terminal-error semantics (`tool-event::error` is terminal).
+  /// Hosts, intermediaries, and callers MUST treat both variants as equivalent
+  /// event sequences.
+  ///
+  /// - `immediate` — the complete event list is materialized when the tool
+  ///   returns. Natural for sync guest bodies and languages without an async
+  ///   runtime. An early failure is encoded as a single `tool-event::error`.
+  /// - `streaming` — events are emitted to a stream as they are produced.
+  ///   Natural for incremental producers and I/O-bound bridges.
+  ///
+  /// Intermediaries (bridges, adapters) MAY freely convert between variants.
+  variant tool-result {
+    immediate(list<tool-event>),
+    streaming(stream<tool-event>),
+  }
+
+  /// Response from list-tools.
+  record list-tools-response {
+    metadata: metadata,
+    tools: list<tool-definition>,
+  }
+
+  /// Returns the list of tools available for the given metadata.
+  /// Async because some components produce dynamic catalogs.
+  list-tools: async func(metadata: metadata) -> result<list-tools-response, error>;
+
+  /// Invokes a tool by name.
+  ///
+  /// - `name` — tool name, as returned by `list-tools`.
+  /// - `arguments` — deterministically Encoded CBOR arguments (RFC 8949 §4.2),
+  ///   validated by the host against the tool's `parameters-schema` before
+  ///   being passed to the component.
+  /// - `metadata` — per-call metadata.
+  ///
+  /// Returns either `immediate` (bounded, sync-friendly) or `streaming`
+  /// (unbounded or incremental). Both carry `tool-event`s with the same
+  /// semantics: `tool-event::error` is terminal.
+  call-tool: async func(name: string, arguments: cbor, metadata: metadata) -> tool-result;
+}

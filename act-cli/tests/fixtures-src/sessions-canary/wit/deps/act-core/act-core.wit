@@ -1,0 +1,42 @@
+/// Cross-cutting types used by every other ACT package.
+///
+/// `act:core` is the foundation layer — it carries the definitions every ACT
+/// interface needs (metadata, errors, localized strings) and nothing else.
+/// Tool dispatch lives in `act:tools`, events in `act:events`, resources in
+/// `act:resources`.
+package act:core@0.4.0;
+
+interface types {
+
+  /// A localizable text value.
+  ///
+  /// - `plain` — an opaque UTF-8 string. If `std.default-language` is declared
+  ///   in the `act:component` section, the string is assumed to be in that language.
+  ///   Otherwise, the language is undefined.
+  /// - `localized` — a list of (BCP 47 language-tag, text) pairs.
+  ///   If `std.default-language` is declared, SHOULD include an entry for it.
+  variant localized-string {
+    plain(string),
+    localized(list<tuple<string, string>>),
+  }
+
+  /// CBOR-encoded byte string. Components produce valid CBOR; the host
+  /// canonicalizes to dCBOR (RFC 8949 §4.2) when passing data to external
+  /// consumers. Used wherever a field carries an opaque CBOR payload —
+  /// metadata values, tool-call arguments, event data, etc.
+  type cbor = list<u8>;
+
+  /// Key-value metadata. Keys are namespaced strings, values are CBOR-encoded.
+  /// Well-known keys use the `std:` prefix (e.g. "std:read-only", "std:timeout-ms").
+  /// Third-party keys use their own namespace (e.g. "acme:priority").
+  type metadata = list<tuple<string, cbor>>;
+
+  /// Structured error returned by interfaces in `act:core`'s ecosystem.
+  /// Well-known kind values: std:not-found, std:invalid-args, std:timeout,
+  /// std:capability-denied, std:internal. Custom kinds use namespaced strings.
+  record error {
+    kind: string,
+    message: localized-string,
+    metadata: metadata,
+  }
+}

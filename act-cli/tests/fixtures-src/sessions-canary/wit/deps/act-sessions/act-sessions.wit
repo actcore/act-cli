@@ -1,0 +1,84 @@
+/// Session-provider interface — component-side state container with
+/// an explicit lifecycle.
+///
+/// Components that maintain stateful resources tied to a logical
+/// "session" (database connections, MCP/OpenAPI client sessions,
+/// REPL processes, SSH connections, browser tabs, …) export
+/// `session-provider`. Hosts open sessions on demand, address them
+/// by id in subsequent capability calls (`call-tool`, `subscribe`,
+/// `get-resource`) via the `std:session-id` metadata key, and close
+/// them before component deinit.
+///
+/// `act:sessions` is opt-in. Stateless components do not export it.
+/// The package depends on `act:core` for the cross-cutting types
+/// (`metadata`, `error`).
+package act:sessions@0.1.0;
+
+interface session-provider {
+  use act:core/types@0.4.0.{metadata, error};
+
+  /// Component-side state container.
+  ///
+  /// Hosts and intermediaries (bridges, toolservers, harnesses) MAY
+  /// rewrite `id` when forwarding to agents — typically a 1-to-1
+  /// NAT-style mapping. Components MUST treat their own session-id
+  /// values as opaque to the outside world; the id an agent sees
+  /// may differ from what the component issued.
+  record session {
+    /// Component-chosen identifier. Format opaque to host. Components
+    /// SHOULD use globally unique values (e.g. UUIDs) to avoid id
+    /// reuse across sessions.
+    id: string,
+    /// Session-scoped metadata. Hints to the host. Well-known keys
+    /// are registered in `ACT-CONSTANTS.md`.
+    metadata: metadata,
+  }
+
+  /// Returns a JSON Schema (type "object") for valid `args` to
+  /// `open-session`.
+  ///
+  /// `metadata` carries cross-cutting context. Well-known keys:
+  /// - `std:session-id` — when present, returns the schema for
+  ///   opening a *child* session through that parent. Used by
+  ///   bridge components for nested-session discovery.
+  /// - host-managed keys (`std:traceparent`, `std:agent-id`, …)
+  ///   are propagated but typically ignored by the component.
+  ///
+  /// Components MAY perform I/O at any time (notably bridges
+  /// fetching upstream schemas). Hosts SHOULD treat this call as
+  /// potentially slow.
+  get-open-session-args-schema: async func(metadata: metadata)
+    -> result<string, error>;
+
+  /// Open a new session.
+  ///
+  /// `args` is component-defined session configuration: connection
+  /// parameters, credentials (well-known auth keys: `std:bearer-token`,
+  /// `std:api-key`, `std:username`, `std:password`), and any
+  /// component-specific keys. `args` MUST be valid against the
+  /// schema returned by `get-open-session-args-schema` for the same
+  /// `metadata` value.
+  ///
+  /// `metadata` carries cross-cutting context — `std:session-id`
+  /// of a parent session for chaining (bridges), `std:traceparent`,
+  /// `std:agent-id`, and so on.
+  ///
+  /// Errors at open are returned as `result::err(error)` — auth
+  /// failure, capacity exceeded, malformed args.
+  open-session: async func(args: metadata, metadata: metadata)
+    -> result<session, error>;
+
+  /// Polite shutdown signal. Best-effort, synchronous, swallows
+  /// errors by design.
+  ///
+  /// Hosts MUST call `close-session` for every session they opened,
+  /// before component deinit. Components MAY perform asynchronous
+  /// cleanup internally (spawn-and-forget) but MUST NOT block the
+  /// host. Components MUST tolerate sessions disappearing without
+  /// `close-session` (host crash, transport drop) — `close-session`
+  /// is advisory.
+  ///
+  /// The function returns no result; cleanup errors are not
+  /// signalled to the host.
+  close-session: func(session-id: string);
+}

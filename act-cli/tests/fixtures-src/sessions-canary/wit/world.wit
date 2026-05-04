@@ -1,0 +1,6 @@
+package component:impl;
+
+world component-world {
+  export act:tools/tool-provider@0.1.0;
+  export act:sessions/session-provider@0.1.0;
+}
