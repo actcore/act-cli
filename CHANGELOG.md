@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-05-07
+
+### Removed
+- `act session open` and `act session close` CLI subcommands. They
+  inherently can't deliver the primary use case for sessions
+  (component-side ephemeral state) — each invocation is a one-shot
+  process whose wasm instance dies on exit, so a session opened in
+  one `act session open` is unusable from a subsequent `act call`.
+  For real session work, use `act run --http` or `act run --mcp`,
+  where the host process holds the wasm instance and the session
+  lives as long as the host. `act session open-args-schema` stays
+  — it's a useful smoke test that doesn't depend on persistent state.
+
 ## [0.7.0] - 2026-05-07
 
 Adds first-class support for `act:sessions/session-provider`. Stateful
