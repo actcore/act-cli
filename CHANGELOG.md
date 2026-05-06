@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-05-07
+
+Adds first-class support for `act:sessions/session-provider`. Stateful
+components (database connections, browser automation, REPLs, the new
+`act-http-bridge` / `mcp-bridge` / `openapi-bridge`) can now expose
+typed open-session args, and agents address per-session state via
+`std:session-id` metadata.
+
+### Added
+
+- `act session open-args-schema | open | close` CLI subcommands.
+- ACT-HTTP `/sessions/open-args-schema`, `POST /sessions`, and
+  `DELETE /sessions/{id}` endpoints (per ACT-SESSIONS §6.2). Mapped
+  to `std:session-not-found → 404` via the bumped act-types.
+- MCP transport: synthetic `open_session` / `close_session` tools
+  in `tools/list` for components that export session-provider, with
+  `_meta.std:session-op` annotations (per ACT-SESSIONS §6.1).
+- MCP `_meta.std:session-id` (and any other request-level meta keys)
+  is now forwarded into the WIT call metadata so components see the
+  agent's session-id.
+- Host runtime tracks open session-ids per actor and auto-closes
+  them on shutdown (ACT-SESSIONS §2.5).
+- `tests/fixtures/sessions-canary.wasm` — hand-rolled canary
+  exercising session-provider for host-side integration tests.
+
+### Changed
+
+- Bumped `act-types` 0.5 → 0.7. Drops the inline session HTTP wire
+  types from `src/http.rs` in favour of the canonical
+  `act_types::http::OpenSessionRequest` / `OpenSessionResponse`.
+
 ## [0.6.0] - 2026-04-29
 
 ### Breaking — WIT package layout
