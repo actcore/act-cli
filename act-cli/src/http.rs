@@ -13,7 +13,6 @@ use axum::{
     },
     routing::get,
 };
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -378,26 +377,10 @@ fn query_method() -> &'static Method {
     &QUERY
 }
 
-// ── Session wire types ─────────────────────────────────────────────────────
+// ── Session helpers ────────────────────────────────────────────────────────
 //
-// Defined inline (not in act-types) until we publish act-types 0.7 with
-// session support. Per ACT-SESSIONS.md §6.2.
-
-/// Request body for `POST /sessions`. `args` is a JSON object whose keys map
-/// 1:1 to `metadata` entries (CBOR-encoded host-side).
-#[derive(Debug, Deserialize)]
-struct OpenSessionRequest {
-    arguments: serde_json::Value,
-    #[serde(default)]
-    metadata: Option<serde_json::Value>,
-}
-
-/// Response body for `POST /sessions`.
-#[derive(Debug, Serialize)]
-struct OpenSessionResponse {
-    id: String,
-    metadata: serde_json::Map<String, serde_json::Value>,
-}
+// Wire types live in `act_types::http` (OpenSessionRequest, OpenSessionResponse).
+// Per ACT-SESSIONS.md §6.2.
 
 /// Convert `Metadata` (Vec<(String, CborBytes)>) to a JSON object, dropping
 /// entries whose CBOR can't be decoded.
@@ -451,7 +434,7 @@ async fn session_open_args_schema_dispatcher(
 
 async fn session_open(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<OpenSessionRequest>,
+    Json(body): Json<act_http::OpenSessionRequest>,
 ) -> axum::response::Response {
     let serde_json::Value::Object(args_obj) = body.arguments else {
         return (
@@ -493,7 +476,7 @@ async fn session_open(
 
     match reply_rx.await {
         Ok(Ok(session)) => {
-            let resp = OpenSessionResponse {
+            let resp = act_http::OpenSessionResponse {
                 id: session.id,
                 metadata: metadata_pairs_to_json(&session.metadata),
             };

@@ -1,6 +1,8 @@
 use crate::runtime;
 use act_types::cbor;
-use act_types::constants::{ERR_CAPABILITY_DENIED, ERR_INVALID_ARGS, ERR_NOT_FOUND};
+use act_types::constants::{
+    ERR_CAPABILITY_DENIED, ERR_INVALID_ARGS, ERR_NOT_FOUND, META_SESSION_OP,
+};
 use rmcp::ErrorData;
 use rmcp::model::{Content, ErrorCode, Tool};
 use serde_json::Value;
@@ -11,10 +13,6 @@ use std::sync::Arc;
 /// Per ACT-SESSIONS §6.1 these names are reserved.
 const VIRTUAL_OPEN_SESSION: &str = "open_session";
 const VIRTUAL_CLOSE_SESSION: &str = "close_session";
-
-/// `_meta.std:session-op` advertised on the synthetic tools per ACT-CONSTANTS.
-/// Will move into `act_types::constants::META_SESSION_OP` once act-types 0.7 ships.
-const META_SESSION_OP: &str = "std:session-op";
 
 pub struct ActRmcpBridge {
     pub handle: runtime::ComponentHandle,
