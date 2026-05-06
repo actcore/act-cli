@@ -7,10 +7,23 @@ use serde_json::Value;
 use std::borrow::Cow;
 use std::sync::Arc;
 
+/// Synthetic MCP tool name that maps to `session-provider.open-session`.
+/// Per ACT-SESSIONS §6.1 these names are reserved.
+const VIRTUAL_OPEN_SESSION: &str = "open_session";
+const VIRTUAL_CLOSE_SESSION: &str = "close_session";
+
+/// `_meta.std:session-op` advertised on the synthetic tools per ACT-CONSTANTS.
+/// Will move into `act_types::constants::META_SESSION_OP` once act-types 0.7 ships.
+const META_SESSION_OP: &str = "std:session-op";
+
 pub struct ActRmcpBridge {
     pub handle: runtime::ComponentHandle,
     pub info: runtime::ComponentInfo,
     pub metadata: runtime::Metadata,
+    /// Whether the underlying component exports
+    /// `act:sessions/session-provider`. Controls synthesis of virtual
+    /// `open_session`/`close_session` tools and routing of those calls.
+    pub has_sessions: bool,
 }
 
 fn map_content_part(part: &runtime::exports::act::tools::tool_provider::ContentPart) -> Content {
@@ -146,11 +159,13 @@ pub async fn run_stdio(
     info: runtime::ComponentInfo,
     handle: runtime::ComponentHandle,
     metadata: runtime::Metadata,
+    has_sessions: bool,
 ) -> anyhow::Result<()> {
     let bridge = ActRmcpBridge {
         handle,
         info,
         metadata,
+        has_sessions,
     };
 
     let service = rmcp::serve_server(bridge, (tokio::io::stdin(), tokio::io::stdout()))
@@ -194,7 +209,14 @@ impl ActRmcpBridge {
             })?
             .map_err(component_error_to_mcp)?;
 
-        let tools = convert_tool_definitions(&list.tools);
+        let mut tools = convert_tool_definitions(&list.tools);
+
+        if self.has_sessions {
+            let open_schema = self.fetch_open_session_args_schema().await?;
+            tools.push(virtual_open_session_tool(open_schema));
+            tools.push(virtual_close_session_tool());
+        }
+
         Ok(rmcp::model::ListToolsResult {
             tools,
             next_cursor: None,
@@ -202,23 +224,83 @@ impl ActRmcpBridge {
         })
     }
 
+    /// Ask the component for its `get-open-session-args-schema` JSON Schema.
+    /// Errors bubble up as MCP errors so the agent sees them at list_tools time.
+    async fn fetch_open_session_args_schema(&self) -> Result<Value, rmcp::ErrorData> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let req = runtime::ComponentRequest::GetOpenSessionArgsSchema {
+            metadata: self.metadata.clone().into(),
+            reply: reply_tx,
+        };
+        self.handle.send(req).await.map_err(|_| {
+            rmcp::ErrorData::new(
+                rmcp::model::ErrorCode::INTERNAL_ERROR,
+                "component actor unavailable",
+                None,
+            )
+        })?;
+        let schema = reply_rx
+            .await
+            .map_err(|_| {
+                rmcp::ErrorData::new(
+                    rmcp::model::ErrorCode::INTERNAL_ERROR,
+                    "component actor dropped reply",
+                    None,
+                )
+            })?
+            .map_err(component_error_to_mcp)?;
+        serde_json::from_str::<Value>(&schema).map_err(|e| {
+            rmcp::ErrorData::new(
+                rmcp::model::ErrorCode::INTERNAL_ERROR,
+                format!("component returned non-JSON schema: {e}"),
+                None,
+            )
+        })
+    }
+
     async fn call_tool_impl(
         &self,
         request: rmcp::model::CallToolRequestParams,
+        ctx_meta: &rmcp::model::Meta,
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
         use rmcp::model::ErrorCode;
 
-        let mut arguments = request
+        // Merge protocol-level `_meta` (per MCP SEP-1319) into the WIT
+        // metadata before dispatching. Hosts MUST forward `std:session-id`
+        // here per ACT-SESSIONS §6.1.
+        //
+        // rmcp moves `_meta` off params into `RequestContext::meta` during
+        // request dispatch (see service.rs `std::mem::swap`), so that's
+        // where we read it from — not `params.meta` (always None) and not
+        // `extensions` (which holds non-meta extension values).
+        let mut call_metadata = self.metadata.clone();
+        if !ctx_meta.0.is_empty() {
+            call_metadata.extend(act_types::types::Metadata::from(Value::Object(
+                ctx_meta.0.clone(),
+            )));
+        }
+
+        // Route reserved virtual tools (`open_session` / `close_session`).
+        if self.has_sessions {
+            match request.name.as_ref() {
+                VIRTUAL_OPEN_SESSION => {
+                    return self
+                        .virtual_open_session(request.arguments, call_metadata)
+                        .await;
+                }
+                VIRTUAL_CLOSE_SESSION => {
+                    return self
+                        .virtual_close_session(request.arguments, call_metadata)
+                        .await;
+                }
+                _ => {}
+            }
+        }
+
+        let arguments = request
             .arguments
             .map(Value::Object)
             .unwrap_or_else(|| serde_json::json!({}));
-
-        let mut call_metadata = self.metadata.clone();
-        if let Some(obj) = arguments.as_object_mut()
-            && let Some(Value::Object(extra)) = obj.remove("_metadata")
-        {
-            call_metadata.extend(act_types::types::Metadata::from(Value::Object(extra)));
-        }
 
         let cbor_args = act_types::cbor::json_to_cbor(&arguments).map_err(|_| {
             rmcp::ErrorData::new(ErrorCode::INVALID_PARAMS, "invalid arguments", None)
@@ -253,6 +335,160 @@ impl ActRmcpBridge {
 
         Ok(fold_events_to_result(result))
     }
+
+    async fn virtual_open_session(
+        &self,
+        arguments: Option<rmcp::model::JsonObject>,
+        metadata: runtime::Metadata,
+    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        let args_obj = arguments.unwrap_or_default();
+        let mut wit_args: Vec<(String, Vec<u8>)> = Vec::with_capacity(args_obj.len());
+        for (key, value) in args_obj {
+            let cbor_bytes = cbor::json_to_cbor(&value).map_err(|_| {
+                rmcp::ErrorData::new(
+                    rmcp::model::ErrorCode::INVALID_PARAMS,
+                    format!("encoding `{key}` as CBOR failed"),
+                    None,
+                )
+            })?;
+            wit_args.push((key, cbor_bytes));
+        }
+
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let req = runtime::ComponentRequest::OpenSession {
+            args: wit_args,
+            metadata: metadata.into(),
+            reply: reply_tx,
+        };
+        self.handle.send(req).await.map_err(|_| {
+            rmcp::ErrorData::new(
+                rmcp::model::ErrorCode::INTERNAL_ERROR,
+                "component actor unavailable",
+                None,
+            )
+        })?;
+        let session = reply_rx
+            .await
+            .map_err(|_| {
+                rmcp::ErrorData::new(
+                    rmcp::model::ErrorCode::INTERNAL_ERROR,
+                    "component actor dropped reply",
+                    None,
+                )
+            })?
+            .map_err(component_error_to_mcp)?;
+
+        let metadata_json: serde_json::Map<String, Value> = session
+            .metadata
+            .iter()
+            .filter_map(|(k, v)| Some((k.clone(), cbor::cbor_to_json(v).ok()?)))
+            .collect();
+        let payload = serde_json::json!({
+            "id": session.id,
+            "metadata": metadata_json,
+        });
+        let json_text = serde_json::to_string(&payload).unwrap_or_default();
+
+        Ok(rmcp::model::CallToolResult::success(vec![Content::text(
+            json_text,
+        )]))
+    }
+
+    async fn virtual_close_session(
+        &self,
+        arguments: Option<rmcp::model::JsonObject>,
+        _metadata: runtime::Metadata,
+    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        let session_id = arguments
+            .as_ref()
+            .and_then(|obj| obj.get("session_id"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                rmcp::ErrorData::new(
+                    rmcp::model::ErrorCode::INVALID_PARAMS,
+                    "close_session requires `session_id` (string)",
+                    None,
+                )
+            })?
+            .to_string();
+
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let req = runtime::ComponentRequest::CloseSession {
+            session_id,
+            reply: reply_tx,
+        };
+        self.handle.send(req).await.map_err(|_| {
+            rmcp::ErrorData::new(
+                rmcp::model::ErrorCode::INTERNAL_ERROR,
+                "component actor unavailable",
+                None,
+            )
+        })?;
+        reply_rx
+            .await
+            .map_err(|_| {
+                rmcp::ErrorData::new(
+                    rmcp::model::ErrorCode::INTERNAL_ERROR,
+                    "component actor dropped reply",
+                    None,
+                )
+            })?
+            .map_err(component_error_to_mcp)?;
+        Ok(rmcp::model::CallToolResult::success(vec![]))
+    }
+}
+
+/// Build the synthetic `open_session` MCP tool. The args schema comes from
+/// `get-open-session-args-schema`. `_meta.std:session-op = "open"`
+/// per ACT-CONSTANTS so agents can recognize this is a session-lifecycle
+/// tool, not an ordinary capability.
+fn virtual_open_session_tool(args_schema: Value) -> Tool {
+    let mut schema_map: serde_json::Map<String, Value> =
+        args_schema.as_object().cloned().unwrap_or_default();
+    schema_map
+        .entry("type".to_string())
+        .or_insert(Value::String("object".into()));
+
+    let mut tool = Tool::new(
+        Cow::Borrowed(VIRTUAL_OPEN_SESSION),
+        Cow::Borrowed("Open a new session against this component."),
+        Arc::new(schema_map),
+    );
+    tool = tool.with_meta(session_op_meta("open"));
+    tool
+}
+
+/// Build the synthetic `close_session` MCP tool. Args is fixed:
+/// `{ session_id: string }`. `_meta.std:session-op = "close"`.
+fn virtual_close_session_tool() -> Tool {
+    let schema_map: serde_json::Map<String, Value> = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "session_id": {
+                "type": "string",
+                "description": "Session-id returned by `open_session`."
+            }
+        },
+        "required": ["session_id"],
+        "additionalProperties": false,
+    })
+    .as_object()
+    .cloned()
+    .unwrap_or_default();
+
+    let mut tool = Tool::new(
+        Cow::Borrowed(VIRTUAL_CLOSE_SESSION),
+        Cow::Borrowed("Close a session previously opened via `open_session`."),
+        Arc::new(schema_map),
+    );
+    tool = tool.with_meta(session_op_meta("close"));
+    tool
+}
+
+fn session_op_meta(op: &'static str) -> rmcp::model::Meta {
+    let mut map = serde_json::Map::new();
+    map.insert(META_SESSION_OP.to_string(), Value::String(op.to_string()));
+    rmcp::model::Meta(map)
 }
 
 impl rmcp::ServerHandler for ActRmcpBridge {
@@ -278,14 +514,12 @@ impl rmcp::ServerHandler for ActRmcpBridge {
         self.list_tools_impl()
     }
 
-    fn call_tool(
+    async fn call_tool(
         &self,
         request: rmcp::model::CallToolRequestParams,
-        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> impl std::future::Future<Output = Result<rmcp::model::CallToolResult, rmcp::ErrorData>>
-    + Send
-    + '_ {
-        self.call_tool_impl(request)
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        self.call_tool_impl(request, &context.meta).await
     }
 }
 
@@ -378,6 +612,7 @@ mod tests {
             handle: fake_handle(),
             info: fake_info(),
             metadata: runtime::Metadata::default(),
+            has_sessions: false,
         };
         let info = rmcp::ServerHandler::get_info(&bridge);
         assert_eq!(info.server_info.name, "example");

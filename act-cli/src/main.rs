@@ -327,6 +327,8 @@ struct PreparedComponent {
     info: runtime::ComponentInfo,
     handle: runtime::ComponentHandle,
     metadata: runtime::Metadata,
+    /// Whether the component exports `act:sessions/session-provider`.
+    has_sessions: bool,
 }
 
 /// Resolve, load, and instantiate a component. Returns a running actor handle.
@@ -366,6 +368,7 @@ async fn prepare_component(
     let (instance, session_provider, store) =
         runtime::instantiate_component(&engine, &wasm, &linker, &preopens, &http, &fs, &info)
             .await?;
+    let has_sessions = session_provider.is_some();
     let handle = runtime::spawn_component_actor(instance, session_provider, store);
 
     tracing::debug!(name = %info.std.name, version = %info.std.version, "Component ready");
@@ -374,6 +377,7 @@ async fn prepare_component(
         info,
         handle,
         metadata,
+        has_sessions,
     })
 }
 
@@ -405,7 +409,7 @@ async fn cmd_run(
 
     if mcp {
         let pc = prepare_component(&component, &opts).await?;
-        return rmcp_bridge::run_stdio(pc.info, pc.handle, pc.metadata).await;
+        return rmcp_bridge::run_stdio(pc.info, pc.handle, pc.metadata, pc.has_sessions).await;
     }
 
     if http || listen.is_some() {
