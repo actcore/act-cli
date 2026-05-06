@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] - 2026-05-07
+
+### Added
+- `act call --session-args '{...}'`. When set, the host opens a
+  session against the component before the call (`open-session(args,
+  metadata)`), injects the returned id as `std:session-id` metadata
+  for the tool call, prints the result, and closes the session
+  before exit. The whole open / call / close cycle runs in one
+  process, so the wasm instance stays alive for the full sequence.
+  This makes session-aware components (bridges, stateful components)
+  usable as ordinary one-shot CLI invocations:
+
+  ```bash
+  act call ghcr.io/actpkg/openapi-bridge:0.2.0 find_pets_by_status \
+    --args '{"status":"sold"}' \
+    --session-args '{"spec_url":"https://petstore3.swagger.io/api/v3/openapi.json"}' \
+    --http-policy open
+  ```
+
+  If the component doesn't export `act:sessions/session-provider`,
+  using `--session-args` is a clear error rather than a silent no-op.
+
 ## [0.7.1] - 2026-05-07
 
 ### Removed

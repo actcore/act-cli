@@ -104,6 +104,16 @@ enum Command {
         #[arg(long, default_value = "{}")]
         args: String,
 
+        /// Session args as a JSON object. When set, the host opens a
+        /// session before the call (`open-session(args, metadata)`),
+        /// injects the returned id as `std:session-id` metadata for
+        /// the tool call, and closes the session before exit. Use
+        /// this when the component requires a session — bridges,
+        /// stateful components — and you want the whole open/call/
+        /// close cycle in one process.
+        #[arg(long)]
+        session_args: Option<String>,
+
         #[command(flatten)]
         opts: CommonOpts,
     },
@@ -217,8 +227,9 @@ async fn main() -> Result<()> {
             component,
             tool,
             args,
+            session_args,
             opts,
-        } => cmd_call(component, tool, args, opts).await,
+        } => cmd_call(component, tool, args, session_args, opts).await,
         Command::Info {
             component,
             tools,
@@ -419,6 +430,7 @@ async fn cmd_call(
     component: ComponentRef,
     tool: String,
     args: String,
+    session_args: Option<String>,
     opts: CommonOpts,
 ) -> Result<()> {
     let pc = prepare_component(&component, &opts).await?;
@@ -427,64 +439,154 @@ async fn cmd_call(
         serde_json::from_str(&args).context("invalid --args JSON")?;
     let cbor_args = cbor::json_to_cbor(&arguments).context("encoding args as CBOR")?;
 
+    // If --session-args is set, open a session before the call and
+    // close it on the way out. session-id is injected into the call's
+    // metadata under `std:session-id`.
+    let session_id = match session_args {
+        Some(json) => {
+            if !pc.has_sessions {
+                anyhow::bail!(
+                    "--session-args was set, but the component does not export \
+                     act:sessions/session-provider"
+                );
+            }
+            Some(open_session_for_call(&pc, &json).await?)
+        }
+        None => None,
+    };
+
+    let mut metadata = pc.metadata.clone();
+    if let Some(ref id) = session_id {
+        metadata.insert(
+            act_types::constants::META_SESSION_ID,
+            serde_json::Value::String(id.clone()),
+        );
+    }
+
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     let request = runtime::ComponentRequest::CallTool {
         name: tool,
         arguments: cbor_args,
-        metadata: pc.metadata.clone().into(),
+        metadata: metadata.into(),
         reply: reply_tx,
     };
 
+    let send_result = pc.handle.send(request).await;
+    let call_result = match send_result {
+        Err(_) => Err(anyhow::anyhow!("component actor unavailable")),
+        Ok(()) => match reply_rx.await {
+            Err(_) => Err(anyhow::anyhow!("component actor dropped reply")),
+            Ok(r) => Ok(r),
+        },
+    };
+
+    // Best-effort close before returning the call result, so the
+    // session is closed even if the call errored.
+    if let Some(id) = session_id {
+        close_session_best_effort(&pc, id).await;
+    }
+
+    let result = call_result?.map_err(|e| match e {
+        runtime::ComponentError::Tool(te) => {
+            let ls = act_types::types::LocalizedString::from(&te.message);
+            anyhow::anyhow!("{}: {}", te.kind, ls.any_text())
+        }
+        runtime::ComponentError::Internal(e) => e,
+    })?;
+
+    for event in &result.events {
+        match event {
+            runtime::exports::act::tools::tool_provider::ToolEvent::Content(part) => {
+                let mime = part.mime_type.as_deref().unwrap_or("application/cbor");
+                if mime.starts_with("text/")
+                    || mime == "application/json"
+                    || mime == "application/xml"
+                {
+                    let text = String::from_utf8_lossy(&part.data);
+                    println!("{text}");
+                } else if mime == "application/cbor" {
+                    let json_val = act_types::cbor::cbor_to_json(&part.data).unwrap_or_else(|_| {
+                        serde_json::Value::String(format!(
+                            "[binary: {}, {} bytes]",
+                            mime,
+                            part.data.len()
+                        ))
+                    });
+                    match json_val {
+                        serde_json::Value::String(s) => println!("{s}"),
+                        other => println!("{}", serde_json::to_string_pretty(&other)?),
+                    }
+                } else if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+                    println!("[binary: {}, {} bytes]", mime, part.data.len());
+                } else {
+                    use std::io::Write;
+                    std::io::stdout().write_all(&part.data)?;
+                }
+            }
+            runtime::exports::act::tools::tool_provider::ToolEvent::Error(err) => {
+                let ls = act_types::types::LocalizedString::from(&err.message);
+                anyhow::bail!("{}: {}", err.kind, ls.any_text());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Marshal a JSON object of session args into the WIT shape and call
+/// `open-session` against the prepared component. Returns the
+/// allocated session-id.
+async fn open_session_for_call(pc: &PreparedComponent, json: &str) -> Result<String> {
+    let value: serde_json::Value =
+        serde_json::from_str(json).context("invalid --session-args JSON")?;
+    let serde_json::Value::Object(args_obj) = value else {
+        anyhow::bail!("--session-args must be a JSON object");
+    };
+    let mut wit_args: Vec<(String, Vec<u8>)> = Vec::with_capacity(args_obj.len());
+    for (key, value) in args_obj {
+        let bytes =
+            act_types::cbor::json_to_cbor(&value).context("encoding session arg as CBOR")?;
+        wit_args.push((key, bytes));
+    }
+
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     pc.handle
-        .send(request)
+        .send(runtime::ComponentRequest::OpenSession {
+            args: wit_args,
+            metadata: pc.metadata.clone().into(),
+            reply: reply_tx,
+        })
         .await
         .map_err(|_| anyhow::anyhow!("component actor unavailable"))?;
 
     match reply_rx.await? {
-        Ok(result) => {
-            for event in &result.events {
-                match event {
-                    runtime::exports::act::tools::tool_provider::ToolEvent::Content(part) => {
-                        let mime = part.mime_type.as_deref().unwrap_or("application/cbor");
-                        if mime.starts_with("text/")
-                            || mime == "application/json"
-                            || mime == "application/xml"
-                        {
-                            let text = String::from_utf8_lossy(&part.data);
-                            println!("{text}");
-                        } else if mime == "application/cbor" {
-                            let json_val = act_types::cbor::cbor_to_json(&part.data)
-                                .unwrap_or_else(|_| {
-                                    serde_json::Value::String(format!(
-                                        "[binary: {}, {} bytes]",
-                                        mime,
-                                        part.data.len()
-                                    ))
-                                });
-                            match json_val {
-                                serde_json::Value::String(s) => println!("{s}"),
-                                other => println!("{}", serde_json::to_string_pretty(&other)?),
-                            }
-                        } else if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-                            println!("[binary: {}, {} bytes]", mime, part.data.len());
-                        } else {
-                            use std::io::Write;
-                            std::io::stdout().write_all(&part.data)?;
-                        }
-                    }
-                    runtime::exports::act::tools::tool_provider::ToolEvent::Error(err) => {
-                        let ls = act_types::types::LocalizedString::from(&err.message);
-                        anyhow::bail!("{}: {}", err.kind, ls.any_text());
-                    }
-                }
-            }
-            Ok(())
-        }
+        Ok(session) => Ok(session.id),
         Err(runtime::ComponentError::Tool(te)) => {
             let ls = act_types::types::LocalizedString::from(&te.message);
-            anyhow::bail!("{}: {}", te.kind, ls.any_text());
+            anyhow::bail!("open-session failed: {}: {}", te.kind, ls.any_text());
         }
-        Err(runtime::ComponentError::Internal(e)) => Err(e),
+        Err(runtime::ComponentError::Internal(e)) => Err(e.context("open-session failed")),
+    }
+}
+
+/// Best-effort close. Logs failures at debug; never propagates errors,
+/// because the call result is what the user asked for and a failed
+/// close should not surface as the command's exit code.
+async fn close_session_best_effort(pc: &PreparedComponent, session_id: String) {
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    if pc
+        .handle
+        .send(runtime::ComponentRequest::CloseSession {
+            session_id: session_id.clone(),
+            reply: reply_tx,
+        })
+        .await
+        .is_err()
+    {
+        tracing::debug!(%session_id, "actor unavailable for close-session");
+        return;
+    }
+    if let Err(e) = reply_rx.await {
+        tracing::debug!(%session_id, error = %e, "close-session reply dropped");
     }
 }
 
