@@ -75,6 +75,12 @@ act-build pack target/wasm32-wasip2/release/my_component.wasm
 
 # Validate without modifying
 act-build validate target/wasm32-wasip2/release/my_component.wasm
+
+# Publish as a CNCF Wasm OCI Artifact
+act-build push my_component.wasm ghcr.io/actpkg/my-component:0.1.0 \
+  --also-tag latest \
+  --source https://github.com/actpkg/my-component \
+  --skip-if-identical
 ```
 
 Metadata is resolved via merge-patch from project manifests:
@@ -82,6 +88,17 @@ Metadata is resolved via merge-patch from project manifests:
 1. **Base** from `Cargo.toml`, `pyproject.toml`, or `package.json` (name, version, description)
 2. **Inline patch** from the same manifest (`[package.metadata.act-component]`, `[tool.act-component]`, or `actComponent`)
 3. **`act.toml`** — highest priority, applied last
+
+`act-build push` produces artifacts conformant with the [CNCF
+TAG-Runtime Wasm OCI Artifact spec](https://tag-runtime.cncf.io/wgs/wasm/deliverables/wasm-oci-artifact/):
+manifest config has media type `application/vnd.wasm.config.v0+json`
+(with `architecture`, `os`, `layerDigests`, and
+`component.{exports,imports}` derived from the component's exports
+and imports), and the layer is `application/wasm`.
+
+Authentication is resolved in order: `OCI_USERNAME`/`OCI_PASSWORD`
+env, then `GITHUB_TOKEN` for `ghcr.io`, then `~/.docker/config.json`
+(or `$DOCKER_CONFIG/config.json`), then anonymous.
 
 ## Platform Support
 

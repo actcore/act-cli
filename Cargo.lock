@@ -4,18 +4,23 @@ version = 4
 
 [[package]]
 name = "act-build"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "act-types",
  "anyhow",
+ "base64",
  "ciborium",
  "clap",
+ "dirs",
  "globset",
  "json-patch",
+ "oci-client",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tar",
  "tempfile",
+ "tokio",
  "toml 1.1.2+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
@@ -25,7 +30,7 @@ dependencies = [
 
 [[package]]
 name = "act-cli"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "act-types",
  "anyhow",

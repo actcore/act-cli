@@ -224,6 +224,17 @@ async fn resolve_oci(reference: &str, fresh: bool) -> Result<PathBuf> {
         .first()
         .context("no layers in OCI manifest")?;
 
+    // Per the CNCF Wasm OCI Artifact spec, the layer media type must be
+    // `application/wasm`. We tolerate the empty/legacy case for backwards
+    // compatibility but log a warning — anything else is rejected.
+    match layer.media_type.as_str() {
+        "application/wasm" => {}
+        "" => tracing::warn!(%reference, "OCI layer has no media type (legacy artifact)"),
+        other => anyhow::bail!(
+            "unexpected layer media type for {reference}: '{other}' (expected 'application/wasm')"
+        ),
+    }
+
     let total = if layer.size > 0 {
         Some(layer.size as u64)
     } else {

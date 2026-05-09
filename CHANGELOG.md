@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.3] - 2026-05-09
+
+### Added
+- `act-build push <wasm> <ref>` — publish a WASM component as a CNCF
+  Wasm OCI Artifact. The manifest carries an
+  `application/vnd.wasm.config.v0+json` config blob (with
+  `architecture`, `os`, `layerDigests`, and `component.{exports,
+  imports}` derived from the component's exports/imports) per the
+  [CNCF TAG-Runtime Wasm OCI Artifact spec](https://tag-runtime.cncf.io/wgs/wasm/deliverables/wasm-oci-artifact/),
+  and the layer is `application/wasm`. Replaces inline `oras push`
+  shell blocks in component justfiles.
+
+  Flags: `--also-tag`, `--annotation key=value`, `--source`,
+  `--description`, `--skip-if-identical` (matching-content skip /
+  drift error), `--skip-if-exists` (unconditional skip for
+  non-reproducible builds), `--dry-run`. Output ends with an
+  oras-compatible `Digest: sha256:...` line so existing scripts that
+  grep for it keep working.
+
+  Auth resolution: `OCI_USERNAME`/`OCI_PASSWORD` env →
+  `GITHUB_TOKEN` for ghcr.io → `~/.docker/config.json`
+  (`DOCKER_CONFIG` honored) → anonymous.
+
+### Changed
+- `act` (host): `resolve_oci` now validates that the OCI layer media
+  type is `application/wasm`. Empty/legacy media types log a
+  warning; anything else is rejected.
+
 ## [0.7.2] - 2026-05-07
 
 ### Added
