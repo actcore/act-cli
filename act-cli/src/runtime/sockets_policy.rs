@@ -343,4 +343,43 @@ mod tests {
             SocketAddrUse::TcpConnect
         ));
     }
+
+    #[tokio::test]
+    async fn smoke_real_port_permits_declared_addr_only() {
+        // Smoke test: bind a real TCP listener to get a free port, build a
+        // SocketsPolicy whose only rule is `127.0.0.1:<that_port>/tcp`, and
+        // confirm the closure permits the declared (addr, proto) and rejects
+        // the next port + the UDP variant. Exercises the same path that
+        // WasiCtxBuilder::socket_addr_check uses at runtime.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bound: SocketAddr = listener.local_addr().unwrap();
+        let port = bound.port();
+        drop(listener);
+
+        let p = SocketsPolicy::build(SocketsConfig {
+            mode: PolicyMode::Allowlist,
+            allow: vec![rule(
+                Some("127.0.0.1"),
+                None,
+                Some(vec![port]),
+                Some(vec![SocketProtocol::Tcp]),
+            )],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        assert!(p.decide(
+            SocketAddr::from(([127, 0, 0, 1], port)),
+            SocketAddrUse::TcpConnect
+        ));
+        assert!(!p.decide(
+            SocketAddr::from(([127, 0, 0, 1], port.wrapping_add(1))),
+            SocketAddrUse::TcpConnect
+        ));
+        assert!(!p.decide(
+            SocketAddr::from(([127, 0, 0, 1], port)),
+            SocketAddrUse::UdpConnect
+        ));
+    }
 }
