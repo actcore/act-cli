@@ -43,6 +43,18 @@ struct CommonOpts {
     #[arg(long = "http-deny")]
     http_deny: Vec<String>,
 
+    /// Sockets policy mode: deny | allowlist | open
+    #[arg(long = "sockets-policy")]
+    sockets_policy: Option<String>,
+    /// Sockets allow entry: `<host_or_cidr>:<ports>[/<protos>]`.
+    /// Examples: `vnc.example.com:5900/tcp`, `10.0.0.0/8:80,443`.
+    /// Repeatable.
+    #[arg(long = "allow-socket")]
+    sockets_allow: Vec<String>,
+    /// Sockets deny entry. Same grammar as `--allow-socket`. Repeatable.
+    #[arg(long = "deny-socket")]
+    sockets_deny: Vec<String>,
+
     /// Use a named profile from the config file
     #[arg(long)]
     profile: Option<String>,
@@ -274,6 +286,7 @@ struct ResolvedOpts {
     config_file: config::ConfigFile,
     fs: config::FsConfig,
     http: config::HttpConfig,
+    sockets: config::SocketsConfig,
     metadata: Option<serde_json::Value>,
 }
 
@@ -290,10 +303,13 @@ fn resolve_opts(opts: &CommonOpts) -> Result<ResolvedOpts> {
         http_mode: opts.http_policy.clone(),
         http_allow: opts.http_allow.clone(),
         http_deny: opts.http_deny.clone(),
-        ..Default::default()
+        sockets_mode: opts.sockets_policy.clone(),
+        sockets_allow: opts.sockets_allow.clone(),
+        sockets_deny: opts.sockets_deny.clone(),
     };
     let fs = config::resolve_fs_config(&config_file, profile, &cli_overrides)?;
     let http = config::resolve_http_config(&config_file, profile, &cli_overrides)?;
+    let sockets = config::resolve_sockets_config(&config_file, profile, &cli_overrides)?;
     let cli_metadata = parse_cli_metadata(opts.metadata.clone(), opts.metadata_file.clone())?;
     let merged_metadata = config::resolve_metadata(profile, cli_metadata.as_ref());
     let metadata = if merged_metadata.is_null() {
@@ -305,6 +321,7 @@ fn resolve_opts(opts: &CommonOpts) -> Result<ResolvedOpts> {
         config_file,
         fs,
         http,
+        sockets,
         metadata,
     })
 }
@@ -333,6 +350,7 @@ async fn prepare_component(
 
     let fs = resolved.fs;
     let http = resolved.http;
+    let sockets = resolved.sockets;
 
     let mut preopens = runtime::fs_policy::derive_preopens(&fs);
     let mount_root = info.std.capabilities.fs_mount_root().unwrap_or("/");
@@ -354,9 +372,10 @@ async fn prepare_component(
     let engine = runtime::create_engine()?;
     let wasm = runtime::load_component(&engine, &component_path)?;
     let linker = runtime::create_linker(&engine)?;
-    let (instance, session_provider, store) =
-        runtime::instantiate_component(&engine, &wasm, &linker, &preopens, &http, &fs, &info)
-            .await?;
+    let (instance, session_provider, store) = runtime::instantiate_component(
+        &engine, &wasm, &linker, &preopens, &http, &fs, &sockets, &info,
+    )
+    .await?;
     let has_sessions = session_provider.is_some();
     let handle = runtime::spawn_component_actor(instance, session_provider, store);
 

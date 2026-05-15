@@ -146,17 +146,23 @@ pub fn create_linker(engine: &Engine) -> Result<Linker<HostState>> {
 /// intersected with the component's declared capabilities before building the store.
 /// Undeclared capability classes and empty allow arrays hard-deny regardless of the
 /// user's grant.
-pub fn create_store(
+pub async fn create_store(
     engine: &Engine,
     preopens: &[crate::runtime::fs_policy::Preopen],
     http: &crate::config::HttpConfig,
     fs: &crate::config::FsConfig,
+    sockets: &crate::config::SocketsConfig,
     info: &ComponentInfo,
 ) -> Result<Store<HostState>> {
     // Intersect user policy with the component's declared capabilities.
     let effective_fs = crate::runtime::effective::effective_fs(fs, &info.std.capabilities).config;
     let effective_http =
         crate::runtime::effective::effective_http(http, &info.std.capabilities).config;
+    let effective_sockets =
+        crate::runtime::effective::effective_sockets(sockets, &info.std.capabilities).config;
+
+    let socket_policy =
+        crate::runtime::sockets_policy::SocketsPolicy::build(effective_sockets).await?;
 
     let mut builder = WasiCtxBuilder::new();
     let mut preopen_pairs = Vec::with_capacity(preopens.len());
@@ -178,6 +184,8 @@ pub fn create_store(
             })?;
         preopen_pairs.push((mount.guest.clone(), mount.host.clone()));
     }
+
+    socket_policy.install(&mut builder);
 
     let wasi = builder.build();
     let matcher = crate::runtime::fs_matcher::FsMatcher::compile(&effective_fs)?;
@@ -328,6 +336,7 @@ pub type ComponentHandle = mpsc::Sender<ComponentRequest>;
 ///
 /// Component info is read from custom sections (no instantiation needed
 /// for that).
+#[allow(clippy::too_many_arguments)]
 pub async fn instantiate_component(
     engine: &Engine,
     component: &Component,
@@ -335,13 +344,14 @@ pub async fn instantiate_component(
     preopens: &[crate::runtime::fs_policy::Preopen],
     http: &crate::config::HttpConfig,
     fs: &crate::config::FsConfig,
+    sockets: &crate::config::SocketsConfig,
     info: &ComponentInfo,
 ) -> Result<(
     ActWorld,
     Option<sessions::SessionProvider>,
     Store<HostState>,
 )> {
-    let mut store = create_store(engine, preopens, http, fs, info)?;
+    let mut store = create_store(engine, preopens, http, fs, sockets, info).await?;
 
     // Manual instantiation flow (replicates ActWorld::instantiate_async)
     // so we keep access to the raw `Instance` for session-provider lookup.
