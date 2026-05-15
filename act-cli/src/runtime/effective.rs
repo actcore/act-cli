@@ -139,6 +139,113 @@ fn rule_from_declaration(d: &HttpAllow) -> HttpRule {
     }
 }
 
+#[allow(dead_code)] // wired in Task 5
+pub fn effective_sockets(
+    user: &crate::config::SocketsConfig,
+    caps: &Capabilities,
+) -> EffectivePolicy<crate::config::SocketsConfig> {
+    let Some(sockets_cap) = caps.sockets.as_ref() else {
+        return EffectivePolicy {
+            config: crate::config::SocketsConfig {
+                mode: PolicyMode::Deny,
+                ..user.clone()
+            },
+            declared: false,
+        };
+    };
+
+    let declared_rules: Vec<crate::config::SocketsRule> = sockets_cap
+        .allow
+        .iter()
+        .map(sockets_rule_from_declaration)
+        .collect();
+    if declared_rules.is_empty() {
+        return EffectivePolicy {
+            config: crate::config::SocketsConfig {
+                mode: PolicyMode::Deny,
+                ..user.clone()
+            },
+            declared: true,
+        };
+    }
+
+    let mut effective = user.clone();
+    match effective.mode {
+        PolicyMode::Deny => {}
+        PolicyMode::Allowlist => {
+            effective.allow.retain(|user_rule| {
+                declared_rules
+                    .iter()
+                    .any(|decl| sockets_rule_covers(decl, user_rule))
+            });
+        }
+        PolicyMode::Open => {
+            effective.mode = PolicyMode::Allowlist;
+            effective.allow = declared_rules;
+        }
+    }
+
+    EffectivePolicy {
+        config: effective,
+        declared: true,
+    }
+}
+
+#[allow(dead_code)] // wired in Task 5
+fn sockets_rule_from_declaration(d: &act_types::SocketsAllow) -> crate::config::SocketsRule {
+    crate::config::SocketsRule {
+        net: NetworkRule {
+            host: d.host.clone(),
+            cidr: d.cidr.clone(),
+            ports: Some(d.ports.clone()),
+            except_ports: None,
+        },
+        protocols: Some(d.protocols.clone()),
+    }
+}
+
+/// Declared rule D covers user rule U when every connection matching U
+/// would also match D. Host/CIDR/port/protocol — each user dimension must
+/// fit inside declared.
+#[allow(dead_code)] // wired in Task 5
+fn sockets_rule_covers(
+    decl: &crate::config::SocketsRule,
+    user: &crate::config::SocketsRule,
+) -> bool {
+    let host_or_cidr_covered = match (&decl.net.host, &decl.net.cidr) {
+        (Some(decl_host), _) => match (&user.net.host, &user.net.cidr) {
+            (Some(u_host), _) => host_covers(decl_host, u_host),
+            (None, Some(_)) => false,
+            (None, None) => false,
+        },
+        (None, Some(decl_cidr)) => match (&user.net.host, &user.net.cidr) {
+            (Some(_), None) => false,
+            (None, Some(u_cidr)) => decl_cidr == u_cidr,
+            (None, None) => false,
+            (Some(_), Some(_)) => false,
+        },
+        (None, None) => false,
+    };
+    if !host_or_cidr_covered {
+        return false;
+    }
+
+    if let (Some(d_ports), Some(u_ports)) = (&decl.net.ports, &user.net.ports)
+        && !u_ports.iter().all(|p| d_ports.contains(p))
+    {
+        return false;
+    }
+
+    if let Some(d_protos) = &decl.protocols
+        && let Some(u_protos) = &user.protocols
+        && !u_protos.iter().all(|p| d_protos.contains(p))
+    {
+        return false;
+    }
+
+    true
+}
+
 /// Does a user's `allow` glob pattern intersect with a declared glob pattern?
 ///
 /// Both are glob strings; "intersection" here is structural (either is a
@@ -478,6 +585,118 @@ mod tests {
             ..Default::default()
         };
         let eff = effective_http(&user, &caps);
+        assert_eq!(eff.config.allow.len(), 0);
+    }
+
+    fn caps_sockets(allow: Vec<act_types::SocketsAllow>) -> Capabilities {
+        Capabilities {
+            sockets: Some(act_types::SocketsCap { allow }),
+            ..Default::default()
+        }
+    }
+
+    fn user_sockets_allow_host(host: &str, ports: Vec<u16>) -> crate::config::SocketsRule {
+        crate::config::SocketsRule {
+            net: NetworkRule {
+                host: Some(host.to_string()),
+                ports: Some(ports),
+                ..Default::default()
+            },
+            protocols: None,
+        }
+    }
+
+    #[test]
+    fn sockets_undeclared_forces_deny() {
+        let user = crate::config::SocketsConfig {
+            mode: PolicyMode::Allowlist,
+            allow: vec![user_sockets_allow_host("vnc.example.com", vec![5900])],
+            ..Default::default()
+        };
+        let eff = effective_sockets(&user, &Capabilities::default());
+        assert!(!eff.declared);
+        assert_eq!(eff.config.mode, PolicyMode::Deny);
+    }
+
+    #[test]
+    fn sockets_empty_declared_allow_forces_deny() {
+        let caps = caps_sockets(vec![]);
+        let user = crate::config::SocketsConfig {
+            mode: PolicyMode::Allowlist,
+            allow: vec![user_sockets_allow_host("vnc.example.com", vec![5900])],
+            ..Default::default()
+        };
+        let eff = effective_sockets(&user, &caps);
+        assert!(eff.declared);
+        assert_eq!(eff.config.mode, PolicyMode::Deny);
+    }
+
+    #[test]
+    fn sockets_declared_narrows_user_allow() {
+        let caps = caps_sockets(vec![act_types::SocketsAllow {
+            host: Some("vnc.example.com".into()),
+            cidr: None,
+            ports: vec![5900],
+            protocols: vec![act_types::SocketProtocol::Tcp],
+        }]);
+        let user = crate::config::SocketsConfig {
+            mode: PolicyMode::Allowlist,
+            allow: vec![
+                user_sockets_allow_host("vnc.example.com", vec![5900]),
+                user_sockets_allow_host("evil.com", vec![5900]),
+            ],
+            ..Default::default()
+        };
+        let eff = effective_sockets(&user, &caps);
+        assert_eq!(eff.config.allow.len(), 1);
+        assert_eq!(
+            eff.config.allow[0].net.host.as_deref(),
+            Some("vnc.example.com")
+        );
+    }
+
+    #[test]
+    fn sockets_open_becomes_allowlist_over_declared_rules() {
+        let caps = caps_sockets(vec![act_types::SocketsAllow {
+            host: Some("vnc.example.com".into()),
+            cidr: None,
+            ports: vec![5900],
+            protocols: vec![act_types::SocketProtocol::Tcp],
+        }]);
+        let user = crate::config::SocketsConfig {
+            mode: PolicyMode::Open,
+            ..Default::default()
+        };
+        let eff = effective_sockets(&user, &caps);
+        assert_eq!(eff.config.mode, PolicyMode::Allowlist);
+        assert_eq!(eff.config.allow.len(), 1);
+        assert_eq!(
+            eff.config.allow[0].protocols.as_deref(),
+            Some(&[act_types::SocketProtocol::Tcp][..])
+        );
+    }
+
+    #[test]
+    fn sockets_protocol_mismatch_drops_user_rule() {
+        let caps = caps_sockets(vec![act_types::SocketsAllow {
+            host: Some("vnc.example.com".into()),
+            cidr: None,
+            ports: vec![5900],
+            protocols: vec![act_types::SocketProtocol::Tcp],
+        }]);
+        let user = crate::config::SocketsConfig {
+            mode: PolicyMode::Allowlist,
+            allow: vec![crate::config::SocketsRule {
+                net: NetworkRule {
+                    host: Some("vnc.example.com".into()),
+                    ports: Some(vec![5900]),
+                    ..Default::default()
+                },
+                protocols: Some(vec![act_types::SocketProtocol::Udp]),
+            }],
+            ..Default::default()
+        };
+        let eff = effective_sockets(&user, &caps);
         assert_eq!(eff.config.allow.len(), 0);
     }
 }
