@@ -16,3 +16,8 @@ wasmparser = "0.247.0"
 
 [profile.release]
 lto = "thin"
+
+# Temporary: point act-types at the local sibling checkout while
+# wasi:sockets work is unpublished. Remove once act-types 0.8 is released.
+[patch.crates-io]
+act-types = { path = "../act-sdk-rs/act-types" }

@@ -327,7 +327,6 @@ mod tests {
             mode: PolicyMode::Allowlist,
             allow: vec![rule(Some("*.example.com"), None, None, None, None)],
             deny: vec![rule(Some("admin.example.com"), None, None, None, None)],
-            ..Default::default()
         });
         assert_eq!(
             h.decide_uri(Some("GET"), &uri("https://api.example.com/")),
@@ -351,7 +350,6 @@ mod tests {
                 Some("127.0.0.0/8"),
                 Some(vec![3000]),
             )],
-            ..Default::default()
         });
         // 127.0.0.1:80 is in the deny CIDR and not in except-ports → deny
         assert_eq!(

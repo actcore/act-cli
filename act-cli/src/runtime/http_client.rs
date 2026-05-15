@@ -739,7 +739,6 @@ mod tests {
                 },
                 ..Default::default()
             }],
-            ..Default::default()
         };
         let client = ActHttpClient::new(cfg).expect("client builds");
         let body: UnsyncBoxBody<bytes::Bytes, P2ErrorCode> = Empty::<bytes::Bytes>::new()
@@ -788,7 +787,6 @@ mod tests {
                 ..Default::default()
             }],
             deny: vec![],
-            ..Default::default()
         };
         let client = ActHttpClient::new(cfg).expect("client builds");
         let body: UnsyncBoxBody<bytes::Bytes, P2ErrorCode> = Empty::<bytes::Bytes>::new()
@@ -842,7 +840,6 @@ mod tests {
                 },
             ],
             deny: vec![],
-            ..Default::default()
         };
         let client = ActHttpClient::new(cfg).expect("client builds");
         let body: UnsyncBoxBody<bytes::Bytes, P2ErrorCode> = Empty::<bytes::Bytes>::new()

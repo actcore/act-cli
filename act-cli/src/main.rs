@@ -290,6 +290,7 @@ fn resolve_opts(opts: &CommonOpts) -> Result<ResolvedOpts> {
         http_mode: opts.http_policy.clone(),
         http_allow: opts.http_allow.clone(),
         http_deny: opts.http_deny.clone(),
+        ..Default::default()
     };
     let fs = config::resolve_fs_config(&config_file, profile, &cli_overrides)?;
     let http = config::resolve_http_config(&config_file, profile, &cli_overrides)?;

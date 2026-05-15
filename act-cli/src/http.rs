@@ -521,6 +521,21 @@ async fn protocol_version_layer(request: Request, next: Next) -> axum::response:
     response
 }
 
+pub fn create_router(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route("/info", get(get_info))
+        .route("/tools", axum::routing::any(tools_dispatcher))
+        .route("/tools/{name}", axum::routing::any(tool_call_dispatcher))
+        .route(
+            "/sessions/open-args-schema",
+            axum::routing::any(session_open_args_schema_dispatcher),
+        )
+        .route("/sessions", axum::routing::post(session_open))
+        .route("/sessions/{id}", axum::routing::delete(session_close))
+        .layer(middleware::from_fn(protocol_version_layer))
+        .with_state(state)
+}
+
 // ── Router ──
 
 #[cfg(test)]
@@ -552,19 +567,4 @@ mod tests {
     fn query_method_is_valid() {
         assert_eq!(query_method().as_str(), "QUERY");
     }
-}
-
-pub fn create_router(state: Arc<AppState>) -> Router {
-    Router::new()
-        .route("/info", get(get_info))
-        .route("/tools", axum::routing::any(tools_dispatcher))
-        .route("/tools/{name}", axum::routing::any(tool_call_dispatcher))
-        .route(
-            "/sessions/open-args-schema",
-            axum::routing::any(session_open_args_schema_dispatcher),
-        )
-        .route("/sessions", axum::routing::post(session_open))
-        .route("/sessions/{id}", axum::routing::delete(session_close))
-        .layer(middleware::from_fn(protocol_version_layer))
-        .with_state(state)
 }

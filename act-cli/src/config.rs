@@ -84,6 +84,27 @@ pub struct HttpRule {
     pub methods: Option<Vec<String>>,
 }
 
+/// Resolved sockets policy for a component invocation.
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)] // consumed by sockets_policy + Task 5 wiring
+pub struct SocketsConfig {
+    pub mode: PolicyMode,
+    pub allow: Vec<SocketsRule>,
+    pub deny: Vec<SocketsRule>,
+}
+
+/// One allow-or-deny entry in a sockets policy.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct SocketsRule {
+    /// Host / port / CIDR fields. Reuses the network-rule shape.
+    #[serde(flatten)]
+    pub net: crate::runtime::network::NetworkRule,
+    /// Restrict to specific protocols. None = any (default for user
+    /// rules); declarations always carry an explicit list.
+    #[serde(default)]
+    pub protocols: Option<Vec<act_types::SocketProtocol>>,
+}
+
 // ── TOML deserialization types ──
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -105,6 +126,9 @@ pub struct PolicyConfig {
     pub filesystem: Option<FsPolicyToml>,
     #[serde(default)]
     pub http: Option<HttpPolicyToml>,
+    #[allow(dead_code)] // wired by resolve_sockets_config + Task 5
+    #[serde(default)]
+    pub sockets: Option<SocketsPolicyToml>,
 }
 
 /// Filesystem policy in TOML: shorthand string (`"deny"` / `"allowlist"` /
@@ -133,6 +157,21 @@ pub enum HttpPolicyToml {
         allow: Vec<HttpRule>,
         #[serde(default)]
         deny: Vec<HttpRule>,
+    },
+}
+
+/// Sockets policy in TOML: shorthand string or structured object.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[allow(dead_code)] // wired by resolve_sockets_config + Task 5
+#[serde(untagged)]
+pub enum SocketsPolicyToml {
+    Simple(String),
+    Structured {
+        mode: String,
+        #[serde(default)]
+        allow: Vec<SocketsRule>,
+        #[serde(default)]
+        deny: Vec<SocketsRule>,
     },
 }
 
@@ -192,6 +231,12 @@ pub struct CliPolicyOverrides {
     pub http_mode: Option<String>,
     pub http_allow: Vec<String>,
     pub http_deny: Vec<String>,
+    #[allow(dead_code)] // wired in Task 5
+    pub sockets_mode: Option<String>,
+    #[allow(dead_code)]
+    pub sockets_allow: Vec<String>,
+    #[allow(dead_code)]
+    pub sockets_deny: Vec<String>,
 }
 
 impl CliPolicyOverrides {
@@ -200,6 +245,12 @@ impl CliPolicyOverrides {
     }
     fn any_http_override(&self) -> bool {
         self.http_mode.is_some() || !self.http_allow.is_empty() || !self.http_deny.is_empty()
+    }
+    #[allow(dead_code)] // wired in Task 5
+    fn any_sockets_override(&self) -> bool {
+        self.sockets_mode.is_some()
+            || !self.sockets_allow.is_empty()
+            || !self.sockets_deny.is_empty()
     }
 }
 
@@ -250,6 +301,84 @@ fn parse_host_or_cidr(s: &str) -> HttpRule {
         net,
         ..Default::default()
     }
+}
+
+/// Parse a single `--allow-socket` / `--deny-socket` spec.
+///
+/// Grammar: `<host_or_cidr>:<ports>[/<protos>]`
+/// - host: exact, `*.suffix`, or `*`
+/// - cidr: `A.B.C.D/N` (must contain `/` and a numeric suffix)
+/// - ports: comma-separated u16 list; non-empty
+/// - protos: comma-separated subset of `tcp`, `udp`; default unset (any)
+#[allow(dead_code)] // wired in Task 5
+pub fn parse_socket_spec(s: &str) -> Result<SocketsRule> {
+    use crate::runtime::network::NetworkRule;
+    use act_types::SocketProtocol;
+
+    // Split off optional /<protocols>. A protocol section is purely
+    // alphabetic (comma-separated for multiples); anything containing
+    // digits or colons after the last `/` is part of a CIDR mask, not
+    // a protocol separator.
+    let (host_port, protos) = match s.rsplit_once('/') {
+        Some((before, after))
+            if !after.is_empty() && after.chars().all(|c| c.is_ascii_alphabetic() || c == ',') =>
+        {
+            (before, Some(after))
+        }
+        _ => (s, None),
+    };
+
+    let (host_or_cidr, ports_str) = host_port
+        .rsplit_once(':')
+        .with_context(|| format!("socket spec missing ':<port>' — got {s:?}"))?;
+
+    let mut ports = Vec::new();
+    for p in ports_str.split(',') {
+        let p = p.trim();
+        if p.is_empty() {
+            anyhow::bail!("empty port entry in {ports_str:?}");
+        }
+        ports.push(
+            p.parse::<u16>()
+                .with_context(|| format!("invalid port {p:?}"))?,
+        );
+    }
+    if ports.is_empty() {
+        anyhow::bail!("at least one port required in {s:?}");
+    }
+
+    let net = if let Some((_, mask)) = host_or_cidr.rsplit_once('/')
+        && mask.parse::<u8>().is_ok()
+    {
+        NetworkRule {
+            cidr: Some(host_or_cidr.to_string()),
+            ports: Some(ports),
+            ..Default::default()
+        }
+    } else {
+        NetworkRule {
+            host: Some(host_or_cidr.to_string()),
+            ports: Some(ports),
+            ..Default::default()
+        }
+    };
+
+    let protocols = match protos {
+        None => None,
+        Some(list) => {
+            let mut v = Vec::new();
+            for p in list.split(',') {
+                v.push(match p.trim() {
+                    "tcp" => SocketProtocol::Tcp,
+                    "udp" => SocketProtocol::Udp,
+                    other => anyhow::bail!("unknown socket protocol {other:?}"),
+                });
+            }
+            Some(v)
+        }
+    };
+
+    Ok(SocketsRule { net, protocols })
 }
 
 /// Resolve the final `FsConfig` from config file + profile + CLI overrides.
@@ -326,6 +455,67 @@ pub fn resolve_http_config(
     }
 
     Ok(HttpConfig::default())
+}
+
+#[allow(dead_code)] // wired in Task 5
+fn parse_sockets_toml(policy: &SocketsPolicyToml) -> Result<SocketsConfig> {
+    match policy {
+        SocketsPolicyToml::Simple(s) => Ok(SocketsConfig {
+            mode: PolicyMode::parse(s)?,
+            ..Default::default()
+        }),
+        SocketsPolicyToml::Structured { mode, allow, deny } => Ok(SocketsConfig {
+            mode: PolicyMode::parse(mode)?,
+            allow: allow.clone(),
+            deny: deny.clone(),
+        }),
+    }
+}
+
+/// Resolve the final `SocketsConfig` from config file + profile + CLI overrides.
+#[allow(dead_code)] // wired in Task 5
+pub fn resolve_sockets_config(
+    config: &ConfigFile,
+    profile: Option<&ProfileConfig>,
+    cli: &CliPolicyOverrides,
+) -> Result<SocketsConfig> {
+    if cli.any_sockets_override() {
+        let mode = match cli.sockets_mode.as_deref() {
+            Some(m) => PolicyMode::parse(m)?,
+            None if !cli.sockets_allow.is_empty() => PolicyMode::Allowlist,
+            None => PolicyMode::Deny,
+        };
+        let allow: Result<Vec<_>> = cli
+            .sockets_allow
+            .iter()
+            .map(|s| parse_socket_spec(s))
+            .collect();
+        let deny: Result<Vec<_>> = cli
+            .sockets_deny
+            .iter()
+            .map(|s| parse_socket_spec(s))
+            .collect();
+        return Ok(SocketsConfig {
+            mode,
+            allow: allow?,
+            deny: deny?,
+        });
+    }
+
+    if let Some(profile) = profile
+        && let Some(ref policy) = profile.policy
+        && let Some(ref sockets) = policy.sockets
+    {
+        return parse_sockets_toml(sockets);
+    }
+
+    if let Some(ref policy) = config.policy
+        && let Some(ref sockets) = policy.sockets
+    {
+        return parse_sockets_toml(sockets);
+    }
+
+    Ok(SocketsConfig::default())
 }
 
 /// Resolve the merged metadata from profile + CLI.
@@ -441,5 +631,62 @@ filesystem = "deny"
         let fs = resolve_fs_config(&cfg, None, &cli).unwrap();
         assert_eq!(fs.mode, PolicyMode::Allowlist);
         assert_eq!(fs.allow, vec!["/tmp/work"]);
+    }
+
+    #[test]
+    fn sockets_cli_allow_host_port() {
+        let cli = CliPolicyOverrides {
+            sockets_allow: vec!["vnc.example.com:5900/tcp".into()],
+            ..Default::default()
+        };
+        let cfg = resolve_sockets_config(&ConfigFile::default(), None, &cli).unwrap();
+        assert_eq!(cfg.mode, PolicyMode::Allowlist);
+        assert_eq!(cfg.allow.len(), 1);
+        assert_eq!(cfg.allow[0].net.host.as_deref(), Some("vnc.example.com"));
+        assert_eq!(cfg.allow[0].net.ports.as_deref(), Some(&[5900u16][..]));
+        assert_eq!(
+            cfg.allow[0].protocols.as_deref(),
+            Some(&[act_types::SocketProtocol::Tcp][..])
+        );
+    }
+
+    #[test]
+    fn sockets_cli_cidr_multiport_default_protocols() {
+        let cli = CliPolicyOverrides {
+            sockets_allow: vec!["10.0.0.0/8:80,443".into()],
+            ..Default::default()
+        };
+        let cfg = resolve_sockets_config(&ConfigFile::default(), None, &cli).unwrap();
+        assert_eq!(cfg.allow[0].net.cidr.as_deref(), Some("10.0.0.0/8"));
+        assert_eq!(cfg.allow[0].net.host, None);
+        assert_eq!(cfg.allow[0].net.ports.as_deref(), Some(&[80u16, 443][..]));
+        assert!(cfg.allow[0].protocols.is_none());
+    }
+
+    #[test]
+    fn sockets_toml_structured() {
+        let toml = r#"
+[policy.sockets]
+mode = "allowlist"
+allow = [{ host = "vnc.example.com", ports = [5900], protocols = ["tcp"] }]
+deny = [{ cidr = "127.0.0.0/8", except-ports = [5900] }]
+"#;
+        let cfg: ConfigFile = toml::from_str(toml).unwrap();
+        let s = resolve_sockets_config(&cfg, None, &CliPolicyOverrides::default()).unwrap();
+        assert_eq!(s.mode, PolicyMode::Allowlist);
+        assert_eq!(s.allow[0].net.host.as_deref(), Some("vnc.example.com"));
+        assert_eq!(s.deny[0].net.except_ports.as_deref(), Some(&[5900u16][..]));
+    }
+
+    #[test]
+    fn sockets_spec_rejects_missing_port() {
+        let r = parse_socket_spec("vnc.example.com");
+        assert!(r.is_err(), "spec without port must be rejected");
+    }
+
+    #[test]
+    fn sockets_spec_rejects_bad_protocol() {
+        let r = parse_socket_spec("host:80/sctp");
+        assert!(r.is_err(), "unknown protocol must be rejected");
     }
 }
