@@ -214,6 +214,46 @@ pub async fn run_stdio(
     Ok(())
 }
 
+/// Serve the component over MCP Streamable HTTP (the official MCP HTTP
+/// transport). The component instance is shared across MCP sessions —
+/// each `Mcp-Session-Id` from the client gets its own `ActRmcpBridge`
+/// front-end, but they all dispatch into the same `ComponentHandle`,
+/// matching the model the ACT-HTTP server uses.
+pub async fn run_http(
+    addr: std::net::SocketAddr,
+    info: runtime::ComponentInfo,
+    handle: runtime::ComponentHandle,
+    metadata: runtime::Metadata,
+    has_sessions: bool,
+) -> anyhow::Result<()> {
+    use rmcp::transport::streamable_http_server::{
+        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+    };
+
+    let service = StreamableHttpService::new(
+        move || {
+            Ok(ActRmcpBridge {
+                handle: handle.clone(),
+                info: info.clone(),
+                metadata: metadata.clone(),
+                has_sessions,
+            })
+        },
+        Arc::new(LocalSessionManager::default()),
+        StreamableHttpServerConfig::default(),
+    );
+
+    let router = axum::Router::new().route_service("/mcp", service);
+
+    tracing::info!(%addr, "ACT MCP/HTTP listening on /mcp");
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, router)
+        .await
+        .map_err(|e| anyhow::anyhow!("MCP HTTP server error: {e}"))?;
+    Ok(())
+}
+
 // ── ServerHandler impl ──────────────────────────────────────────────────────
 
 impl ActRmcpBridge {

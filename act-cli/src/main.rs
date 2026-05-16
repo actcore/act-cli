@@ -411,11 +411,24 @@ async fn cmd_run(
     listen: Option<String>,
     opts: CommonOpts,
 ) -> Result<()> {
+    // Transport matrix:
+    //   --mcp                 → MCP over stdio
+    //   --http                → ACT-HTTP REST server
+    //   --mcp --http          → MCP over Streamable HTTP at /mcp
+    //   neither (with --listen) → ACT-HTTP REST server (back-compat)
     if mcp && http {
-        anyhow::bail!("--mcp and --http are mutually exclusive");
+        let addr = match &listen {
+            Some(s) => parse_listen_addr(s)?,
+            None => "[::1]:3000".parse().unwrap(),
+        };
+        let pc = prepare_component(&component, &opts).await?;
+        return rmcp_bridge::run_http(addr, pc.info, pc.handle, pc.metadata, pc.has_sessions).await;
     }
 
     if mcp {
+        if listen.is_some() {
+            anyhow::bail!("--listen requires --http (MCP stdio has no listen address)");
+        }
         let pc = prepare_component(&component, &opts).await?;
         return rmcp_bridge::run_stdio(pc.info, pc.handle, pc.metadata, pc.has_sessions).await;
     }
@@ -443,7 +456,9 @@ async fn cmd_run(
         return Ok(());
     }
 
-    anyhow::bail!("Specify a transport: --http (ACT-HTTP server) or --mcp (MCP stdio)")
+    anyhow::bail!(
+        "Specify a transport: --mcp (stdio), --http (ACT-HTTP server), or --mcp --http (MCP over HTTP)"
+    )
 }
 
 async fn cmd_call(
