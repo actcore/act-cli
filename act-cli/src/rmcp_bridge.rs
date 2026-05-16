@@ -10,9 +10,18 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 /// Synthetic MCP tool name that maps to `session-provider.open-session`.
-/// Per ACT-SESSIONS §6.1 these names are reserved.
+/// Per ACT-MCP §4.1 / ACT-CONSTANTS §3.1 these names are reserved.
 const VIRTUAL_OPEN_SESSION: &str = "open_session";
 const VIRTUAL_CLOSE_SESSION: &str = "close_session";
+
+/// JSON Schema property name for the argument metadata channel
+/// (ACT-MCP §3.2). The adapter strips this from `params.arguments`
+/// before forwarding to the component and folds its contents into the
+/// WIT `metadata` parameter.
+const ARG_META_KEY: &str = "_meta";
+
+const ARG_META_DESCRIPTION: &str = "ACT metadata. Include {\"std:session-id\": \"<id from open_session>\"} for \
+     session-bound tools. Other recognized keys: std:traceparent, std:locale.";
 
 pub struct ActRmcpBridge {
     pub handle: runtime::ComponentHandle,
@@ -74,6 +83,7 @@ fn component_error_to_mcp(err: runtime::ComponentError) -> ErrorData {
 
 fn convert_tool_definitions(
     defs: &[runtime::exports::act::tools::tool_provider::ToolDefinition],
+    inject_arg_meta: bool,
 ) -> Vec<Tool> {
     defs.iter()
         .map(|td| {
@@ -84,8 +94,12 @@ fn convert_tool_definitions(
             let input_schema: Value = serde_json::from_str(&td.parameters_schema)
                 .unwrap_or_else(|_| serde_json::json!({"type": "object"}));
 
-            let schema_map: serde_json::Map<String, Value> =
+            let mut schema_map: serde_json::Map<String, Value> =
                 input_schema.as_object().cloned().unwrap_or_default();
+
+            if inject_arg_meta {
+                inject_arg_meta_property(&mut schema_map);
+            }
 
             let mut tool = Tool::new(
                 Cow::Owned(td.name.clone()),
@@ -100,6 +114,28 @@ fn convert_tool_definitions(
             tool
         })
         .collect()
+}
+
+/// Add an optional `_meta` object property to a tool's JSON Schema so
+/// the agent can supply `std:*` metadata keys through the argument
+/// metadata channel (ACT-MCP §3.2). `_meta` is added as a *known*
+/// property; the component-declared `additionalProperties` restriction
+/// (if any) on other keys is preserved as-is.
+fn inject_arg_meta_property(schema: &mut serde_json::Map<String, Value>) {
+    let properties = schema
+        .entry("properties".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+
+    if let Value::Object(props) = properties {
+        props.insert(
+            ARG_META_KEY.to_string(),
+            serde_json::json!({
+                "type": "object",
+                "description": ARG_META_DESCRIPTION,
+                "additionalProperties": true,
+            }),
+        );
+    }
 }
 
 fn build_annotations(metadata: &[(String, Vec<u8>)]) -> Option<rmcp::model::ToolAnnotations> {
@@ -207,7 +243,11 @@ impl ActRmcpBridge {
             })?
             .map_err(component_error_to_mcp)?;
 
-        let mut tools = convert_tool_definitions(&list.tools);
+        // Per ACT-MCP §3.2, adapters MUST inject the `_meta` argument
+        // property into tools of components exporting session-provider
+        // so agents can supply `std:session-id` (and other `std:*`
+        // keys) without relying on transport-level `_meta`.
+        let mut tools = convert_tool_definitions(&list.tools, self.has_sessions);
 
         if self.has_sessions {
             let open_schema = self.fetch_open_session_args_schema().await?;
@@ -263,30 +303,22 @@ impl ActRmcpBridge {
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
         use rmcp::model::ErrorCode;
 
-        // Merge protocol-level `_meta` (per MCP SEP-1319) into the WIT
-        // metadata before dispatching. Hosts MUST forward `std:session-id`
-        // here per ACT-SESSIONS §6.1.
-        //
-        // rmcp moves `_meta` off params into `RequestContext::meta` during
-        // request dispatch (see service.rs `std::mem::swap`), so that's
-        // where we read it from — not `params.meta` (always None) and not
-        // `extensions` (which holds non-meta extension values).
-        let mut call_metadata = self.metadata.clone();
-        if !ctx_meta.0.is_empty() {
-            call_metadata.extend(act_types::types::Metadata::from(Value::Object(
-                ctx_meta.0.clone(),
-            )));
-        }
-
-        // Route reserved virtual tools (`open_session` / `close_session`).
+        // Route reserved virtual tools (`open_session` / `close_session`)
+        // before any argument-level `_meta` extraction. Virtual tools
+        // are session-lifecycle ops, not session-bound capability calls,
+        // so they do not participate in the argument metadata channel.
         if self.has_sessions {
             match request.name.as_ref() {
                 VIRTUAL_OPEN_SESSION => {
+                    let mut call_metadata = self.metadata.clone();
+                    apply_transport_meta(&mut call_metadata, ctx_meta);
                     return self
                         .virtual_open_session(request.arguments, call_metadata)
                         .await;
                 }
                 VIRTUAL_CLOSE_SESSION => {
+                    let mut call_metadata = self.metadata.clone();
+                    apply_transport_meta(&mut call_metadata, ctx_meta);
                     return self
                         .virtual_close_session(request.arguments, call_metadata)
                         .await;
@@ -295,14 +327,24 @@ impl ActRmcpBridge {
             }
         }
 
-        let arguments = request
-            .arguments
-            .map(Value::Object)
-            .unwrap_or_else(|| serde_json::json!({}));
+        // Extract the argument metadata channel (ACT-MCP §3.2): pop
+        // `_meta` from `params.arguments` so the component sees only
+        // its declared schema, then fold its contents into the WIT
+        // metadata. Precedence (ACT-MCP §3.3): adapter-cached <
+        // arguments._meta < transport _meta.
+        let mut arguments_obj = request.arguments.unwrap_or_default();
+        let arg_meta = arguments_obj.remove(ARG_META_KEY);
 
-        let cbor_args = act_types::cbor::json_to_cbor(&arguments).map_err(|_| {
-            rmcp::ErrorData::new(ErrorCode::INVALID_PARAMS, "invalid arguments", None)
-        })?;
+        let mut call_metadata = self.metadata.clone();
+        if let Some(Value::Object(map)) = arg_meta {
+            call_metadata.extend(act_types::types::Metadata::from(Value::Object(map)));
+        }
+        apply_transport_meta(&mut call_metadata, ctx_meta);
+
+        let cbor_args =
+            act_types::cbor::json_to_cbor(&Value::Object(arguments_obj)).map_err(|_| {
+                rmcp::ErrorData::new(ErrorCode::INVALID_PARAMS, "invalid arguments", None)
+            })?;
 
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let req = runtime::ComponentRequest::CallTool {
@@ -487,6 +529,21 @@ fn session_op_meta(op: &'static str) -> rmcp::model::Meta {
     let mut map = serde_json::Map::new();
     map.insert(META_SESSION_OP.to_string(), Value::String(op.to_string()));
     rmcp::model::Meta(map)
+}
+
+/// Merge the MCP transport-level `_meta` (lifted by rmcp into
+/// `RequestContext::meta`) onto `call_metadata`. Per ACT-MCP §3.3 the
+/// transport channel overrides any same-keyed value already present
+/// (argument-level `_meta` or adapter-cached defaults).
+fn apply_transport_meta(
+    call_metadata: &mut act_types::types::Metadata,
+    ctx_meta: &rmcp::model::Meta,
+) {
+    if !ctx_meta.0.is_empty() {
+        call_metadata.extend(act_types::types::Metadata::from(Value::Object(
+            ctx_meta.0.clone(),
+        )));
+    }
 }
 
 impl rmcp::ServerHandler for ActRmcpBridge {
@@ -675,7 +732,7 @@ mod tests {
     #[test]
     fn list_tools_maps_definitions() {
         let defs = vec![fake_tool("alpha"), fake_tool("beta")];
-        let tools = convert_tool_definitions(&defs);
+        let tools = convert_tool_definitions(&defs, false);
 
         assert_eq!(tools.len(), 2);
         assert_eq!(tools[0].name.as_ref(), "alpha");
@@ -687,6 +744,103 @@ mod tests {
             props.contains_key("n"),
             "original property must be preserved"
         );
+        assert!(
+            !props.contains_key("_meta"),
+            "no _meta injection when inject_arg_meta=false"
+        );
+    }
+
+    #[test]
+    fn list_tools_injects_meta_for_session_provider_components() {
+        let defs = vec![fake_tool("query")];
+        let tools = convert_tool_definitions(&defs, true);
+
+        let schema: &serde_json::Map<String, serde_json::Value> = tools[0].input_schema.as_ref();
+        let props = schema["properties"].as_object().unwrap();
+        assert!(
+            props.contains_key("n"),
+            "original property must be preserved"
+        );
+        let meta_prop = props
+            .get("_meta")
+            .expect("`_meta` property must be injected (ACT-MCP §3.2)");
+        assert_eq!(meta_prop["type"], "object");
+        assert_eq!(meta_prop["additionalProperties"], true);
+        assert!(
+            meta_prop["description"]
+                .as_str()
+                .unwrap_or("")
+                .contains("std:session-id"),
+            "description must mention std:session-id so LLM knows the convention"
+        );
+    }
+
+    #[test]
+    fn inject_meta_creates_properties_when_missing() {
+        // Bare `{"type":"object"}` schema — no `properties` key at all.
+        let mut schema: serde_json::Map<String, Value> = serde_json::json!({"type": "object"})
+            .as_object()
+            .cloned()
+            .unwrap();
+        inject_arg_meta_property(&mut schema);
+        let props = schema["properties"].as_object().unwrap();
+        assert!(props.contains_key("_meta"));
+    }
+
+    #[test]
+    fn transport_meta_overrides_arguments_meta() {
+        // Precedence rule from ACT-MCP §3.3: when both channels carry
+        // the same key, transport wins.
+        let mut call_metadata = act_types::types::Metadata::default();
+
+        // Argument _meta says session A.
+        call_metadata.extend(act_types::types::Metadata::from(serde_json::json!({
+            "std:session-id": "from-args",
+        })));
+
+        // Transport _meta says session B — must win.
+        let ctx = rmcp::model::Meta(
+            serde_json::json!({"std:session-id": "from-transport"})
+                .as_object()
+                .cloned()
+                .unwrap(),
+        );
+        apply_transport_meta(&mut call_metadata, &ctx);
+
+        let final_id = call_metadata
+            .get_as::<String>(act_types::constants::META_SESSION_ID)
+            .expect("std:session-id must be set");
+        assert_eq!(
+            final_id, "from-transport",
+            "transport `_meta` wins over arguments `_meta`"
+        );
+    }
+
+    #[test]
+    fn arguments_meta_supplies_keys_absent_from_transport() {
+        // When a key is only in argument _meta, it survives the merge.
+        let mut call_metadata = act_types::types::Metadata::default();
+        call_metadata.extend(act_types::types::Metadata::from(serde_json::json!({
+            "std:session-id": "abc",
+            "std:traceparent": "00-...-...",
+        })));
+        // Transport carries an unrelated key.
+        let ctx = rmcp::model::Meta(
+            serde_json::json!({"std:request-id": "req-99"})
+                .as_object()
+                .cloned()
+                .unwrap(),
+        );
+        apply_transport_meta(&mut call_metadata, &ctx);
+
+        assert_eq!(
+            call_metadata
+                .get_as::<String>(act_types::constants::META_SESSION_ID)
+                .as_deref(),
+            Some("abc")
+        );
+        assert!(call_metadata.contains_key("std:traceparent"));
+        assert!(call_metadata.contains_key("std:request-id"));
     }
 
     use crate::runtime::CallToolResult as ActCallToolResult;
