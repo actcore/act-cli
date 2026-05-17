@@ -1,7 +1,8 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
+mod init;
 mod manifest;
 mod oci_auth;
 mod oci_config;
@@ -10,6 +11,7 @@ mod push;
 mod skill;
 mod validate;
 mod wasm;
+mod wit_deps;
 
 #[derive(Parser)]
 #[command(
@@ -22,8 +24,42 @@ struct Cli {
     command: Command,
 }
 
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum InitLang {
+    Rust,
+    Python,
+    Js,
+}
+
 #[derive(Subcommand)]
 enum Command {
+    /// Scaffold a new component from a language template
+    ///
+    /// Example: `act-build init rust my-tool` creates `./my-tool/` with a
+    /// working component skeleton ready for `just init && just build`.
+    Init {
+        /// Component language
+        #[arg(value_enum)]
+        lang: InitLang,
+        /// Component name (positional). If omitted, init in the current
+        /// directory using its basename as the name (like `cargo init`).
+        name: Option<String>,
+        /// Short human description (defaults to a placeholder).
+        #[arg(long)]
+        description: Option<String>,
+        /// Declare wasi:http capability requirement.
+        #[arg(long = "http")]
+        needs_http: bool,
+        /// Declare wasi:filesystem capability requirement.
+        #[arg(long = "fs")]
+        needs_filesystem: bool,
+        /// Path to a local checkout of the template repo (overrides env var).
+        #[arg(long = "template-path")]
+        template_path: Option<PathBuf>,
+        /// Skip `git init` in the generated directory.
+        #[arg(long = "no-git")]
+        no_git: bool,
+    },
     /// Post-process a WASM component: embed act:component, act:skill, WASM metadata
     Pack {
         /// Path to the compiled .wasm component
@@ -81,6 +117,27 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.command {
+        Command::Init {
+            lang,
+            name,
+            description,
+            needs_http,
+            needs_filesystem,
+            template_path,
+            no_git,
+        } => init::run(init::InitOptions {
+            language: match lang {
+                InitLang::Rust => init::Language::Rust,
+                InitLang::Python => init::Language::Python,
+                InitLang::Js => init::Language::Js,
+            },
+            name,
+            description,
+            needs_http,
+            needs_filesystem,
+            template_path,
+            no_git,
+        }),
         Command::Pack { wasm } => pack::run(&wasm),
         Command::Validate { wasm } => validate::run(&wasm),
         Command::Push {

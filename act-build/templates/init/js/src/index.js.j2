@@ -1,0 +1,145 @@
+// {{ description }}.
+//
+// JavaScript components implement the tool-provider WIT interface
+// directly. ACT does not (yet) ship a high-level JS SDK; the bindings
+// jco generates from wit/world.wit expect an exported `toolProvider`
+// object with `listTools` and `callTool` methods.
+//
+// `call-tool` returns a `tool-result` variant — `immediate(list<event>)`
+// for synchronous output or `streaming(stream<event>)` for incremental
+// output. The hello example below uses `immediate`.
+
+const textEncoder = new TextEncoder();
+
+const HELLO_SCHEMA = JSON.stringify({
+  type: "object",
+  properties: {
+    name: { type: "string", description: "Name to greet" },
+  },
+  additionalProperties: false,
+});
+
+function contentEvent(text) {
+  return {
+    tag: "content",
+    val: {
+      data: Array.from(textEncoder.encode(text)),
+      mimeType: "text/plain",
+      metadata: [],
+    },
+  };
+}
+
+function errorEvent(kind, message) {
+  return {
+    tag: "error",
+    val: {
+      kind,
+      message: { tag: "plain", val: message },
+      metadata: [],
+    },
+  };
+}
+
+export const toolProvider = {
+  async listTools(_metadata) {
+    return {
+      tag: "ok",
+      val: {
+        metadata: [],
+        tools: [
+          {
+            name: "hello",
+            description: { tag: "plain", val: "Say hello" },
+            parametersSchema: HELLO_SCHEMA,
+            metadata: [],
+          },
+        ],
+      },
+    };
+  },
+
+  async callTool(name, argumentsBytes, _metadata) {
+    if (name !== "hello") {
+      return {
+        tag: "immediate",
+        val: [errorEvent("std:not-found", `Unknown tool: ${name}`)],
+      };
+    }
+    let who = "world";
+    try {
+      const args = decodeCborArgs(new Uint8Array(argumentsBytes));
+      if (typeof args?.name === "string") who = args.name;
+    } catch (e) {
+      return {
+        tag: "immediate",
+        val: [errorEvent("std:invalid-args", `Failed to decode arguments: ${e}`)],
+      };
+    }
+    return {
+      tag: "immediate",
+      val: [contentEvent(`Hello, ${who}!`)],
+    };
+  },
+};
+
+// Minimal CBOR decoder for the argument map. Strings, numbers, bools,
+// null, arrays, and maps with string keys. Plenty for tool args.
+function decodeCborArgs(bytes) {
+  const { value, offset } = decodeCbor(bytes, 0);
+  if (offset !== bytes.length) throw new Error(`trailing bytes at offset ${offset}`);
+  return value;
+}
+
+function decodeCbor(bytes, off) {
+  const first = bytes[off++];
+  const major = first >> 5;
+  const minor = first & 0x1f;
+  const { value: length, offset: nextOff } = readLength(bytes, off, minor);
+  off = nextOff;
+  switch (major) {
+    case 0: return { value: length, offset: off };
+    case 1: return { value: -1 - length, offset: off };
+    case 2: return { value: bytes.subarray(off, off + length), offset: off + length };
+    case 3: return { value: new TextDecoder().decode(bytes.subarray(off, off + length)), offset: off + length };
+    case 4: {
+      const arr = [];
+      for (let i = 0; i < length; i++) {
+        const r = decodeCbor(bytes, off); arr.push(r.value); off = r.offset;
+      }
+      return { value: arr, offset: off };
+    }
+    case 5: {
+      const obj = {};
+      for (let i = 0; i < length; i++) {
+        const k = decodeCbor(bytes, off); off = k.offset;
+        const v = decodeCbor(bytes, off); off = v.offset;
+        obj[k.value] = v.value;
+      }
+      return { value: obj, offset: off };
+    }
+    case 7:
+      if (minor === 20) return { value: false, offset: off };
+      if (minor === 21) return { value: true, offset: off };
+      if (minor === 22) return { value: null, offset: off };
+      if (minor === 23) return { value: undefined, offset: off };
+      throw new Error(`unsupported CBOR simple value: ${minor}`);
+    default: throw new Error(`unsupported CBOR major type: ${major}`);
+  }
+}
+
+function readLength(bytes, off, minor) {
+  if (minor < 24) return { value: minor, offset: off };
+  if (minor === 24) return { value: bytes[off], offset: off + 1 };
+  if (minor === 25) return { value: (bytes[off] << 8) | bytes[off + 1], offset: off + 2 };
+  if (minor === 26) {
+    const v = bytes[off] * 0x1000000 + (bytes[off + 1] << 16) + (bytes[off + 2] << 8) + bytes[off + 3];
+    return { value: v, offset: off + 4 };
+  }
+  if (minor === 27) {
+    let v = 0;
+    for (let i = 0; i < 8; i++) v = v * 256 + bytes[off + i];
+    return { value: v, offset: off + 8 };
+  }
+  throw new Error(`unsupported CBOR length minor: ${minor}`);
+}

@@ -1,0 +1,23 @@
+{
+  "name": "{{ name }}",
+  "version": "0.1.0",
+  "description": "{{ description }}",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@bytecodealliance/componentize-js": "^0.20.0",
+    "@bytecodealliance/jco": "^1.18.0"
+  }{% if needs_http or needs_filesystem %},
+  "act": {
+    "std": {
+      "capabilities": {
+{%- if needs_http %}
+        "wasi:http": {}{% if needs_filesystem %},{% endif %}
+{%- endif %}
+{%- if needs_filesystem %}
+        "wasi:filesystem": {}
+{%- endif %}
+      }
+    }
+  }{% endif %}
+}

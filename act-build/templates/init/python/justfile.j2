@@ -1,0 +1,10 @@
+wasm := "{{ wasm_filename }}"
+{% raw %}
+actbuild := env("ACT_BUILD", "npx @actcore/act-build")
+
+build:
+    uv run componentize-py -d wit -w component-world componentize app -o {{wasm}}
+
+pack: build
+    {{actbuild}} pack {{wasm}}
+{% endraw %}

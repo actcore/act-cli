@@ -1,0 +1,10 @@
+wasm := "target/wasm32-wasip2/release/{{ wasm_filename }}"
+{% raw %}
+actbuild := env("ACT_BUILD", "npx @actcore/act-build")
+
+build:
+    cargo build --release
+
+pack: build
+    {{actbuild}} pack {{wasm}}
+{% endraw %}

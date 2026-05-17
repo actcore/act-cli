@@ -1,0 +1,10 @@
+"""{{ description }}."""
+
+from act_sdk import component, tool
+
+
+@component
+class Component:
+    @tool(description="Say hello", read_only=True)
+    async def hello(self, name: str = "world") -> str:
+        return f"Hello, {name}!"

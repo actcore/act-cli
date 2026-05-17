@@ -1,0 +1,24 @@
+[package]
+name = "{{ name }}"
+description = "{{ description }}"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+act-sdk = "0.7"
+wit-bindgen = { version = "0.57", features = ["async-spawn"] }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
+opt-level = "z"
+
+[lib]
+crate-type = ["cdylib"]
+{% if needs_http %}
+[package.metadata.act.std.capabilities."wasi:http"]
+{% endif -%}
+{% if needs_filesystem %}
+[package.metadata.act.std.capabilities."wasi:filesystem"]
+{% endif -%}

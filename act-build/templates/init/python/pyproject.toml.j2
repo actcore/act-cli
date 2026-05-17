@@ -1,0 +1,27 @@
+[project]
+name = "{{ name }}"
+version = "0.1.0"
+description = "{{ description }}"
+requires-python = ">=3.14"
+dependencies = [
+    "act-sdk>=0.2.0",
+]
+
+[dependency-groups]
+dev = [
+    "componentize-py>=0.21.0",
+    "ruff>=0.15.8",
+]
+{% if needs_http %}
+[tool.act.std.capabilities."wasi:http"]
+
+[[tool.act.std.capabilities."wasi:http".allow]]
+host = "*"
+{% endif -%}
+{% if needs_filesystem %}
+[tool.act.std.capabilities."wasi:filesystem"]
+
+[[tool.act.std.capabilities."wasi:filesystem".allow]]
+path = "**"
+mode = "rw"
+{% endif -%}
