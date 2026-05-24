@@ -35,21 +35,49 @@ static OCI_RE: LazyLock<Regex> = LazyLock::new(|| {
     ).unwrap()
 });
 
-/// Parsing never fails — unrecognized inputs become `Name`.
+/// Error returned when a component reference cannot be parsed.
+///
+/// The only inputs that fail are explicit-but-malformed `file://` URIs.
+/// Everything else parses; unrecognized inputs become [`ComponentRef::Name`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseComponentRefError(String);
+
+impl std::fmt::Display for ParseComponentRefError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ParseComponentRefError {}
+
+/// An explicit URI scheme (`file://`, `oci://`, `http(s)://`) is authoritative:
+/// it selects the kind directly and skips the heuristics. Other inputs fall
+/// through to OCI-regex / path / bare-name guessing.
 impl FromStr for ComponentRef {
-    type Err = std::convert::Infallible;
+    type Err = ParseComponentRefError;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        // HTTP/S URL
+        // Explicit URI scheme wins. Only schemes we own are treated as such;
+        // any other parseable "scheme" (e.g. `localhost:5000/...`, `C:\...`)
+        // falls through so the heuristics below can still classify it.
         if let Ok(url) = Url::parse(s) {
-            if url.scheme() == "http" || url.scheme() == "https" {
-                return Ok(Self::Http(url));
-            }
-            // oci:// prefix
-            if url.scheme() == "oci" {
-                // Reconstruct the reference without the oci:// prefix
-                let rest = &s["oci://".len()..];
-                return Ok(Self::Oci(rest.to_string()));
+            match url.scheme() {
+                "file" => {
+                    let path = url.to_file_path().map_err(|()| {
+                        ParseComponentRefError(format!(
+                            "invalid file:// URI: {s}\n\
+                             use an absolute path, e.g. file:///path/to/component.wasm"
+                        ))
+                    })?;
+                    return Ok(Self::Local(path));
+                }
+                "oci" => {
+                    // Reconstruct the reference without the oci:// prefix.
+                    let rest = &s["oci://".len()..];
+                    return Ok(Self::Oci(rest.to_string()));
+                }
+                "http" | "https" => return Ok(Self::Http(url)),
+                _ => {}
             }
         }
 
@@ -358,5 +386,33 @@ mod tests {
     #[test]
     fn parse_bare_name_simple() {
         assert!(matches!(parse("sqlite"), ComponentRef::Name(n) if n == "sqlite"));
+    }
+
+    #[test]
+    fn parse_file_uri_absolute() {
+        match parse("file:///abs/x.wasm") {
+            ComponentRef::Local(p) => assert_eq!(p, std::path::Path::new("/abs/x.wasm")),
+            other => panic!("expected Local, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_file_uri_relative_errors() {
+        assert!("file://./x.wasm".parse::<ComponentRef>().is_err());
+    }
+
+    #[test]
+    fn parse_file_uri_opaque_errors() {
+        assert!("file://x.wasm".parse::<ComponentRef>().is_err());
+    }
+
+    /// Regression guard: a registry ref with a port is `Url::parse`-able with a
+    /// non-owned scheme (`localhost`) and must still resolve via the OCI regex.
+    #[test]
+    fn parse_oci_with_registry_port() {
+        assert!(matches!(
+            parse("localhost:5000/foo:tag"),
+            ComponentRef::Oci(_)
+        ));
     }
 }
