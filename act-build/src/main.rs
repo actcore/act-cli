@@ -44,6 +44,11 @@ enum Command {
         /// Component name (positional). If omitted, init in the current
         /// directory using its basename as the name (like `cargo init`).
         name: Option<String>,
+        /// Directory to scaffold into. Defaults to `./<name>/` (or the current
+        /// directory when no name is given). When set without a name, the
+        /// component name is taken from this path's basename.
+        #[arg(long = "output", short = 'o', value_name = "DIR")]
+        output: Option<PathBuf>,
         /// Short human description (defaults to a placeholder).
         #[arg(long)]
         description: Option<String>,
@@ -120,6 +125,7 @@ fn main() -> Result<()> {
         Command::Init {
             lang,
             name,
+            output,
             description,
             needs_http,
             needs_filesystem,
@@ -132,6 +138,7 @@ fn main() -> Result<()> {
                 InitLang::Js => init::Language::Js,
             },
             name,
+            output,
             description,
             needs_http,
             needs_filesystem,

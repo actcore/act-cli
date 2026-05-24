@@ -44,6 +44,11 @@ pub struct InitOptions {
     /// Positional name. If `None`, init in the current directory using
     /// its basename as the component name.
     pub name: Option<String>,
+    /// Target directory to scaffold into. If `None`, derives from `name`
+    /// (`./<name>/`) or the current directory. When set, the scaffold is
+    /// written here and the component name defaults to this path's basename
+    /// unless `name` is given.
+    pub output: Option<PathBuf>,
     pub description: Option<String>,
     pub needs_http: bool,
     pub needs_filesystem: bool,
@@ -67,7 +72,7 @@ pub fn run(opts: InitOptions) -> Result<()> {
         bail!("template path {} is not a directory", p.display());
     }
 
-    let (target_dir, name) = resolve_target(opts.name.as_deref())?;
+    let (target_dir, name) = resolve_target(opts.name.as_deref(), opts.output.as_deref())?;
     validate_name(&name)?;
 
     if target_dir.exists() && dir_has_entries(&target_dir)? {
@@ -113,7 +118,9 @@ pub fn run(opts: InitOptions) -> Result<()> {
     eprintln!("Created component {} in {}", name, target_dir.display());
     eprintln!();
     eprintln!("Next steps:");
-    if opts.name.is_some() {
+    if let Some(out) = &opts.output {
+        eprintln!("  cd {}", out.display());
+    } else if opts.name.is_some() {
         eprintln!("  cd {name}");
     }
     if !wit_fetched && wit_dir.join("deps.toml").exists() {
@@ -134,8 +141,24 @@ fn resolve_template_source(opts: &InitOptions) -> TemplateSource {
     TemplateSource::Embedded(opts.language.embedded())
 }
 
-fn resolve_target(name_arg: Option<&str>) -> Result<(PathBuf, String)> {
+fn resolve_target(name_arg: Option<&str>, output: Option<&Path>) -> Result<(PathBuf, String)> {
     let cwd = std::env::current_dir().context("getting current directory")?;
+    if let Some(out) = output {
+        let target = if out.is_absolute() {
+            out.to_path_buf()
+        } else {
+            cwd.join(out)
+        };
+        let name = match name_arg {
+            Some(n) => n.to_string(),
+            None => target
+                .file_name()
+                .and_then(|s| s.to_str())
+                .ok_or_else(|| anyhow!("cannot derive component name from --output path"))?
+                .to_string(),
+        };
+        return Ok((target, name));
+    }
     match name_arg {
         Some(n) => Ok((cwd.join(n), n.to_string())),
         None => {
@@ -330,6 +353,21 @@ mod tests {
         assert!(validate_name("1tool").is_err());
         assert!(validate_name("my_tool").is_err()); // underscores disallowed
         assert!(validate_name("my.tool").is_err());
+    }
+
+    #[test]
+    fn output_derives_name_from_basename() {
+        let (target, name) = resolve_target(None, Some(Path::new("/tmp/foo-bar"))).unwrap();
+        assert_eq!(target, PathBuf::from("/tmp/foo-bar"));
+        assert_eq!(name, "foo-bar");
+    }
+
+    #[test]
+    fn output_with_explicit_name_overrides_basename() {
+        let (target, name) =
+            resolve_target(Some("my-tool"), Some(Path::new("/tmp/place"))).unwrap();
+        assert_eq!(target, PathBuf::from("/tmp/place"));
+        assert_eq!(name, "my-tool");
     }
 
     #[test]
