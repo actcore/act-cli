@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.4] - 2026-05-24
+
+### Added
+
+- **`wasi:sockets` sandboxing** — restrict a component's outbound socket
+  access with `--sockets-policy`, `--sockets-allow`, and `--sockets-deny`
+  (host/CIDR + ports/protocols, e.g. `db:5432/tcp`), configurable via flags,
+  the `ACT_SOCKETS_ALLOW` env var, or config profiles. Enforced as a
+  capability ceiling in the wasmtime store.
+- **`act-build init <lang>`** — scaffold a new component for Rust, Python, or
+  JavaScript in one command, with `--output` to choose the target directory
+  and ready-to-run test targets.
+- **MCP over Streamable HTTP** — serve the MCP adapter over Streamable HTTP
+  with `act run <component> --mcp --http`.
+- **`file://` component references** — `act run file:///abs/path.wasm` now
+  resolves to a local file. An explicit URI scheme (`file://`, `oci://`,
+  `http(s)://`) is now authoritative and selects the reference kind directly
+  instead of going through path/OCI guessing.
+
+### Changed
+
+- Upgraded dependencies, most notably wasmtime 43 -> 45.
+- The MCP bridge now injects a `_meta` argument channel into tool schemas so
+  LLM-driven MCP clients can pass `std:session-id` to session-provider
+  components.
+
 ## [0.7.3] - 2026-05-09
 
 ### Added
