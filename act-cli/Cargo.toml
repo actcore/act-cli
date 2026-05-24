@@ -13,7 +13,7 @@ readme.workspace = true
 include = ["src/**", "wit/**", "build.rs"]
 
 [build-dependencies]
-embed-manifest = "1.4"
+embed-manifest = "1.5"
 
 [[bin]]
 name = "act"
@@ -23,35 +23,35 @@ path = "src/main.rs"
 act-types.workspace = true
 ciborium = "0.2"
 anyhow = "1.0.102"
-axum = "0.8.8"
+axum = "0.8.9"
 base64 = "0.22.1"
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
+serde_json = "1.0.150"
 serde_with = "3"
-tokio = { version = "1.50", features = ["full"] }
+tokio = { version = "1.52", features = ["full"] }
 tokio-stream = "0.1.18"
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
-toml = "1.0.7"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+toml = "1.1.2"
 dirs = "6"
 futures-util = "0.3"
 indicatif = "0.18.4"
 regex = "1"
-reqwest = { version = "0.13.2", default-features = false, features = ["rustls", "stream", "http2", "http3"] }
-oci-client = "0.16"
+reqwest = { version = "0.13.3", default-features = false, features = ["rustls", "stream", "http2", "http3"] }
+oci-client = "0.17"
 sha2 = "0.11.0"
 tar = "0.4"
 url = "2"
 shellexpand = "3"
 wasmparser.workspace = true
-wasmtime = { version = "43", features = ["component-model", "component-model-async"] }
-wasmtime-wasi = { version = "43", default-features = false, features = ["p2", "p3"] }
-wasmtime-wasi-http = { version = "43", default-features = false, features = ["p2", "p3"] }
+wasmtime = { version = "45", features = ["component-model", "component-model-async"] }
+wasmtime-wasi = { version = "45", default-features = false, features = ["p2", "p3"] }
+wasmtime-wasi-http = { version = "45", default-features = false, features = ["p2", "p3"] }
 http = "1"
 http-body-util = "0.1"
 hyper = "1"
-rmcp = { version = "1.5", features = ["server", "transport-io", "transport-streamable-http-server"] }
+rmcp = { version = "1.7", features = ["server", "transport-io", "transport-streamable-http-server"] }
 bytes = "1"
 cidr = "0.3"
 globset = "0.4"
@@ -60,4 +60,4 @@ owo-colors = { version = "4.3.0", features = ["supports-colors"] }
 
 [dev-dependencies]
 tempfile = "3"
-rmcp = { version = "1.5", features = ["client", "transport-child-process"] }
+rmcp = { version = "1.7", features = ["client", "transport-child-process"] }

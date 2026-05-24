@@ -85,13 +85,13 @@ fn inspect_wasm(wasm: &[u8]) -> Result<(&'static str, Option<WasmComponentConfig
             Payload::ComponentExportSection(reader) => {
                 for export in reader {
                     let export = export.context("reading component export")?;
-                    exports.push(export.name.0.to_string());
+                    exports.push(export.name.name.to_string());
                 }
             }
             Payload::ComponentImportSection(reader) => {
                 for import in reader {
                     let import = import.context("reading component import")?;
-                    imports.push(import.name.0.to_string());
+                    imports.push(import.name.name.to_string());
                 }
             }
             _ => {}

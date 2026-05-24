@@ -68,7 +68,7 @@ pub fn check_tool_provider_export(wasm: &[u8]) -> Result<bool> {
         if let Payload::ComponentExportSection(reader) = payload {
             for export in reader {
                 let export = export.context("failed to read component export")?;
-                if export.name.0.contains(TOOL_PROVIDER_INTERFACE) {
+                if export.name.name.contains(TOOL_PROVIDER_INTERFACE) {
                     return Ok(true);
                 }
             }

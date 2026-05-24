@@ -12,7 +12,7 @@ readme = "README.md"
 
 [workspace.dependencies]
 act-types = "0.7"
-wasmparser = "0.247.0"
+wasmparser = "0.250.0"
 
 [profile.release]
 lto = "thin"
