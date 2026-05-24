@@ -422,7 +422,8 @@ async fn cmd_run(
             None => "[::1]:3000".parse().unwrap(),
         };
         let pc = prepare_component(&component, &opts).await?;
-        return rmcp_bridge::run_http(addr, pc.info, pc.handle, pc.metadata, pc.has_sessions).await;
+        return rmcp_bridge::run_http(addr, pc.info, pc.handle, pc.metadata, pc.has_sessions, None)
+            .await;
     }
 
     if mcp {
@@ -430,7 +431,8 @@ async fn cmd_run(
             anyhow::bail!("--listen requires --http (MCP stdio has no listen address)");
         }
         let pc = prepare_component(&component, &opts).await?;
-        return rmcp_bridge::run_stdio(pc.info, pc.handle, pc.metadata, pc.has_sessions).await;
+        return rmcp_bridge::run_stdio(pc.info, pc.handle, pc.metadata, pc.has_sessions, None)
+            .await;
     }
 
     if http || listen.is_some() {

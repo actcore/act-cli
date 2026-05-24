@@ -31,6 +31,11 @@ pub struct ActRmcpBridge {
     /// `act:sessions/session-provider`. Controls synthesis of virtual
     /// `open_session`/`close_session` tools and routing of those calls.
     pub has_sessions: bool,
+    /// When `Some`, the host pre-opened a single default session
+    /// (session-of-1, ACT-SESSIONS §3): session machinery is hidden and
+    /// this id is forced into every call's `std:session-id` metadata,
+    /// overriding any client-supplied value.
+    pub default_session_id: Option<String>,
 }
 
 fn map_content_part(part: &runtime::exports::act::tools::tool_provider::ContentPart) -> Content {
@@ -194,12 +199,14 @@ pub async fn run_stdio(
     handle: runtime::ComponentHandle,
     metadata: runtime::Metadata,
     has_sessions: bool,
+    default_session_id: Option<String>,
 ) -> anyhow::Result<()> {
     let bridge = ActRmcpBridge {
         handle,
         info,
         metadata,
         has_sessions,
+        default_session_id,
     };
 
     let service = rmcp::serve_server(bridge, (tokio::io::stdin(), tokio::io::stdout()))
@@ -225,6 +232,7 @@ pub async fn run_http(
     handle: runtime::ComponentHandle,
     metadata: runtime::Metadata,
     has_sessions: bool,
+    default_session_id: Option<String>,
 ) -> anyhow::Result<()> {
     use rmcp::transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
@@ -237,6 +245,7 @@ pub async fn run_http(
                 info: info.clone(),
                 metadata: metadata.clone(),
                 has_sessions,
+                default_session_id: default_session_id.clone(),
             })
         },
         Arc::new(LocalSessionManager::default()),
@@ -257,10 +266,24 @@ pub async fn run_http(
 // ── ServerHandler impl ──────────────────────────────────────────────────────
 
 impl ActRmcpBridge {
+    /// Whether session lifecycle ops are exposed to clients. False in
+    /// session-of-1 mode (a default session is pre-opened and hidden).
+    fn expose_sessions(&self) -> bool {
+        self.has_sessions && self.default_session_id.is_none()
+    }
+
+    /// Base metadata for non-call requests (list-tools, schema fetch),
+    /// with the default session-id injected when in session-of-1 mode.
+    fn base_metadata(&self) -> runtime::Metadata {
+        let mut meta = self.metadata.clone();
+        force_session_id(&mut meta, &self.default_session_id);
+        meta
+    }
+
     async fn list_tools_impl(&self) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let req = runtime::ComponentRequest::ListTools {
-            metadata: self.metadata.clone(),
+            metadata: self.base_metadata(),
             reply: reply_tx,
         };
 
@@ -286,10 +309,12 @@ impl ActRmcpBridge {
         // Per ACT-MCP §3.2, adapters MUST inject the `_meta` argument
         // property into tools of components exporting session-provider
         // so agents can supply `std:session-id` (and other `std:*`
-        // keys) without relying on transport-level `_meta`.
-        let mut tools = convert_tool_definitions(&list.tools, self.has_sessions);
+        // keys) without relying on transport-level `_meta`. In
+        // session-of-1 mode the host forces the session-id, so the hint
+        // is suppressed — the agent must NOT be prompted to supply it.
+        let mut tools = convert_tool_definitions(&list.tools, self.expose_sessions());
 
-        if self.has_sessions {
+        if self.expose_sessions() {
             let open_schema = self.fetch_open_session_args_schema().await?;
             tools.push(virtual_open_session_tool(open_schema));
             tools.push(virtual_close_session_tool());
@@ -347,7 +372,7 @@ impl ActRmcpBridge {
         // before any argument-level `_meta` extraction. Virtual tools
         // are session-lifecycle ops, not session-bound capability calls,
         // so they do not participate in the argument metadata channel.
-        if self.has_sessions {
+        if self.expose_sessions() {
             match request.name.as_ref() {
                 VIRTUAL_OPEN_SESSION => {
                     let mut call_metadata = self.metadata.clone();
@@ -380,6 +405,9 @@ impl ActRmcpBridge {
             call_metadata.extend(act_types::types::Metadata::from(Value::Object(map)));
         }
         apply_transport_meta(&mut call_metadata, ctx_meta);
+        // Session-of-1: force the pre-opened default id over any
+        // client-supplied std:session-id so the façade stays stateless.
+        force_session_id(&mut call_metadata, &self.default_session_id);
 
         let cbor_args =
             act_types::cbor::json_to_cbor(&Value::Object(arguments_obj)).map_err(|_| {
@@ -571,6 +599,18 @@ fn session_op_meta(op: &'static str) -> rmcp::model::Meta {
     rmcp::model::Meta(map)
 }
 
+/// Force `std:session-id` to `default` when set, overriding any existing
+/// value. Used in session-of-1 mode so the hidden default session wins over
+/// client-supplied ids (ACT-SESSIONS §3 "session-of-1").
+fn force_session_id(meta: &mut act_types::types::Metadata, default: &Option<String>) {
+    if let Some(id) = default {
+        meta.insert(
+            act_types::constants::META_SESSION_ID,
+            Value::String(id.clone()),
+        );
+    }
+}
+
 /// Merge the MCP transport-level `_meta` (lifted by rmcp into
 /// `RequestContext::meta`) onto `call_metadata`. Per ACT-MCP §3.3 the
 /// transport channel overrides any same-keyed value already present
@@ -701,6 +741,71 @@ mod tests {
         tx
     }
 
+    fn bridge_with_default(default: Option<&str>) -> ActRmcpBridge {
+        ActRmcpBridge {
+            handle: fake_handle(),
+            info: fake_info(),
+            metadata: runtime::Metadata::default(),
+            has_sessions: true,
+            default_session_id: default.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn expose_sessions_false_when_default_set() {
+        assert!(
+            !bridge_with_default(Some("sid_0")).expose_sessions(),
+            "session-of-1 must hide session machinery"
+        );
+        assert!(
+            bridge_with_default(None).expose_sessions(),
+            "without a default session, machinery stays exposed"
+        );
+    }
+
+    #[test]
+    fn base_metadata_injects_default_session_id() {
+        let meta = bridge_with_default(Some("sid_0")).base_metadata();
+        assert_eq!(
+            meta.get_as::<String>(act_types::constants::META_SESSION_ID)
+                .as_deref(),
+            Some("sid_0"),
+            "base metadata must carry the default session-id"
+        );
+        let none = bridge_with_default(None).base_metadata();
+        assert!(
+            none.get_as::<String>(act_types::constants::META_SESSION_ID)
+                .is_none(),
+            "no default → no session-id seeded"
+        );
+    }
+
+    #[test]
+    fn force_session_id_overrides_client_value() {
+        let mut meta = act_types::types::Metadata::from(serde_json::json!({
+            "std:session-id": "client-supplied",
+        }));
+        force_session_id(&mut meta, &Some("sid_default".to_string()));
+        assert_eq!(
+            meta.get_as::<String>(act_types::constants::META_SESSION_ID)
+                .as_deref(),
+            Some("sid_default"),
+            "default must override client-supplied session-id"
+        );
+
+        let mut meta2 = act_types::types::Metadata::from(serde_json::json!({
+            "std:session-id": "client-supplied",
+        }));
+        force_session_id(&mut meta2, &None);
+        assert_eq!(
+            meta2
+                .get_as::<String>(act_types::constants::META_SESSION_ID)
+                .as_deref(),
+            Some("client-supplied"),
+            "no default → client value preserved"
+        );
+    }
+
     #[test]
     fn get_info_exposes_server_name_version_and_tools_capability() {
         let bridge = ActRmcpBridge {
@@ -708,6 +813,7 @@ mod tests {
             info: fake_info(),
             metadata: runtime::Metadata::default(),
             has_sessions: false,
+            default_session_id: None,
         };
         let info = rmcp::ServerHandler::get_info(&bridge);
         assert_eq!(info.server_info.name, "example");
