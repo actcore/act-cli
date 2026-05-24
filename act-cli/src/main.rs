@@ -101,6 +101,15 @@ enum Command {
         #[arg(short, long)]
         listen: Option<String>,
 
+        /// Pre-open a single session at startup from this JSON object and
+        /// run as session-of-1: every call uses the pre-opened session, the
+        /// session machinery is hidden from clients (no virtual
+        /// open_session/close_session tools, no /sessions endpoints), and any
+        /// client-supplied std:session-id is ignored. Requires a component
+        /// that exports act:sessions/session-provider.
+        #[arg(long)]
+        session_args: Option<String>,
+
         #[command(flatten)]
         opts: CommonOpts,
     },
@@ -233,8 +242,9 @@ async fn main() -> Result<()> {
             mcp,
             http,
             listen,
+            session_args,
             opts,
-        } => cmd_run(component, mcp, http, listen, opts).await,
+        } => cmd_run(component, mcp, http, listen, session_args, opts).await,
         Command::Call {
             component,
             tool,
@@ -404,11 +414,34 @@ fn parse_listen_addr(s: &str) -> Result<SocketAddr> {
     anyhow::bail!("invalid listen address: {s} (expected [host]:port or port number)")
 }
 
+/// If `session_args` is set, open a single default session against the
+/// prepared component and return its id (session-of-1, ACT-SESSIONS §3). The
+/// session is closed automatically when the component actor shuts down
+/// (`runtime` closes every tracked session on deinit).
+async fn maybe_open_default_session(
+    pc: &PreparedComponent,
+    session_args: &Option<String>,
+) -> Result<Option<String>> {
+    match session_args {
+        Some(json) => {
+            if !pc.has_sessions {
+                anyhow::bail!(
+                    "--session-args was set, but the component does not export \
+                     act:sessions/session-provider"
+                );
+            }
+            Ok(Some(open_session_for_call(pc, json).await?))
+        }
+        None => Ok(None),
+    }
+}
+
 async fn cmd_run(
     component: ComponentRef,
     mcp: bool,
     http: bool,
     listen: Option<String>,
+    session_args: Option<String>,
     opts: CommonOpts,
 ) -> Result<()> {
     // Transport matrix:
@@ -422,8 +455,16 @@ async fn cmd_run(
             None => "[::1]:3000".parse().unwrap(),
         };
         let pc = prepare_component(&component, &opts).await?;
-        return rmcp_bridge::run_http(addr, pc.info, pc.handle, pc.metadata, pc.has_sessions, None)
-            .await;
+        let default_session_id = maybe_open_default_session(&pc, &session_args).await?;
+        return rmcp_bridge::run_http(
+            addr,
+            pc.info,
+            pc.handle,
+            pc.metadata,
+            pc.has_sessions,
+            default_session_id,
+        )
+        .await;
     }
 
     if mcp {
@@ -431,8 +472,15 @@ async fn cmd_run(
             anyhow::bail!("--listen requires --http (MCP stdio has no listen address)");
         }
         let pc = prepare_component(&component, &opts).await?;
-        return rmcp_bridge::run_stdio(pc.info, pc.handle, pc.metadata, pc.has_sessions, None)
-            .await;
+        let default_session_id = maybe_open_default_session(&pc, &session_args).await?;
+        return rmcp_bridge::run_stdio(
+            pc.info,
+            pc.handle,
+            pc.metadata,
+            pc.has_sessions,
+            default_session_id,
+        )
+        .await;
     }
 
     if http || listen.is_some() {
@@ -442,12 +490,13 @@ async fn cmd_run(
         };
 
         let pc = prepare_component(&component, &opts).await?;
+        let default_session_id = maybe_open_default_session(&pc, &session_args).await?;
 
         let state = Arc::new(http::AppState {
             info: pc.info,
             component: pc.handle,
             metadata: pc.metadata,
-            default_session_id: None,
+            default_session_id,
         });
 
         tracing::info!(%addr, "ACT host listening");
