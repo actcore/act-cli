@@ -80,7 +80,9 @@ dependencies = [
 
 [[package]]
 name = "act-types"
-version = "0.7.0"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "40744091fc7b75e2f694d0df62476f5dea36c72fc6bf3bed86364ffb1a52c691"
 dependencies = [
  "base64",
  "ciborium",
