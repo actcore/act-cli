@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.6] - 2026-05-26
+
+### Added
+
+- `act run --session-args '<json>'`: pre-open a single session at startup and
+  serve the component as "session-of-1". Every call transparently uses the
+  pre-opened session, the session machinery is hidden from clients (no MCP
+  virtual `open_session`/`close_session` tools, no `/sessions` HTTP endpoints),
+  and any client-supplied `std:session-id` is overridden. Requires a component
+  that exports `act:sessions/session-provider`. (Previously `--session-args`
+  was available only on `act call` for a single invocation.)
+
 ## [0.7.5] - 2026-05-25
 
 ### Fixed
