@@ -1,5 +1,6 @@
 wasm := "{{ wasm_filename }}"
 {% raw %}
+act := env("ACT", "npx @actcore/act")
 actbuild := env("ACT_BUILD", "npx @actcore/act-build")
 jco := env("JCO", "npx @bytecodealliance/jco")
 
@@ -8,4 +9,7 @@ build:
 
 pack: build
     {{actbuild}} pack {{wasm}}
+
+test: pack
+    {{act}} call {{wasm}} hello --args '{"name":"act"}'
 {% endraw %}
