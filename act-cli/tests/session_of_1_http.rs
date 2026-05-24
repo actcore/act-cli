@@ -98,6 +98,43 @@ async fn session_of_1_suppresses_sessions_and_forces_default() {
     child.kill().ok();
 }
 
+/// Sending a rogue `std:session-id` in the top-level `metadata` of a tool call
+/// must NOT override the host-forced default.  The canary returns
+/// `std:session-not-found` for unknown ids, so a regression from "force" to
+/// "default" would cause the rogue id to reach the component and produce an
+/// error response instead of the expected value.
+#[tokio::test]
+async fn session_of_1_overrides_client_supplied_session_id() {
+    let port = free_port();
+    let mut child = spawn_server(&["--session-args", r#"{"start":5}"#], port).await;
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{port}");
+
+    // Supply a rogue session-id in the top-level metadata field.
+    let resp = client
+        .post(format!("{base}/tools/read"))
+        .header("content-type", "application/json")
+        .body(json_body(
+            &serde_json::json!({"arguments": {}, "metadata": {"std:session-id": "rogue-does-not-exist"}}),
+        ))
+        .send()
+        .await
+        .expect("POST /tools/read with rogue session-id");
+    assert!(
+        resp.status().is_success(),
+        "forced default must override rogue session-id, call should succeed: {:?}",
+        resp.status()
+    );
+    let text = resp.text().await.expect("response text");
+    let body: serde_json::Value = serde_json::from_str(&text).expect("json body");
+    assert_eq!(
+        body["content"][0]["data"]["value"], 5,
+        "must return the default session value 5 (rogue id overridden); got {body}"
+    );
+
+    child.kill().ok();
+}
+
 #[tokio::test]
 async fn without_session_args_sessions_endpoint_is_present() {
     let port = free_port();

@@ -89,7 +89,7 @@ fn internal_error_response(message: &str) -> axum::response::Response {
 }
 
 /// Force `std:session-id` to the default when in session-of-1 mode, overriding
-/// any body/header-supplied value (ACT-SESSIONS §3 "session-of-1").
+/// any body-supplied value (ACT-SESSIONS §3 "session-of-1").
 fn apply_default_session(meta: &mut Metadata, default: &Option<String>) {
     if let Some(id) = default {
         meta.insert(META_SESSION_ID, serde_json::Value::String(id.clone()));

@@ -90,6 +90,58 @@ async fn session_of_1_hides_virtual_tools_and_uses_default_session() {
     client.cancel().await.ok();
 }
 
+/// Sending a rogue `std:session-id` via the argument `_meta` channel must NOT
+/// override the host-forced default session-id ("force" semantics, not "default").
+/// The canary returns `std:session-not-found` for unknown session ids, so if
+/// force degrades to default the rogue id would reach the component and error.
+#[tokio::test]
+async fn session_of_1_overrides_client_supplied_session_id() {
+    let transport = TokioChildProcess::new(
+        tokio::process::Command::new(act_binary_path()).configure(|cmd| {
+            cmd.arg("run")
+                .arg(canary_path())
+                .arg("--mcp")
+                .arg("--session-args")
+                .arg(r#"{"start":7}"#);
+        }),
+    )
+    .expect("spawn act --mcp --session-args");
+
+    let client = ().serve(transport).await.expect("rmcp handshake");
+
+    // Build arguments with a rogue _meta session-id that the canary does not know.
+    let arguments = serde_json::json!({"_meta": {"std:session-id": "rogue-does-not-exist"}})
+        .as_object()
+        .unwrap()
+        .clone();
+    let params = CallToolRequestParams::new("read").with_arguments(arguments);
+
+    let result = client
+        .call_tool(params)
+        .await
+        .expect("call_tool read with rogue session-id");
+
+    assert_ne!(
+        result.is_error,
+        Some(true),
+        "forced default must override rogue session-id, call should succeed: {result:?}"
+    );
+    let text = result
+        .content
+        .iter()
+        .find_map(|c| match &c.raw {
+            RawContent::Text(t) => Some(t.text.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    assert!(
+        text.contains('7'),
+        "must return the default session value 7 (rogue id overridden); got {text:?}"
+    );
+
+    client.cancel().await.ok();
+}
+
 /// A non-session component (`time.wasm`) with `--session-args` must bail with
 /// the missing-session-provider error before serving.
 #[test]
