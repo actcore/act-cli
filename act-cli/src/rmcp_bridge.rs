@@ -41,7 +41,11 @@ pub struct ActRmcpBridge {
 fn map_content_part(part: &runtime::exports::act::tools::tool_provider::ContentPart) -> Content {
     let mime = part.mime_type.as_deref().unwrap_or("");
 
-    if mime.starts_with("text/") {
+    // UTF-8 text-like payloads surface as MCP text content verbatim. This
+    // covers `text/*` and JSON (`application/json`, `application/*+json`) —
+    // JSON bytes are UTF-8, not CBOR, so they must not hit the base64 path
+    // below. Matches the ACT-HTTP transport, which also treats JSON as text.
+    if mime.starts_with("text/") || mime == "application/json" || mime.ends_with("+json") {
         let text = String::from_utf8_lossy(&part.data).into_owned();
         return Content::text(text);
     }
@@ -715,6 +719,24 @@ mod tests {
             text.contains("key") && text.contains("value"),
             "got: {text}"
         );
+    }
+
+    #[test]
+    fn map_content_json_decodes_to_text() {
+        // application/json content (UTF-8 JSON bytes, as emitted by act-sdk's
+        // `Json<T>`) must surface as the literal JSON string — NOT base64.
+        let json = br#"{"id":1,"name":"Fixture WS"}"#;
+        let c = map_content_part(&part(Some("application/json"), json));
+        let text = content_text(&c).expect("json must become text");
+        assert_eq!(text, r#"{"id":1,"name":"Fixture WS"}"#);
+    }
+
+    #[test]
+    fn map_content_json_suffix_decodes_to_text() {
+        let body = br#"{"ok":true}"#;
+        let c = map_content_part(&part(Some("application/vnd.api+json"), body));
+        let text = content_text(&c).expect("+json must become text");
+        assert_eq!(text, r#"{"ok":true}"#);
     }
 
     #[test]
