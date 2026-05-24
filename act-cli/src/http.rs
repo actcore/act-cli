@@ -24,6 +24,10 @@ pub struct AppState {
     pub info: act_types::ComponentInfo,
     pub component: runtime::ComponentHandle,
     pub metadata: Metadata,
+    /// When `Some`, a single default session was pre-opened (session-of-1,
+    /// ACT-SESSIONS §3): `/sessions*` routes are unregistered and this id is
+    /// forced into every call's `std:session-id` metadata.
+    pub default_session_id: Option<String>,
 }
 
 // ── Conversion helpers ──
@@ -82,6 +86,14 @@ fn internal_error_response(message: &str) -> axum::response::Response {
         }),
     )
         .into_response()
+}
+
+/// Force `std:session-id` to the default when in session-of-1 mode, overriding
+/// any body/header-supplied value (ACT-SESSIONS §3 "session-of-1").
+fn apply_default_session(meta: &mut Metadata, default: &Option<String>) {
+    if let Some(id) = default {
+        meta.insert(META_SESSION_ID, serde_json::Value::String(id.clone()));
+    }
 }
 
 /// Format an SseEvent as an axum SSE Event.
@@ -151,6 +163,7 @@ async fn list_tools_inner(
     if let Some(value) = metadata {
         meta.extend(runtime::Metadata::from(value));
     }
+    apply_default_session(&mut meta, &state.default_session_id);
 
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     let request = runtime::ComponentRequest::ListTools {
@@ -361,6 +374,7 @@ async fn tool_call_dispatcher(
     if let Some(value) = body.metadata {
         metadata.extend(Metadata::from(value));
     }
+    apply_default_session(&mut metadata, &state.default_session_id);
 
     let metadata_wit: Vec<(String, Vec<u8>)> = metadata.into();
 
@@ -522,16 +536,25 @@ async fn protocol_version_layer(request: Request, next: Next) -> axum::response:
 }
 
 pub fn create_router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let mut router = Router::new()
         .route("/info", get(get_info))
         .route("/tools", axum::routing::any(tools_dispatcher))
-        .route("/tools/{name}", axum::routing::any(tool_call_dispatcher))
-        .route(
-            "/sessions/open-args-schema",
-            axum::routing::any(session_open_args_schema_dispatcher),
-        )
-        .route("/sessions", axum::routing::post(session_open))
-        .route("/sessions/{id}", axum::routing::delete(session_close))
+        .route("/tools/{name}", axum::routing::any(tool_call_dispatcher));
+
+    // Session-of-1 hides the session machinery (ACT-SESSIONS §3): when a
+    // default session is pre-opened, the component looks stateless and the
+    // lifecycle endpoints are absent (404).
+    if state.default_session_id.is_none() {
+        router = router
+            .route(
+                "/sessions/open-args-schema",
+                axum::routing::any(session_open_args_schema_dispatcher),
+            )
+            .route("/sessions", axum::routing::post(session_open))
+            .route("/sessions/{id}", axum::routing::delete(session_close));
+    }
+
+    router
         .layer(middleware::from_fn(protocol_version_layer))
         .with_state(state)
 }
@@ -566,5 +589,24 @@ mod tests {
     #[test]
     fn query_method_is_valid() {
         assert_eq!(query_method().as_str(), "QUERY");
+    }
+
+    #[test]
+    fn apply_default_session_overrides_and_skips() {
+        // Some(id): inject, overriding any existing value.
+        let mut meta = Metadata::from(serde_json::json!({"std:session-id": "client"}));
+        apply_default_session(&mut meta, &Some("sid_default".to_string()));
+        assert_eq!(
+            meta.get_as::<String>(META_SESSION_ID).as_deref(),
+            Some("sid_default")
+        );
+
+        // None: leave metadata untouched.
+        let mut meta2 = Metadata::from(serde_json::json!({"std:session-id": "client"}));
+        apply_default_session(&mut meta2, &None);
+        assert_eq!(
+            meta2.get_as::<String>(META_SESSION_ID).as_deref(),
+            Some("client")
+        );
     }
 }

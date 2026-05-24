@@ -447,6 +447,7 @@ async fn cmd_run(
             info: pc.info,
             component: pc.handle,
             metadata: pc.metadata,
+            default_session_id: None,
         });
 
         tracing::info!(%addr, "ACT host listening");
