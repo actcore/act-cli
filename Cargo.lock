@@ -82,6 +82,7 @@ dependencies = [
 name = "act-store"
 version = "0.1.0"
 dependencies = [
+ "dirs",
  "fs2",
  "oci-spec",
  "serde",
