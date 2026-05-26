@@ -376,7 +376,7 @@ mod tests {
     async fn fetch_oci_live() {
         let dir = TempDir::new().unwrap();
         let store = Store::open(dir.path()).unwrap();
-        let r = "oci://ghcr.io/actpkg/sqlite:0.1.0";
+        let r = "oci://ghcr.io/actpkg/time:0.2.0";
         let stored = fetch_oci(&store, r).await.unwrap();
         assert!(stored.provenance.digest.starts_with("sha256:"));
         assert!(store.resolve(r).unwrap().is_some());
