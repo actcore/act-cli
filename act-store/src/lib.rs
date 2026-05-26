@@ -2,15 +2,19 @@
 //!
 //! See `docs/specs/2026-05-26-shared-component-store-design.md`.
 
+pub mod fetch;
 pub mod index;
 pub mod layout;
 pub mod lock;
 pub mod provenance;
+pub mod reference;
 pub mod store;
 
 use std::path::PathBuf;
 
+pub use fetch::{UpdateOutcome, ensure, install_local, pull, update};
 pub use provenance::{Provenance, ProvenanceError, Source};
+pub use reference::{ParseRefError, Ref};
 pub use store::{Store, StoreError, Stored};
 
 /// Error type for store-location resolution.
