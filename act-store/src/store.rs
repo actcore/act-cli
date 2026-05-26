@@ -123,6 +123,55 @@ impl Store {
         })
     }
 
+    /// Store an OCI artifact whose manifest already exists upstream, **verbatim**:
+    /// write `manifest_bytes` and every blob in `blobs` content-addressed, then
+    /// upsert an index descriptor pointing at the manifest's own digest (so the
+    /// upstream digest — which signatures are computed over — is preserved).
+    /// `blobs` are `(expected_hex, bytes)` for the config and every layer.
+    /// Holds the exclusive lock.
+    pub fn put_oci_artifact(
+        &self,
+        manifest_bytes: &[u8],
+        blobs: &[(String, Vec<u8>)],
+        provenance: &Provenance,
+    ) -> Result<Stored, StoreError> {
+        let _lock = StoreLock::exclusive(&self.root)?;
+
+        for (expected_hex, bytes) in blobs {
+            let got = layout::write_blob(&self.root, bytes)?;
+            if &got != expected_hex {
+                return Err(StoreError::Digest(format!(
+                    "blob digest mismatch: expected {expected_hex}, got {got}"
+                )));
+            }
+        }
+        let manifest_hex = layout::write_blob(&self.root, manifest_bytes)?;
+
+        let manifest: ImageManifest = serde_json::from_slice(manifest_bytes)
+            .map_err(|e| StoreError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
+        let wasm_digest = manifest
+            .layers()
+            .first()
+            .map(index::digest_hex)
+            .unwrap_or_default();
+
+        let annotations: HashMap<String, String> = provenance.to_annotations();
+        let desc =
+            index::manifest_descriptor(&manifest_hex, manifest_bytes.len() as u64, annotations)?;
+
+        let idx = index::load(&self.root)?;
+        let mut manifests = idx.manifests().clone();
+        index::upsert(&mut manifests, desc);
+        let idx = index::build_index(manifests);
+        index::save(&self.root, &idx)?;
+
+        Ok(Stored {
+            manifest_digest: manifest_hex,
+            wasm_digest,
+            provenance: provenance.clone(),
+        })
+    }
+
     /// Resolve a stored component by its source ref to the path of its wasm
     /// layer blob. Returns `Ok(None)` if not present. Holds a shared lock.
     pub fn resolve(&self, reference: &str) -> Result<Option<PathBuf>, StoreError> {
@@ -311,6 +360,52 @@ mod tests {
             .collect();
         refs.sort();
         assert_eq!(refs, vec!["oci://ghcr.io/x/a:1", "oci://ghcr.io/x/b:1"]);
+    }
+
+    #[test]
+    fn put_oci_artifact_stores_manifest_verbatim_and_resolves() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+
+        let wasm = b"\0asm\x01\0\0\0verbatim";
+        let wasm_hex = crate::layout::sha256_hex(wasm);
+        let cfg = b"\xA0"; // CBOR empty map
+        let cfg_hex = crate::layout::sha256_hex(cfg);
+        let manifest_json = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.actcore.component.config.v1+cbor","digest":"sha256:{cfg_hex}","size":{cfg_len}}},"layers":[{{"mediaType":"application/wasm","digest":"sha256:{wasm_hex}","size":{wasm_len}}}]}}"#,
+            cfg_len = cfg.len(),
+            wasm_len = wasm.len(),
+        );
+        let manifest_bytes = manifest_json.into_bytes();
+        let upstream_digest = crate::layout::sha256_hex(&manifest_bytes);
+
+        let prov = Provenance {
+            source: Source::Oci {
+                reference: "oci://ghcr.io/x/verb:1".into(),
+            },
+            digest: format!("sha256:{upstream_digest}"),
+            fetched_at: "2026-05-26T00:00:00Z".into(),
+            name: Some("verb".into()),
+            version: Some("1".into()),
+        };
+
+        let stored = store
+            .put_oci_artifact(
+                &manifest_bytes,
+                &[
+                    (wasm_hex.clone(), wasm.to_vec()),
+                    (cfg_hex.clone(), cfg.to_vec()),
+                ],
+                &prov,
+            )
+            .unwrap();
+
+        assert_eq!(stored.manifest_digest, upstream_digest);
+        let path = store
+            .resolve("oci://ghcr.io/x/verb:1")
+            .unwrap()
+            .expect("hit");
+        assert_eq!(std::fs::read(path).unwrap(), wasm);
     }
 
     #[test]
