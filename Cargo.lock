@@ -37,6 +37,7 @@ dependencies = [
 name = "act-cli"
 version = "0.7.7"
 dependencies = [
+ "act-store",
  "act-types",
  "anyhow",
  "axum",
