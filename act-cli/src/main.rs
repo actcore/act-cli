@@ -804,39 +804,47 @@ async fn cmd_pull(
     output: Option<PathBuf>,
     output_from_ref: bool,
 ) -> Result<()> {
-    // Resolve to local path (downloads to cache for remote refs)
-    // Always download fresh — pull is explicit user action
-    let cached_path = resolve::resolve(&reference, true).await?;
+    let store = resolve::open_store()?;
+    let reference_str = reference.to_string();
+    let stored = act_store::pull(&store, &reference_str)
+        .await
+        .with_context(|| format!("pulling {reference_str}"))?;
 
-    if let Some(out) = output {
-        tokio::fs::copy(&cached_path, &out)
-            .await
-            .with_context(|| format!("copying to {}", out.display()))?;
-        println!("{}", out.display());
-    } else if output_from_ref {
-        let ref_str = reference.to_string();
-        let base = ref_str
-            .rsplit('/')
-            .next()
-            .unwrap_or(&ref_str)
-            .split(':')
-            .next()
-            .unwrap_or(&ref_str);
-        let filename = if base.ends_with(".wasm") {
-            base.to_string()
-        } else {
-            format!("{base}.wasm")
-        };
-        let out = PathBuf::from(&filename);
-        tokio::fs::copy(&cached_path, &out)
+    // Path to the stored wasm blob (read-through hit; no re-pull).
+    let stored_path = act_store::ensure(&store, &reference_str).await?;
+
+    let export = output.or_else(|| {
+        output_from_ref.then(|| {
+            let ref_str = reference.to_string();
+            let base = ref_str
+                .rsplit('/')
+                .next()
+                .unwrap_or(&ref_str)
+                .split(':')
+                .next()
+                .unwrap_or(&ref_str);
+            let filename = if base.ends_with(".wasm") {
+                base.to_string()
+            } else {
+                format!("{base}.wasm")
+            };
+            PathBuf::from(filename)
+        })
+    });
+
+    if let Some(out) = export {
+        tokio::fs::copy(&stored_path, &out)
             .await
             .with_context(|| format!("copying to {}", out.display()))?;
         println!("{}", out.display());
     } else {
-        // No output flag — print cached path
-        println!("{}", cached_path.display());
+        println!(
+            "{} -> {} (sha256:{})",
+            reference_str,
+            stored_path.display(),
+            stored.manifest_digest
+        );
     }
-
     Ok(())
 }
 
