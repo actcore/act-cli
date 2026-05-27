@@ -1,5 +1,5 @@
 [workspace]
-members = ["act-cli", "act-build", "act-store"]
+members = ["act-cli", "act-build", "crates/act-store"]
 resolver = "3"
 
 [workspace.package]
