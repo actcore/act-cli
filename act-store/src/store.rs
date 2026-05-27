@@ -172,6 +172,113 @@ impl Store {
         })
     }
 
+    /// Store a connected artifact (referrer) verbatim: write its manifest +
+    /// blobs content-addressed and index it with `dev.actcore.referrer.subject`
+    /// (= `subject_digest`, a `sha256:...` string) and `dev.actcore.referrer.kind`
+    /// annotations + `artifactType`. Deduped by referrer manifest digest. Returns
+    /// the referrer manifest hex. Holds the exclusive lock.
+    pub fn put_referrer(
+        &self,
+        manifest_bytes: &[u8],
+        blobs: &[(String, Vec<u8>)],
+        subject_digest: &str,
+        artifact_type: Option<&str>,
+    ) -> Result<String, StoreError> {
+        use crate::referrer::{K_KIND, K_SUBJECT, referrer_kind};
+        let _lock = StoreLock::exclusive(&self.root)?;
+
+        for (expected_hex, bytes) in blobs {
+            let got = layout::write_blob(&self.root, bytes)?;
+            if &got != expected_hex {
+                return Err(StoreError::Digest(format!(
+                    "referrer blob digest mismatch: expected {expected_hex}, got {got}"
+                )));
+            }
+        }
+        let ref_hex = layout::write_blob(&self.root, manifest_bytes)?;
+
+        let mut annotations: HashMap<String, String> = HashMap::new();
+        annotations.insert(K_SUBJECT.to_string(), subject_digest.to_string());
+        annotations.insert(K_KIND.to_string(), referrer_kind(artifact_type).to_string());
+
+        let digest =
+            Sha256Digest::from_str(&ref_hex).map_err(|_| StoreError::Digest(ref_hex.clone()))?;
+        let mut builder = DescriptorBuilder::default()
+            .media_type(MediaType::ImageManifest)
+            .digest(digest)
+            .size(manifest_bytes.len() as u64)
+            .annotations(annotations);
+        if let Some(at) = artifact_type {
+            builder = builder.artifact_type(MediaType::Other(at.to_string()));
+        }
+        let desc = builder.build()?;
+
+        let idx = index::load(&self.root)?;
+        let mut manifests = idx.manifests().clone();
+        index::upsert_by_digest(&mut manifests, desc);
+        let idx = index::build_index(manifests);
+        index::save(&self.root, &idx)?;
+        Ok(ref_hex)
+    }
+
+    /// List referrers attached to the component manifest with hex digest
+    /// `subject_hex` (no `sha256:` prefix).
+    pub fn list_referrers_by_digest(
+        &self,
+        subject_hex: &str,
+    ) -> Result<Vec<crate::referrer::ReferrerInfo>, StoreError> {
+        use crate::referrer::{K_KIND, K_SUBJECT, ReferrerInfo, referrer_kind};
+        let _lock = StoreLock::shared(&self.root)?;
+        let idx = index::load(&self.root)?;
+        let mut out = Vec::new();
+        for d in idx.manifests() {
+            let Some(ann) = d.annotations() else {
+                continue;
+            };
+            let Some(subj) = ann.get(K_SUBJECT) else {
+                continue;
+            };
+            if subj.rsplit(':').next().unwrap_or(subj) != subject_hex {
+                continue;
+            }
+            let hex = index::digest_hex(d);
+            let artifact_type = d.artifact_type().as_ref().map(|m| m.to_string());
+            let kind = ann
+                .get(K_KIND)
+                .cloned()
+                .unwrap_or_else(|| referrer_kind(artifact_type.as_deref()).to_string());
+            out.push(ReferrerInfo {
+                digest: hex.clone(),
+                artifact_type,
+                kind,
+                manifest_path: layout::blob_path(&self.root, &hex),
+            });
+        }
+        Ok(out)
+    }
+
+    /// List referrers attached to the component identified by `component_ref`
+    /// (source ref as typed). Empty if the component is not stored.
+    pub fn list_referrers(
+        &self,
+        component_ref: &str,
+        kind_filter: Option<&str>,
+    ) -> Result<Vec<crate::referrer::ReferrerInfo>, StoreError> {
+        let subject_hex = {
+            let _lock = StoreLock::shared(&self.root)?;
+            let idx = index::load(&self.root)?;
+            match index::find_by_ref(idx.manifests(), component_ref) {
+                Some(d) => index::digest_hex(d),
+                None => return Ok(Vec::new()),
+            }
+        };
+        let mut refs = self.list_referrers_by_digest(&subject_hex)?;
+        if let Some(k) = kind_filter {
+            refs.retain(|r| r.kind == k);
+        }
+        Ok(refs)
+    }
+
     /// Resolve a stored component by its source ref to the path of its wasm
     /// layer blob. Returns `Ok(None)` if not present. Holds a shared lock.
     pub fn resolve(&self, reference: &str) -> Result<Option<PathBuf>, StoreError> {
@@ -422,5 +529,97 @@ mod tests {
         assert_eq!(reclaimed, 1, "exactly one orphan blob removed");
         assert!(!crate::layout::has_blob(dir.path(), &orphan));
         assert!(store.resolve("oci://ghcr.io/x/keep:1").unwrap().is_some());
+    }
+
+    #[test]
+    fn put_referrer_indexes_with_subject_and_kind() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let subject = "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+        let referrer_manifest = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.empty.v1+json","digest":"sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a","size":2},"layers":[]}"#.to_vec();
+        let empty_cfg = b"{}".to_vec();
+        let cfg_hex = crate::layout::sha256_hex(&empty_cfg);
+        let ref_hex = store
+            .put_referrer(
+                &referrer_manifest,
+                &[(cfg_hex, empty_cfg)],
+                subject,
+                Some("application/vnd.dev.sigstore.bundle.v0.3+json"),
+            )
+            .unwrap();
+        let refs = store
+            .list_referrers_by_digest(
+                "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+            )
+            .unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].digest, ref_hex);
+        assert_eq!(refs[0].kind, "sigstore-bundle");
+        assert!(refs[0].manifest_path.is_file());
+    }
+
+    #[test]
+    fn list_referrers_by_ref_resolves_component_digest() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let wasm = b"\0asm\x01\0\0\0comp";
+        let stored = store
+            .put_component(wasm, None, &prov("oci://ghcr.io/x/c:1", wasm))
+            .unwrap();
+        let subject = format!("sha256:{}", stored.manifest_digest);
+        let m = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.empty.v1+json","digest":"sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a","size":2},"layers":[]}"#.to_vec();
+        let cfg = b"{}".to_vec();
+        let cfg_hex = crate::layout::sha256_hex(&cfg);
+        store
+            .put_referrer(
+                &m,
+                &[(cfg_hex, cfg)],
+                &subject,
+                Some("application/vnd.dev.cosign.simplesigning.v1+json"),
+            )
+            .unwrap();
+        let found = store.list_referrers("oci://ghcr.io/x/c:1", None).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].kind, "cosign-signature");
+        // kind filter
+        assert!(
+            store
+                .list_referrers("oci://ghcr.io/x/c:1", Some("sbom"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn gc_collects_referrer_when_component_repointed_away() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let v1 = b"component-v1";
+        let s1 = store
+            .put_component(v1, None, &prov("oci://ghcr.io/x/c:latest", v1))
+            .unwrap();
+        let subject_v1 = format!("sha256:{}", s1.manifest_digest);
+        let m = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.empty.v1+json","digest":"sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a","size":2},"layers":[]}"#.to_vec();
+        let cfg = b"{}".to_vec();
+        let cfg_hex = crate::layout::sha256_hex(&cfg);
+        let ref_hex = store
+            .put_referrer(
+                &m,
+                &[(cfg_hex, cfg)],
+                &subject_v1,
+                Some("application/spdx+json"),
+            )
+            .unwrap();
+        assert!(crate::layout::has_blob(dir.path(), &ref_hex));
+        let v2 = b"component-v2";
+        store
+            .put_component(v2, None, &prov("oci://ghcr.io/x/c:latest", v2))
+            .unwrap();
+        store.gc().unwrap();
+        assert!(
+            !crate::layout::has_blob(dir.path(), &ref_hex),
+            "referrer of removed v1 collected"
+        );
+        assert!(store.resolve("oci://ghcr.io/x/c:latest").unwrap().is_some());
     }
 }
