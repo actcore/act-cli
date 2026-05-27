@@ -1,4 +1,5 @@
-//! `act pull`/`list`/`gc` against a temp store, fully offline (local file source).
+//! `act pull` / `act store list` / `act store gc` against a temp store,
+//! fully offline (local file source).
 
 use std::process::Command;
 
@@ -31,7 +32,7 @@ fn pull_local_then_list_then_gc() {
     );
 
     // list shows the component
-    let out = run(&["list"]);
+    let out = run(&["store", "list"]);
     assert!(
         out.status.success(),
         "list failed: stderr={}",
@@ -44,7 +45,7 @@ fn pull_local_then_list_then_gc() {
     );
 
     // gc removes nothing (the component is referenced)
-    let out = run(&["gc"]);
+    let out = run(&["store", "gc"]);
     assert!(
         out.status.success(),
         "gc failed: stderr={}",

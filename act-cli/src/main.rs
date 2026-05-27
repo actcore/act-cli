@@ -185,6 +185,13 @@ enum Command {
     /// the session lives as long as the host).
     #[command(subcommand)]
     Session(SessionCommand),
+    /// Manage the local component store (list, update, gc).
+    #[command(subcommand)]
+    Store(StoreCommand),
+}
+
+#[derive(clap::Subcommand)]
+enum StoreCommand {
     /// List components in the local store.
     List {
         /// Output format.
@@ -199,19 +206,6 @@ enum Command {
     },
     /// Delete store blobs no longer referenced by any component.
     Gc,
-    /// List connected artifacts (sigstore bundle, SBOM, SLSA provenance, …)
-    /// collected for a stored component. ACT does not verify them; locate the
-    /// blob and run `cosign` yourself.
-    Artifacts {
-        /// Component reference (as stored).
-        #[arg(name = "ref")]
-        reference: ComponentRef,
-        /// Only show this kind (e.g. `sbom`, `sigstore-bundle`).
-        #[arg(long)]
-        kind: Option<String>,
-        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
-        format: OutputFormat,
-    },
 }
 
 #[derive(clap::Subcommand)]
@@ -247,10 +241,7 @@ async fn main() -> Result<()> {
             Command::Session(sub) => match sub {
                 SessionCommand::OpenArgsSchema { opts, .. } => opts.config.as_deref(),
             },
-            Command::List { .. }
-            | Command::Update { .. }
-            | Command::Gc
-            | Command::Artifacts { .. } => None,
+            Command::Store(_) => None,
         };
         let log_level = config::load_config(config_path)
             .ok()
@@ -300,14 +291,11 @@ async fn main() -> Result<()> {
                 cmd_session_open_args_schema(component, opts).await
             }
         },
-        Command::List { format } => cmd_list(format).await,
-        Command::Update { reference } => cmd_update(reference).await,
-        Command::Gc => cmd_gc().await,
-        Command::Artifacts {
-            reference,
-            kind,
-            format,
-        } => cmd_artifacts(reference, kind, format).await,
+        Command::Store(sub) => match sub {
+            StoreCommand::List { format } => cmd_list(format).await,
+            StoreCommand::Update { reference } => cmd_update(reference).await,
+            StoreCommand::Gc => cmd_gc().await,
+        },
     }
 }
 
@@ -957,45 +945,6 @@ async fn cmd_gc() -> Result<()> {
     let store = resolve::open_store()?;
     let removed = store.gc()?;
     println!("removed {removed} unreferenced blob(s)");
-    Ok(())
-}
-
-async fn cmd_artifacts(
-    reference: ComponentRef,
-    kind: Option<String>,
-    format: OutputFormat,
-) -> Result<()> {
-    let store = resolve::open_store()?;
-    let refs = store.list_referrers(&reference.to_string(), kind.as_deref())?;
-    match format {
-        OutputFormat::Json => {
-            let rows: Vec<_> = refs
-                .iter()
-                .map(|r| {
-                    serde_json::json!({
-                        "kind": r.kind,
-                        "artifact_type": r.artifact_type,
-                        "digest": format!("sha256:{}", r.digest),
-                        "manifest_path": r.manifest_path,
-                    })
-                })
-                .collect();
-            println!("{}", serde_json::to_string_pretty(&rows)?);
-        }
-        OutputFormat::Text => {
-            if refs.is_empty() {
-                println!("(no connected artifacts; component may be unsigned or not stored)");
-            }
-            for r in &refs {
-                println!(
-                    "{}\t{}\t{}",
-                    r.kind,
-                    r.artifact_type.as_deref().unwrap_or("-"),
-                    r.manifest_path.display()
-                );
-            }
-        }
-    }
     Ok(())
 }
 
