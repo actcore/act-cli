@@ -185,6 +185,33 @@ enum Command {
     /// the session lives as long as the host).
     #[command(subcommand)]
     Session(SessionCommand),
+    /// List components in the local store.
+    List {
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+    },
+    /// Re-resolve stored components and re-pull any whose digest moved.
+    Update {
+        /// A single ref to update (omit to update all stored components).
+        #[arg(name = "ref")]
+        reference: Option<ComponentRef>,
+    },
+    /// Delete store blobs no longer referenced by any component.
+    Gc,
+    /// List connected artifacts (sigstore bundle, SBOM, SLSA provenance, …)
+    /// collected for a stored component. ACT does not verify them; locate the
+    /// blob and run `cosign` yourself.
+    Artifacts {
+        /// Component reference (as stored).
+        #[arg(name = "ref")]
+        reference: ComponentRef,
+        /// Only show this kind (e.g. `sbom`, `sigstore-bundle`).
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -220,6 +247,10 @@ async fn main() -> Result<()> {
             Command::Session(sub) => match sub {
                 SessionCommand::OpenArgsSchema { opts, .. } => opts.config.as_deref(),
             },
+            Command::List { .. }
+            | Command::Update { .. }
+            | Command::Gc
+            | Command::Artifacts { .. } => None,
         };
         let log_level = config::load_config(config_path)
             .ok()
@@ -269,6 +300,14 @@ async fn main() -> Result<()> {
                 cmd_session_open_args_schema(component, opts).await
             }
         },
+        Command::List { format } => cmd_list(format).await,
+        Command::Update { reference } => cmd_update(reference).await,
+        Command::Gc => cmd_gc().await,
+        Command::Artifacts {
+            reference,
+            kind,
+            format,
+        } => cmd_artifacts(reference, kind, format).await,
     }
 }
 
@@ -846,6 +885,127 @@ async fn cmd_pull(
         );
     }
     Ok(())
+}
+
+// ── Store subcommands ─────────────────────────────────────────────────────────
+
+async fn cmd_list(format: OutputFormat) -> Result<()> {
+    let store = resolve::open_store()?;
+    let mut items = store.list()?;
+    items.sort_by(|a, b| source_ref(&a.provenance).cmp(source_ref(&b.provenance)));
+    match format {
+        OutputFormat::Json => {
+            let rows: Vec<_> = items
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "ref": source_ref(&s.provenance),
+                        "digest": s.provenance.digest,
+                        "name": s.provenance.name,
+                        "version": s.provenance.version,
+                        "fetched_at": s.provenance.fetched_at,
+                    })
+                })
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&rows)?);
+        }
+        OutputFormat::Text => {
+            if items.is_empty() {
+                println!("(store is empty)");
+            }
+            for s in &items {
+                println!(
+                    "{}\t{}\t{}",
+                    source_ref(&s.provenance),
+                    s.provenance.version.as_deref().unwrap_or("-"),
+                    s.provenance.digest
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_update(reference: Option<ComponentRef>) -> Result<()> {
+    let store = resolve::open_store()?;
+    let refs: Vec<String> = match reference {
+        Some(r) => vec![r.to_string()],
+        None => store
+            .list()?
+            .iter()
+            .map(|s| source_ref(&s.provenance).to_string())
+            .collect(),
+    };
+    if refs.is_empty() {
+        println!("(store is empty)");
+        return Ok(());
+    }
+    for r in refs {
+        match act_store::update(&store, &r).await {
+            Ok(act_store::UpdateOutcome::Unchanged) => println!("{r}\tunchanged"),
+            Ok(act_store::UpdateOutcome::Updated { from, to }) => {
+                println!("{r}\tupdated {from} -> {to}")
+            }
+            Ok(act_store::UpdateOutcome::NotStored) => println!("{r}\tnot stored"),
+            Err(e) => eprintln!("{r}\tERROR: {e}"),
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_gc() -> Result<()> {
+    let store = resolve::open_store()?;
+    let removed = store.gc()?;
+    println!("removed {removed} unreferenced blob(s)");
+    Ok(())
+}
+
+async fn cmd_artifacts(
+    reference: ComponentRef,
+    kind: Option<String>,
+    format: OutputFormat,
+) -> Result<()> {
+    let store = resolve::open_store()?;
+    let refs = store.list_referrers(&reference.to_string(), kind.as_deref())?;
+    match format {
+        OutputFormat::Json => {
+            let rows: Vec<_> = refs
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "kind": r.kind,
+                        "artifact_type": r.artifact_type,
+                        "digest": format!("sha256:{}", r.digest),
+                        "manifest_path": r.manifest_path,
+                    })
+                })
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&rows)?);
+        }
+        OutputFormat::Text => {
+            if refs.is_empty() {
+                println!("(no connected artifacts; component may be unsigned or not stored)");
+            }
+            for r in &refs {
+                println!(
+                    "{}\t{}\t{}",
+                    r.kind,
+                    r.artifact_type.as_deref().unwrap_or("-"),
+                    r.manifest_path.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The source ref (as typed) recorded in a provenance.
+fn source_ref(p: &act_store::Provenance) -> &str {
+    match &p.source {
+        act_store::Source::Oci { reference } => reference,
+        act_store::Source::Http { url, .. } => url,
+        act_store::Source::Local { path } => path,
+    }
 }
 
 #[cfg(test)]
