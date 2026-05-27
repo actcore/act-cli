@@ -338,7 +338,7 @@ pub async fn pull(store: &Store, reference: &str) -> Result<Stored, StoreError> 
 /// The canonical store-lookup ref for a user-supplied reference. Must match the
 /// ref that `pull` records when storing: local -> `file://<canonical>`,
 /// oci -> `oci://<ref>`, http -> the URL string.
-fn lookup_ref(reference: &str) -> String {
+pub(crate) fn lookup_ref(reference: &str) -> String {
     match reference.parse::<Ref>() {
         Ok(Ref::Local(path)) => local_ref(&path),
         Ok(Ref::Oci(r)) => format!("oci://{r}"),

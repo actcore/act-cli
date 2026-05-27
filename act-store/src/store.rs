@@ -267,7 +267,8 @@ impl Store {
         let subject_hex = {
             let _lock = StoreLock::shared(&self.root)?;
             let idx = index::load(&self.root)?;
-            match index::find_by_ref(idx.manifests(), component_ref) {
+            let canonical = crate::fetch::lookup_ref(component_ref);
+            match index::find_by_ref(idx.manifests(), &canonical) {
                 Some(d) => index::digest_hex(d),
                 None => return Ok(Vec::new()),
             }
