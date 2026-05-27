@@ -5,6 +5,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-06-02
+
+### Added
+
+- **`act-store` workspace crate** — a content-addressed OCI image-layout
+  component store shared between act-cli and act-toolserver. Resolves remote
+  refs read-through, preserves upstream OCI manifests verbatim (so signatures
+  remain meaningful), and collects connected artifacts on pull (sigstore
+  bundle, SBOM, SLSA provenance, ...) via the OCI 1.1 referrers API. Lives
+  at `<XDG_DATA_HOME>/act/store` (`~/.local/share/act/store` on Linux).
+  Published to crates.io as a standalone library for downstream consumers.
+- **`act store` subcommand group** for managing the local component store:
+  - `act store list [--format text|json]` — list every stored component.
+  - `act store update [<ref>]` — re-resolve stored refs and re-pull any
+    whose upstream digest moved. Without an argument, updates every
+    component; mutable tags (`:latest`, `:0.1`) advance, `@sha256:` pins
+    never do.
+  - `act store gc` — delete store blobs no longer referenced by any
+    component.
+
+### Changed
+
+- **Remote refs resolve through the shared store** instead of the bespoke
+  `~/.cache/act/components/<sha256(ref)>.wasm` cache. `act run`/`call`/`info`
+  read-through the store (pulling on first use, then serving from disk).
+  Local files still run in place; the store is populated for them only when
+  you explicitly `act pull <file>`.
+- **`act pull` now populates the shared store** (with referrer collection
+  for OCI sources). `-o`/`-O` still optionally export a copy.
+- **Component reference parsing is centralized in `act-store::Ref`** so
+  act-cli and act-toolserver agree on how `oci://`, `https://`, `file://`,
+  and bare refs are normalized.
+- **Release workflow publishes the entire workspace to crates.io**
+  (`cargo publish --workspace`), so new crates added anywhere in the
+  workspace ship on the next tagged release without a workflow edit.
+
+### Removed
+
+- The legacy `~/.cache/act/components/<sha256(ref)>.wasm` cache is no longer
+  written or consulted. Existing cache files are harmless leftovers you can
+  delete by hand; act-store starts fresh in its own data dir.
+
 ## [0.7.7] - 2026-05-26
 
 ### Fixed
