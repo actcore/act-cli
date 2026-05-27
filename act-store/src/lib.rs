@@ -8,6 +8,7 @@ pub mod layout;
 pub mod lock;
 pub mod provenance;
 pub mod reference;
+pub mod referrer;
 pub mod store;
 
 use std::path::PathBuf;
@@ -15,6 +16,7 @@ use std::path::PathBuf;
 pub use fetch::{UpdateOutcome, ensure, install_local, pull, update};
 pub use provenance::{Provenance, ProvenanceError, Source};
 pub use reference::{ParseRefError, Ref};
+pub use referrer::{ReferrerInfo, referrer_kind};
 pub use store::{Store, StoreError, Stored};
 
 /// Error type for store-location resolution.
