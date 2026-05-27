@@ -172,16 +172,151 @@ pub async fn fetch_oci(store: &Store, reference: &str) -> Result<Stored, StoreEr
         fetched.insert(strip(&desc.digest), buf);
     }
 
-    assemble_oci(store, reference, &manifest_bytes, &manifest_digest, |hex| {
+    let stored = assemble_oci(store, reference, &manifest_bytes, &manifest_digest, |hex| {
         fetched
             .get(hex)
             .cloned()
             .ok_or_else(|| StoreError::Digest(hex.into()))
-    })
+    })?;
+    collect_referrers(
+        &client,
+        &auth,
+        &oci_ref,
+        &manifest_digest,
+        store,
+        REFERRER_DEPTH,
+    )
+    .await;
+    Ok(stored)
 }
 
 fn strip(digest: &str) -> String {
     digest.rsplit(':').next().unwrap_or(digest).to_string()
+}
+
+/// Max depth for transitive referrer collection (referrer-of-a-referrer).
+const REFERRER_DEPTH: u8 = 4;
+
+/// Offline: store one referrer's manifest + blobs against `subject_digest`.
+pub fn store_referrer(
+    store: &Store,
+    manifest_bytes: &[u8],
+    blobs: &[(String, Vec<u8>)],
+    subject_digest: &str,
+    artifact_type: Option<&str>,
+) -> Result<String, StoreError> {
+    store.put_referrer(manifest_bytes, blobs, subject_digest, artifact_type)
+}
+
+/// Build a by-digest `Reference` in the same repo as `repo`.
+fn digest_ref(
+    repo: &oci_client::Reference,
+    digest: &str,
+) -> Result<oci_client::Reference, StoreError> {
+    let d = if digest.contains(':') {
+        digest.to_string()
+    } else {
+        format!("sha256:{digest}")
+    };
+    format!("{}/{}@{}", repo.registry(), repo.repository(), d)
+        .parse()
+        .map_err(|e| StoreError::Io(std::io::Error::other(format!("bad digest ref: {e}"))))
+}
+
+/// Pull a referrer manifest's config + layer blobs into `(hex, bytes)` pairs.
+async fn referrer_blobs(
+    client: &oci_client::Client,
+    referrer_ref: &oci_client::Reference,
+    manifest_bytes: &[u8],
+) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
+    let manifest: OciImageManifest = serde_json::from_slice(manifest_bytes)
+        .map_err(|e| StoreError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
+    let mut descriptors = vec![manifest.config.clone()];
+    descriptors.extend(manifest.layers.iter().cloned());
+    let mut out = Vec::new();
+    for d in &descriptors {
+        let mut buf: Vec<u8> = Vec::new();
+        client
+            .pull_blob(referrer_ref, d, &mut buf)
+            .await
+            .map_err(|e| StoreError::Io(std::io::Error::other(e)))?;
+        out.push((strip(&d.digest), buf));
+    }
+    Ok(out)
+}
+
+/// Pull every connected artifact (referrer) of component manifest
+/// `subject_digest` (`sha256:...`) in `repo`, store it, and recurse to the
+/// transitive closure (depth-capped). Best-effort: a registry without the
+/// referrers API yields nothing; per-referrer errors are logged and skipped so
+/// referrer collection never fails the component pull.
+async fn collect_referrers(
+    client: &oci_client::Client,
+    auth: &oci_client::secrets::RegistryAuth,
+    repo: &oci_client::Reference,
+    subject_digest: &str,
+    store: &Store,
+    depth: u8,
+) {
+    use oci_client::manifest::{IMAGE_MANIFEST_MEDIA_TYPE, OCI_IMAGE_MEDIA_TYPE};
+    if depth == 0 {
+        return;
+    }
+    let subject_ref = match digest_ref(repo, subject_digest) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    let index = match client.pull_referrers(&subject_ref, None).await {
+        Ok(idx) => idx,
+        Err(e) => {
+            tracing::debug!(%subject_digest, error = %e, "no referrers / referrers API unavailable");
+            return;
+        }
+    };
+    for desc in index.manifests {
+        let ref_digest = desc.digest.clone();
+        let referrer_ref = match digest_ref(repo, &ref_digest) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let pulled = client
+            .pull_manifest_raw(
+                &referrer_ref,
+                auth,
+                &[OCI_IMAGE_MEDIA_TYPE, IMAGE_MANIFEST_MEDIA_TYPE],
+            )
+            .await;
+        let (m_bytes, m_digest) = match pulled {
+            Ok((b, d)) => (b.to_vec(), d),
+            Err(e) => {
+                tracing::warn!(%ref_digest, error = %e, "failed to pull referrer manifest");
+                continue;
+            }
+        };
+        let blobs = match referrer_blobs(client, &referrer_ref, &m_bytes).await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(%ref_digest, error = %e, "failed to pull referrer blobs");
+                continue;
+            }
+        };
+        let artifact_type = desc.artifact_type.clone();
+        if let Err(e) =
+            store.put_referrer(&m_bytes, &blobs, subject_digest, artifact_type.as_deref())
+        {
+            tracing::warn!(%ref_digest, error = %e, "failed to store referrer");
+            continue;
+        }
+        Box::pin(collect_referrers(
+            client,
+            auth,
+            repo,
+            &m_digest,
+            store,
+            depth - 1,
+        ))
+        .await;
+    }
 }
 
 /// Fetch `reference` into the store regardless of kind. Local files are
@@ -369,6 +504,47 @@ mod tests {
         let stored = fetch_http(&store, url).await.unwrap();
         assert!(stored.provenance.digest.starts_with("sha256:"));
         assert!(store.resolve(url).unwrap().is_some());
+    }
+
+    #[test]
+    fn store_referrer_offline() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let subject = "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+        let m = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.empty.v1+json","digest":"sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a","size":2},"layers":[]}"#.to_vec();
+        let cfg = b"{}".to_vec();
+        let cfg_hex = crate::layout::sha256_hex(&cfg);
+        super::store_referrer(
+            &store,
+            &m,
+            &[(cfg_hex, cfg)],
+            subject,
+            Some("application/spdx+json"),
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .list_referrers_by_digest(
+                    "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+                )
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "network: pulls a component AND its referrers from ghcr.io"]
+    async fn fetch_oci_with_referrers_live() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let r = "oci://ghcr.io/actpkg/time:0.2.0";
+        let stored = super::fetch_oci(&store, r).await.unwrap();
+        assert!(store.resolve(r).unwrap().is_some());
+        let refs = store
+            .list_referrers_by_digest(&stored.manifest_digest)
+            .unwrap();
+        eprintln!("referrers collected for time:0.2.0: {}", refs.len());
     }
 
     #[tokio::test]

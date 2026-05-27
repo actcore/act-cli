@@ -13,7 +13,7 @@ pub mod store;
 
 use std::path::PathBuf;
 
-pub use fetch::{UpdateOutcome, ensure, install_local, pull, update};
+pub use fetch::{UpdateOutcome, ensure, install_local, pull, store_referrer, update};
 pub use provenance::{Provenance, ProvenanceError, Source};
 pub use reference::{ParseRefError, Ref};
 pub use referrer::{ReferrerInfo, referrer_kind};
