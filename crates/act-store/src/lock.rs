@@ -4,7 +4,7 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::Path;
 
-use fs2::FileExt;
+use fs4::FileExt;
 
 /// RAII advisory lock. The lock is released when dropped.
 #[derive(Debug)]
@@ -26,28 +26,29 @@ impl StoreLock {
     /// Block until an exclusive (writer) lock is held.
     pub fn exclusive(root: &Path) -> io::Result<Self> {
         let file = open_lockfile(root)?;
-        FileExt::lock_exclusive(&file)?;
+        <File as FileExt>::lock(&file)?;
         Ok(Self { file })
     }
 
     /// Block until a shared (reader) lock is held.
     pub fn shared(root: &Path) -> io::Result<Self> {
         let file = open_lockfile(root)?;
-        FileExt::lock_shared(&file)?;
+        <File as FileExt>::lock_shared(&file)?;
         Ok(Self { file })
     }
 
     /// Non-blocking exclusive lock; errors if it cannot be acquired now.
     pub fn try_exclusive(root: &Path) -> io::Result<Self> {
         let file = open_lockfile(root)?;
-        FileExt::try_lock_exclusive(&file)?;
+        <File as FileExt>::try_lock(&file)
+            .map_err(|e| io::Error::other(format!("lock not acquired: {e}")))?;
         Ok(Self { file })
     }
 }
 
 impl Drop for StoreLock {
     fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.file);
+        let _ = <File as FileExt>::unlock(&self.file);
     }
 }
 
