@@ -49,6 +49,39 @@ pub fn parse_annotation(s: &str) -> Result<(String, String), String> {
     Ok((k.to_string(), v.to_string()))
 }
 
+/// Lowercase the repository portion of an OCI reference (registry host + path)
+/// while leaving the tag and digest untouched. OCI requires lowercase
+/// repository names, but tags are case-sensitive — so a GitHub-cased namespace
+/// like `GamePad64` becomes `gamepad64`, yet `:V1-RC1` stays as written.
+fn lowercase_repository(reference: &str) -> String {
+    // Peel off an optional `@digest` (kept verbatim).
+    let (name_and_tag, digest) = match reference.split_once('@') {
+        Some((head, dig)) => (head, Some(dig)),
+        None => (reference, None),
+    };
+    // A ':' after the last '/' (or when there is no '/') delimits the tag; a
+    // ':' before the first '/' is a host port, not a tag.
+    let last_slash = name_and_tag.rfind('/');
+    let tag_sep = name_and_tag.rfind(':').filter(|&c| match last_slash {
+        Some(s) => c > s,
+        None => true,
+    });
+    let (name, tag) = match tag_sep {
+        Some(c) => (&name_and_tag[..c], Some(&name_and_tag[c + 1..])),
+        None => (name_and_tag, None),
+    };
+    let mut out = name.to_ascii_lowercase();
+    if let Some(tag) = tag {
+        out.push(':');
+        out.push_str(tag);
+    }
+    if let Some(digest) = digest {
+        out.push('@');
+        out.push_str(digest);
+    }
+    out
+}
+
 pub fn run(wasm_path: &Path, reference: &str, opts: PushOptions) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -78,10 +111,16 @@ async fn run_async(wasm_path: &Path, reference: &str, opts: PushOptions) -> Resu
         );
     }
 
-    // 3. Parse OCI reference.
-    let oci_ref: Reference = reference
+    // 3. Parse OCI reference. OCI requires lowercase repository names (tags are
+    //    case-sensitive and preserved); lowercase the repository so a GitHub-cased
+    //    namespace such as `GamePad64` becomes `gamepad64` before pushing.
+    let normalized = lowercase_repository(reference);
+    if normalized != reference {
+        tracing::info!(from = %reference, to = %normalized, "lowercased OCI repository");
+    }
+    let oci_ref: Reference = normalized
         .parse()
-        .with_context(|| format!("invalid OCI reference: {reference}"))?;
+        .with_context(|| format!("invalid OCI reference: {normalized}"))?;
 
     // 4. Build vnd.wasm.config.v0+json blob.
     let config = build_config(&wasm).context("building Wasm OCI config blob")?;
@@ -369,5 +408,37 @@ mod tests {
         assert_eq!(tagged.registry(), "ghcr.io");
         assert_eq!(tagged.repository(), "actpkg/sqlite");
         assert_eq!(tagged.tag(), Some("latest"));
+    }
+
+    #[test]
+    fn lowercase_repository_lowercases_path_keeps_tag() {
+        assert_eq!(
+            lowercase_repository("actpkg.dev/GamePad64/filesystem:0.3.0"),
+            "actpkg.dev/gamepad64/filesystem:0.3.0"
+        );
+    }
+
+    #[test]
+    fn lowercase_repository_preserves_tag_case() {
+        assert_eq!(
+            lowercase_repository("actpkg.dev/Foo/Bar:V1.2-RC1"),
+            "actpkg.dev/foo/bar:V1.2-RC1"
+        );
+    }
+
+    #[test]
+    fn lowercase_repository_preserves_digest() {
+        assert_eq!(
+            lowercase_repository("actpkg.dev/Foo/Bar@sha256:DEAD"),
+            "actpkg.dev/foo/bar@sha256:DEAD"
+        );
+    }
+
+    #[test]
+    fn lowercase_repository_handles_host_port_and_no_tag() {
+        assert_eq!(
+            lowercase_repository("localhost:5000/Foo/Bar"),
+            "localhost:5000/foo/bar"
+        );
     }
 }
