@@ -69,6 +69,12 @@ enum Command {
     Pack {
         /// Path to the compiled .wasm component
         wasm: PathBuf,
+        /// Override a resolved component-metadata field, e.g.
+        /// `--set std.name=sqlite-vec`. Repeatable. The value is set as a
+        /// string, so only string-typed fields (name, version, description,
+        /// default-language) are supported.
+        #[arg(long = "set", value_name = "KEY=VALUE")]
+        set: Vec<String>,
     },
     /// Validate a WASM component without modifying it
     Validate {
@@ -145,7 +151,7 @@ fn main() -> Result<()> {
             template_path,
             no_git,
         }),
-        Command::Pack { wasm } => pack::run(&wasm),
+        Command::Pack { wasm, set } => pack::run(&wasm, &set),
         Command::Validate { wasm } => validate::run(&wasm),
         Command::Push {
             wasm,
