@@ -55,9 +55,9 @@ struct CommonOpts {
     #[arg(long = "deny-socket")]
     sockets_deny: Vec<String>,
 
-    /// Cap the component's wasm linear memory. Accepts a byte count or a
-    /// binary-unit suffix (e.g. `512MiB`, `512M`, `268435456`). Growth past the
-    /// cap fails inside the guest instead of ballooning the host process.
+    /// Cap the component's wasm linear memory. Accepts a byte count or a size
+    /// with a unit — binary (`512MiB`) or decimal (`512MB`). Growth past the cap
+    /// fails inside the guest instead of ballooning the host process.
     #[arg(long = "max-memory", value_parser = parse_max_memory)]
     max_memory: Option<usize>,
 
@@ -324,25 +324,20 @@ fn parse_cli_metadata(
     }
 }
 
-/// Parse a `--max-memory` value: a byte count, optionally suffixed with a
-/// binary unit (`K`/`M`/`G`, with optional `i`/`B` — `512MiB`, `512M`, …).
-/// Units are powers of 1024.
+/// Parse a `--max-memory` value via the `bytesize` crate: a byte count or a
+/// size with a unit, decimal (`512MB` = 512·10⁶) or binary (`512MiB` = 512·2²⁰).
 fn parse_max_memory(s: &str) -> Result<usize, String> {
-    let lower = s.trim().to_ascii_lowercase();
-    let body = lower.trim_end_matches('b').trim_end_matches('i');
-    let (digits, mult) = match body.chars().last() {
-        Some('k') => (&body[..body.len() - 1], 1usize << 10),
-        Some('m') => (&body[..body.len() - 1], 1usize << 20),
-        Some('g') => (&body[..body.len() - 1], 1usize << 30),
-        _ => (body, 1usize),
-    };
-    let n: usize = digits
+    let bytes = s
         .trim()
-        .parse()
-        .map_err(|_| format!("invalid --max-memory value: '{s}'"))?;
-    n.checked_mul(mult)
-        .filter(|&b| b > 0)
-        .ok_or_else(|| format!("invalid --max-memory value: '{s}'"))
+        .parse::<bytesize::ByteSize>()
+        .map_err(|e| format!("invalid --max-memory value '{s}': {e}"))?
+        .as_u64();
+    let bytes =
+        usize::try_from(bytes).map_err(|_| format!("--max-memory value too large: '{s}'"))?;
+    if bytes == 0 {
+        return Err(format!("--max-memory must be greater than 0: '{s}'"));
+    }
+    Ok(bytes)
 }
 
 struct ResolvedOpts {
@@ -1001,12 +996,11 @@ mod tests {
 
     #[test]
     fn parse_max_memory_units_and_bytes() {
-        assert_eq!(parse_max_memory("268435456").unwrap(), 256 << 20);
-        assert_eq!(parse_max_memory("256M").unwrap(), 256 << 20);
-        assert_eq!(parse_max_memory("256MiB").unwrap(), 256 << 20);
-        assert_eq!(parse_max_memory("256mb").unwrap(), 256 << 20);
-        assert_eq!(parse_max_memory("1G").unwrap(), 1 << 30);
-        assert_eq!(parse_max_memory("512k").unwrap(), 512 << 10);
+        assert_eq!(parse_max_memory("268435456").unwrap(), 256 << 20); // bare = bytes
+        assert_eq!(parse_max_memory("256MiB").unwrap(), 256 << 20); // binary
+        assert_eq!(parse_max_memory("1GiB").unwrap(), 1 << 30);
+        assert_eq!(parse_max_memory("512KiB").unwrap(), 512 << 10);
+        assert_eq!(parse_max_memory("256MB").unwrap(), 256_000_000); // decimal
     }
 
     #[test]

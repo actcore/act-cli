@@ -58,6 +58,7 @@ globset = "0.4"
 path-clean = "1"
 owo-colors = { version = "4.3.0", features = ["supports-colors"] }
 act-store = { version = "0.1.0", path = "../crates/act-store" }
+bytesize = "2.3.1"
 
 [dev-dependencies]
 tempfile = "3"
