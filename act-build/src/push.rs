@@ -9,9 +9,12 @@
 //!   from the `act:component` custom section, with CLI overrides
 
 use anyhow::{Context, Result, bail};
+use http::HeaderValue;
 use oci_client::Reference;
 use oci_client::client::{ClientConfig, ClientProtocol, Config, ImageLayer};
 use oci_client::manifest::{OciImageManifest, OciManifest};
+use olpc_cjson::CanonicalFormatter;
+use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -47,6 +50,29 @@ pub fn parse_annotation(s: &str) -> Result<(String, String), String> {
         return Err(format!("annotation key must be non-empty: '{s}'"));
     }
     Ok((k.to_string(), v.to_string()))
+}
+
+/// Serialize an OCI manifest to its canonical JSON byte form — sorted keys, no
+/// insignificant whitespace, per the OCI image-spec canonical-JSON rules. These
+/// are the exact bytes we transmit (via `push_manifest_raw`) and digest, so our
+/// `manifest_digest` is the digest of what the registry stores. Canonical form
+/// also matches what other OCI tooling (incl. `oci-client`'s own `push_manifest`)
+/// emits, keeping digests stable across toolchains.
+fn canonical_manifest_bytes(manifest: &OciManifest) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let mut ser = serde_json::Serializer::with_formatter(&mut bytes, CanonicalFormatter::new());
+    manifest
+        .serialize(&mut ser)
+        .context("serializing manifest to canonical JSON")?;
+    Ok(bytes)
+}
+
+/// Extract the `sha256:…` digest from a manifest URL such as
+/// `https://host/v2/repo/manifests/sha256:abc…`. Returns `None` when the URL
+/// ends in a tag rather than a digest (some registries echo the tag back).
+fn digest_from_manifest_url(url: &str) -> Option<&str> {
+    let tail = url.rsplit("/manifests/").next()?;
+    tail.starts_with("sha256:").then_some(tail)
 }
 
 /// Lowercase the repository portion of an OCI reference (registry host + path)
@@ -191,11 +217,18 @@ async fn run_async(wasm_path: &Path, reference: &str, opts: PushOptions) -> Resu
         manifest.annotations = Some(annotations.clone());
     }
 
-    // Compute the manifest digest from the canonical JSON serialization that
-    // we will actually push. This matches what the registry will return as
-    // `Docker-Content-Digest` and what `actions/attest` signs.
-    let manifest_bytes = serde_json::to_vec(&OciManifest::Image(manifest.clone()))
-        .context("serializing manifest to JSON")?;
+    // Serialize the manifest ONCE, to canonical JSON (sorted keys, no
+    // insignificant whitespace, per the OCI image-spec rules), and digest those
+    // exact bytes. We then transmit these same bytes via `push_manifest_raw`
+    // (below) rather than letting `oci-client` re-serialize internally — so the
+    // bytes we hash, the bytes we push, and the bytes the registry stores are all
+    // identical. That makes `manifest_digest` authoritative on our side by
+    // construction; there is no second serialization that could disagree (the
+    // earlier bug: a plain `serde_json::to_vec` reordered keys and produced a
+    // digest the registry never stored — unpullable, 404).
+    let manifest = OciManifest::Image(manifest);
+    let manifest_content_type = manifest.content_type().to_string();
+    let manifest_bytes = canonical_manifest_bytes(&manifest)?;
     let manifest_digest = sha256_digest(&manifest_bytes);
 
     if opts.dry_run {
@@ -229,36 +262,62 @@ async fn run_async(wasm_path: &Path, reference: &str, opts: PushOptions) -> Resu
         return Ok(());
     }
 
-    // 8. Authenticate and push.
+    // 8. Authenticate.
     let registry = oci_ref.resolve_registry();
     let auth = crate::oci_auth::resolve(registry).context("resolving registry auth")?;
     let client = oci_client::Client::new(ClientConfig {
         protocol: ClientProtocol::Https,
         ..Default::default()
     });
+    // `oci-client` resolves auth lazily from a per-registry store; seed it before
+    // the blob/manifest calls (which `Client::push` would otherwise do for us).
+    client.store_auth_if_needed(registry, &auth).await;
 
-    let response = client
-        .push(
-            &oci_ref,
-            std::slice::from_ref(&layer),
-            oci_config.clone(),
-            &auth,
-            Some(manifest.clone()),
-        )
+    let content_type: HeaderValue = manifest_content_type
+        .parse()
+        .with_context(|| format!("invalid manifest content-type: {manifest_content_type}"))?;
+
+    // Push the layer + config blobs, then push the manifest as the EXACT canonical
+    // bytes we digested above (`push_manifest_raw`, not `push`/`push_manifest`,
+    // which would re-serialize). The registry stores manifest bytes verbatim per
+    // the OCI Distribution Spec, so the stored digest equals `manifest_digest`.
+    client
+        .push_blob(&oci_ref, wasm.clone(), &layer_digest)
         .await
-        .with_context(|| format!("pushing {reference}"))?;
+        .with_context(|| format!("pushing layer blob for {reference}"))?;
+    client
+        .push_blob(&oci_ref, config_json.clone(), &config_digest)
+        .await
+        .with_context(|| format!("pushing config blob for {reference}"))?;
+    let manifest_url = client
+        .push_manifest_raw(&oci_ref, manifest_bytes.clone(), content_type.clone())
+        .await
+        .with_context(|| format!("pushing manifest for {reference}"))?;
+
+    // Defensive integrity check: we are the source of truth for the digest, but if
+    // a non-conformant registry mangled our bytes its returned digest won't match.
+    // Warn loudly rather than silently — we still report the digest we pushed.
+    if let Some(server) = digest_from_manifest_url(&manifest_url)
+        && server != manifest_digest
+    {
+        tracing::warn!(
+            pushed = %manifest_digest,
+            server = %server,
+            "registry stored a different manifest digest than the bytes we pushed"
+        );
+    }
 
     println!("Pushed {reference}");
-    println!("  manifest_url: {}", response.manifest_url);
+    println!("  manifest_url: {manifest_url}");
     println!("  manifest:     {manifest_digest}");
     println!("  config:       {config_digest}");
     println!("  layer:        {layer_digest}");
 
-    // 9. Apply additional tags by re-pushing the manifest under each tag.
+    // 9. Apply additional tags by re-pushing the same canonical bytes under each tag.
     for tag in &opts.also_tags {
         let tag_ref = retag(&oci_ref, tag);
         client
-            .push_manifest(&tag_ref, &OciManifest::Image(manifest.clone()))
+            .push_manifest_raw(&tag_ref, manifest_bytes.clone(), content_type.clone())
             .await
             .with_context(|| format!("tagging {tag_ref}"))?;
         println!("Tagged {tag_ref}");
@@ -439,6 +498,75 @@ mod tests {
         assert_eq!(
             lowercase_repository("localhost:5000/Foo/Bar"),
             "localhost:5000/foo/bar"
+        );
+    }
+
+    /// Build a representative manifest the way `run_async` does.
+    fn sample_manifest() -> OciManifest {
+        let layer = ImageLayer::new(vec![1, 2, 3], WASM_LAYER_MEDIA_TYPE.to_string(), None);
+        let oci_config = Config::new(b"{}".to_vec(), WASM_CONFIG_MEDIA_TYPE.to_string(), None);
+        let mut manifest = OciImageManifest::build(std::slice::from_ref(&layer), &oci_config, None);
+        manifest.media_type = Some("application/vnd.oci.image.manifest.v1+json".to_string());
+        let mut annotations = BTreeMap::new();
+        annotations.insert(
+            "org.opencontainers.image.version".to_string(),
+            "0.3.0".to_string(),
+        );
+        manifest.annotations = Some(annotations);
+        OciManifest::Image(manifest)
+    }
+
+    #[test]
+    fn canonical_manifest_bytes_sorts_top_level_keys() {
+        let manifest = sample_manifest();
+        let bytes = canonical_manifest_bytes(&manifest).unwrap();
+        let s = std::str::from_utf8(&bytes).unwrap();
+        // Canonical JSON orders keys lexicographically:
+        // annotations < config < layers < mediaType < schemaVersion.
+        // `mediaType` also occurs *nested* (in config and each layer), so match
+        // the top-level one by its distinctive manifest media-type value.
+        let ann = s.find("\"annotations\"").unwrap();
+        let cfg = s.find("\"config\"").unwrap();
+        let lay = s.find("\"layers\"").unwrap();
+        let mt = s
+            .find("\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\"")
+            .unwrap();
+        let sv = s.find("\"schemaVersion\"").unwrap();
+        assert!(
+            ann < cfg && cfg < lay && lay < mt && mt < sv,
+            "keys not in canonical order: {s}"
+        );
+    }
+
+    #[test]
+    fn canonical_manifest_bytes_differ_from_plain_serde() {
+        // This is the bug: plain `serde_json` emits struct field order
+        // (schemaVersion, mediaType, config, layers, annotations), which hashes
+        // to a digest the registry never stores. Canonical output must differ.
+        let manifest = sample_manifest();
+        let canonical = canonical_manifest_bytes(&manifest).unwrap();
+        let plain = serde_json::to_vec(&manifest).unwrap();
+        assert_ne!(
+            canonical, plain,
+            "canonical serialization must differ from plain serde_json field order"
+        );
+    }
+
+    #[test]
+    fn digest_from_manifest_url_extracts_digest() {
+        assert_eq!(
+            digest_from_manifest_url(
+                "https://actpkg.dev/v2/library/filesystem/manifests/sha256:abc123"
+            ),
+            Some("sha256:abc123")
+        );
+    }
+
+    #[test]
+    fn digest_from_manifest_url_none_for_tag() {
+        assert_eq!(
+            digest_from_manifest_url("https://actpkg.dev/v2/library/filesystem/manifests/0.3.0"),
+            None
         );
     }
 }
