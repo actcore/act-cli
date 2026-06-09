@@ -5,7 +5,9 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::sync::{mpsc, oneshot};
 use wasmtime::component::{Component, Linker, ResourceTable, Source, StreamConsumer, StreamResult};
-use wasmtime::{AsContextMut, Config, Engine, Store, StoreContextMut};
+use wasmtime::{
+    AsContextMut, Config, Engine, Store, StoreContextMut, StoreLimits, StoreLimitsBuilder,
+};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use wasmtime_wasi_http::WasiHttpCtx;
 use wasmtime_wasi_http::p3::WasiHttpCtxView;
@@ -36,6 +38,9 @@ pub struct HostState {
     fs_matcher: crate::runtime::fs_matcher::FsMatcher,
     fs_mode: crate::config::PolicyMode,
     fd_paths: crate::runtime::fs_policy::FdPathMap,
+    /// Caps the component's wasm linear memory growth (via `store.limiter`).
+    /// Default `StoreLimits` is unlimited.
+    limits: StoreLimits,
 }
 
 impl HostState {
@@ -153,6 +158,7 @@ pub async fn create_store(
     fs: &crate::config::FsConfig,
     sockets: &crate::config::SocketsConfig,
     info: &ComponentInfo,
+    max_memory: Option<usize>,
 ) -> Result<Store<HostState>> {
     // Intersect user policy with the component's declared capabilities.
     let effective_fs = crate::runtime::effective::effective_fs(fs, &info.std.capabilities).config;
@@ -208,8 +214,17 @@ pub async fn create_store(
             preopens: preopen_pairs,
             by_rep: Default::default(),
         },
+        limits: match max_memory {
+            Some(bytes) => StoreLimitsBuilder::new().memory_size(bytes).build(),
+            None => StoreLimits::default(),
+        },
     };
-    Ok(Store::new(engine, state))
+    let mut store = Store::new(engine, state);
+    // Enforce the linear-memory cap: when the guest grows memory past the limit,
+    // `memory.grow` fails (the guest typically traps OOM) instead of letting the
+    // host process balloon. No-op when `max_memory` is None (default limits).
+    store.limiter(|state| &mut state.limits);
+    Ok(store)
 }
 
 // ── Component info from custom section ──
@@ -346,12 +361,13 @@ pub async fn instantiate_component(
     fs: &crate::config::FsConfig,
     sockets: &crate::config::SocketsConfig,
     info: &ComponentInfo,
+    max_memory: Option<usize>,
 ) -> Result<(
     ActWorld,
     Option<sessions::SessionProvider>,
     Store<HostState>,
 )> {
-    let mut store = create_store(engine, preopens, http, fs, sockets, info).await?;
+    let mut store = create_store(engine, preopens, http, fs, sockets, info, max_memory).await?;
 
     // Manual instantiation flow (replicates ActWorld::instantiate_async)
     // so we keep access to the raw `Instance` for session-provider lookup.

@@ -55,6 +55,12 @@ struct CommonOpts {
     #[arg(long = "deny-socket")]
     sockets_deny: Vec<String>,
 
+    /// Cap the component's wasm linear memory. Accepts a byte count or a
+    /// binary-unit suffix (e.g. `512MiB`, `512M`, `268435456`). Growth past the
+    /// cap fails inside the guest instead of ballooning the host process.
+    #[arg(long = "max-memory", value_parser = parse_max_memory)]
+    max_memory: Option<usize>,
+
     /// Use a named profile from the config file
     #[arg(long)]
     profile: Option<String>,
@@ -318,6 +324,27 @@ fn parse_cli_metadata(
     }
 }
 
+/// Parse a `--max-memory` value: a byte count, optionally suffixed with a
+/// binary unit (`K`/`M`/`G`, with optional `i`/`B` — `512MiB`, `512M`, …).
+/// Units are powers of 1024.
+fn parse_max_memory(s: &str) -> Result<usize, String> {
+    let lower = s.trim().to_ascii_lowercase();
+    let body = lower.trim_end_matches('b').trim_end_matches('i');
+    let (digits, mult) = match body.chars().last() {
+        Some('k') => (&body[..body.len() - 1], 1usize << 10),
+        Some('m') => (&body[..body.len() - 1], 1usize << 20),
+        Some('g') => (&body[..body.len() - 1], 1usize << 30),
+        _ => (body, 1usize),
+    };
+    let n: usize = digits
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid --max-memory value: '{s}'"))?;
+    n.checked_mul(mult)
+        .filter(|&b| b > 0)
+        .ok_or_else(|| format!("invalid --max-memory value: '{s}'"))
+}
+
 struct ResolvedOpts {
     #[allow(dead_code)]
     config_file: config::ConfigFile,
@@ -325,6 +352,7 @@ struct ResolvedOpts {
     http: config::HttpConfig,
     sockets: config::SocketsConfig,
     metadata: Option<serde_json::Value>,
+    max_memory: Option<usize>,
 }
 
 fn resolve_opts(opts: &CommonOpts) -> Result<ResolvedOpts> {
@@ -360,6 +388,7 @@ fn resolve_opts(opts: &CommonOpts) -> Result<ResolvedOpts> {
         http,
         sockets,
         metadata,
+        max_memory: opts.max_memory,
     })
 }
 
@@ -388,6 +417,7 @@ async fn prepare_component(
     let fs = resolved.fs;
     let http = resolved.http;
     let sockets = resolved.sockets;
+    let max_memory = resolved.max_memory;
 
     let mut preopens = runtime::fs_policy::derive_preopens(&fs);
     let mount_root = info.std.capabilities.fs_mount_root().unwrap_or("/");
@@ -410,7 +440,7 @@ async fn prepare_component(
     let wasm = runtime::load_component(&engine, &component_path)?;
     let linker = runtime::create_linker(&engine)?;
     let (instance, session_provider, store) = runtime::instantiate_component(
-        &engine, &wasm, &linker, &preopens, &http, &fs, &sockets, &info,
+        &engine, &wasm, &linker, &preopens, &http, &fs, &sockets, &info, max_memory,
     )
     .await?;
     let has_sessions = session_provider.is_some();
@@ -967,6 +997,23 @@ mod tests {
     fn parse_cli_metadata_from_string() {
         let result = parse_cli_metadata(Some(r#"{"key":"value"}"#.to_string()), None).unwrap();
         assert_eq!(result, Some(serde_json::json!({"key": "value"})));
+    }
+
+    #[test]
+    fn parse_max_memory_units_and_bytes() {
+        assert_eq!(parse_max_memory("268435456").unwrap(), 256 << 20);
+        assert_eq!(parse_max_memory("256M").unwrap(), 256 << 20);
+        assert_eq!(parse_max_memory("256MiB").unwrap(), 256 << 20);
+        assert_eq!(parse_max_memory("256mb").unwrap(), 256 << 20);
+        assert_eq!(parse_max_memory("1G").unwrap(), 1 << 30);
+        assert_eq!(parse_max_memory("512k").unwrap(), 512 << 10);
+    }
+
+    #[test]
+    fn parse_max_memory_rejects_garbage_and_zero() {
+        assert!(parse_max_memory("12xyz").is_err());
+        assert!(parse_max_memory("").is_err());
+        assert!(parse_max_memory("0").is_err());
     }
 
     #[test]
