@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-06-09
+
+### Changed
+
+- `act-build` now lowercases OCI repository names before pushing (tags are
+  preserved), so pushes to registries that reject uppercase repositories
+  succeed.
+- Updated dependencies, including swapping the unmaintained `fs2` file-lock
+  crate for `fs4` in `act-store`.
+
+### Fixed
+
+- `act-build validate` no longer rejects valid components. The tool-provider
+  interface moved from `act:core` to the `act:tools` package; validate now
+  recognizes `act:tools/tool-provider` instead of the obsolete
+  `act:core/tool-provider`.
+- `act-build` now reports the same manifest digest the registry stores. It
+  previously hashed a non-canonical serialization while pushing canonical
+  JSON, so digest-pinned pulls 404'd; it now hashes and pushes the identical
+  canonical bytes, with a warn-only cross-check against the registry's
+  returned digest.
+
 ## [0.8.0] - 2026-06-02
 
 ### Added
