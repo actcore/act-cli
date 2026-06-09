@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.2] - 2026-06-11
+
+### Added
+
+- **`--max-memory`** flag (on `run` / `call` / `info`) caps a component's
+  WebAssembly linear memory. Accepts a byte count or a size with a unit —
+  binary (`512MiB`) or decimal (`512MB`). When a component tries to grow memory
+  past the cap, the growth fails inside the sandbox instead of ballooning the
+  host process — useful when running untrusted components (e.g. metadata/tool
+  extraction with `act info --tools`).
+
 ## [0.8.1] - 2026-06-09
 
 ### Changed
