@@ -11,7 +11,7 @@ homepage = "https://actcore.dev"
 readme = "README.md"
 
 [workspace.dependencies]
-act-types = "0.7"
+act-types = "0.9"
 wasmparser = "0.250.0"
 
 [profile.release]
