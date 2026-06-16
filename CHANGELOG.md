@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.4] - 2026-06-17
+
+### Changed
+
+- **`act-store` now follows the unified workspace version.** It was versioned
+  independently (last published as `0.1.1`) and is now released in lockstep with
+  `act` and `act-build` at `0.8.4`. This unblocks `cargo publish --workspace`,
+  which had been aborting because `act-store@0.1.1` already existed on crates.io.
+
 ## [0.8.3] - 2026-06-16
 
 ### Added

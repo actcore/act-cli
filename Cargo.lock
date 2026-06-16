@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "act-build"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "act-types",
  "anyhow",
@@ -37,7 +37,7 @@ dependencies = [
 
 [[package]]
 name = "act-cli"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "act-store",
  "act-types",
@@ -84,7 +84,7 @@ dependencies = [
 
 [[package]]
 name = "act-store"
-version = "0.1.1"
+version = "0.8.4"
 dependencies = [
  "chrono",
  "dirs",
