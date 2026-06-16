@@ -87,6 +87,15 @@ pub fn to_json(data: &InfoData<'_>) -> anyhow::Result<String> {
     Ok(serde_json::to_string_pretty(&out)?)
 }
 
+/// Render the full decoded `act:component` manifest (`ComponentInfo`,
+/// `std` + `extra`) as pretty JSON — the raw, verbatim view behind
+/// `act inspect component-manifest`. Unlike [`to_json`], this performs no
+/// curation: it is the stable machine contract for registry tooling.
+#[allow(dead_code)]
+pub fn to_manifest_json(info: &act_types::ComponentInfo) -> anyhow::Result<String> {
+    Ok(serde_json::to_string_pretty(info)?)
+}
+
 fn tool_to_json(
     td: &crate::runtime::exports::act::tools::tool_provider::ToolDefinition,
 ) -> ToolJson {
@@ -548,5 +557,20 @@ mod tests {
         // Should not panic, produce some output
         assert!(!text.is_empty());
         assert!(json_str.contains("name"));
+    }
+
+    #[test]
+    fn manifest_json_includes_std_and_extra() {
+        let mut info = ComponentInfo::new("demo", "1.2.3", "desc");
+        info.extra
+            .insert("vendor:thing".to_string(), serde_json::json!({ "k": "v" }));
+
+        let s = to_manifest_json(&info).expect("render");
+        let v: serde_json::Value = serde_json::from_str(&s).expect("valid JSON");
+
+        assert_eq!(v["std"]["name"], "demo");
+        assert_eq!(v["std"]["version"], "1.2.3");
+        // `extra` is flattened to the top level of ComponentInfo.
+        assert_eq!(v["vendor:thing"]["k"], "v");
     }
 }
