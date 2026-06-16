@@ -194,6 +194,9 @@ enum Command {
     /// Manage the local component store (list, update, gc).
     #[command(subcommand)]
     Store(StoreCommand),
+    /// Inspect a component artifact (read-only, no instantiation).
+    #[command(subcommand)]
+    Inspect(InspectCommand),
 }
 
 #[derive(clap::Subcommand)]
@@ -224,6 +227,20 @@ enum SessionCommand {
     },
 }
 
+#[derive(clap::Subcommand)]
+enum InspectCommand {
+    /// Print the raw decoded `act:component` manifest (full ComponentInfo).
+    ComponentManifest {
+        /// Component reference (path, URL, OCI ref, or name)
+        #[arg(name = "ref")]
+        reference: ComponentRef,
+
+        /// Output format (raw manifest is JSON; `cbor` reserved for future use)
+        #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
+        format: OutputFormat,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -247,7 +264,7 @@ async fn main() -> Result<()> {
             Command::Session(sub) => match sub {
                 SessionCommand::OpenArgsSchema { opts, .. } => opts.config.as_deref(),
             },
-            Command::Store(_) => None,
+            Command::Store(_) | Command::Inspect(_) => None,
         };
         let log_level = config::load_config(config_path)
             .ok()
@@ -301,6 +318,11 @@ async fn main() -> Result<()> {
             StoreCommand::List { format } => cmd_list(format).await,
             StoreCommand::Update { reference } => cmd_update(reference).await,
             StoreCommand::Gc => cmd_gc().await,
+        },
+        Command::Inspect(cmd) => match cmd {
+            InspectCommand::ComponentManifest { reference, format } => {
+                cmd_inspect_component_manifest(reference, format).await
+            }
         },
     }
 }
@@ -756,6 +778,24 @@ async fn cmd_session_open_args_schema(component: ComponentRef, opts: CommonOpts)
         }
         Err(runtime::ComponentError::Internal(e)) => Err(e),
     }
+}
+
+async fn cmd_inspect_component_manifest(
+    component: ComponentRef,
+    format: OutputFormat,
+) -> Result<()> {
+    // Read the `act:component` custom section without instantiation — no
+    // component code runs, safe against adversarial .wasm files.
+    let component_path = resolve::resolve(&component, false).await?;
+    let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
+    let info = runtime::read_component_info(&wasm_bytes)?;
+
+    // The raw manifest is structured JSON; `--format` is reserved for a
+    // future `cbor` value, so both current variants render JSON.
+    let _ = format;
+    let json = format::to_manifest_json(&info)?;
+    println!("{json}");
+    Ok(())
 }
 
 async fn cmd_info(

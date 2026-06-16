@@ -91,7 +91,6 @@ pub fn to_json(data: &InfoData<'_>) -> anyhow::Result<String> {
 /// `std` + `extra`) as pretty JSON — the raw, verbatim view behind
 /// `act inspect component-manifest`. Unlike [`to_json`], this performs no
 /// curation: it is the stable machine contract for registry tooling.
-#[allow(dead_code)]
 pub fn to_manifest_json(info: &act_types::ComponentInfo) -> anyhow::Result<String> {
     Ok(serde_json::to_string_pretty(info)?)
 }
