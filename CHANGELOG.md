@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.3] - 2026-06-16
+
+### Added
+
+- **`act-build pack --set <key>=<value>`** — override resolved component-metadata
+  fields at pack time (e.g. `--set std.name=sqlite-vec`), for feature-conditional builds.
+
+### Changed
+
+- **`act-build init rust`** scaffolds components on **act-sdk 0.9** (lean
+  `#[act_component]`, metadata embedded by `act-build pack`) with wit-bindgen 0.58.
+- Bundled **`act-types` updated to 0.9** — the shared CBOR↔JSON `$bytes` envelope
+  codec is now in the host (`info` / `call` output paths).
+
 ## [0.8.2] - 2026-06-11
 
 ### Added
