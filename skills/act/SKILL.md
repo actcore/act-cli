@@ -54,7 +54,10 @@ act info --tools --format json <component>
 The output contains:
 - `tools` — list of tool names, descriptions, and `parameters_schema`
 
-Use `--format text` for a human-readable summary instead of JSON.
+Use `--format text` for a human-readable summary instead of JSON, or
+`--format toon` for the same data as compact TOON (Token-Oriented Object
+Notation), which uses ~30% fewer tokens — handy when feeding a component's
+tool catalog into an LLM context.
 
 ## Step 2: Call a tool
 

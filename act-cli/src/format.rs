@@ -56,8 +56,9 @@ pub struct ToolJson {
     pub tags: Vec<String>,
 }
 
-/// Render [`InfoData`] as a machine-readable JSON string.
-pub fn to_json(data: &InfoData<'_>) -> anyhow::Result<String> {
+/// Build the curated [`InfoJson`] view shared by the JSON and TOON renderers,
+/// so both serialize the exact same data shape.
+fn build_info_json(data: &InfoData<'_>) -> InfoJson {
     let info = data.info;
 
     let skill = info
@@ -74,7 +75,7 @@ pub fn to_json(data: &InfoData<'_>) -> anyhow::Result<String> {
         .as_ref()
         .map(|tools| tools.iter().map(tool_to_json).collect::<Vec<_>>());
 
-    let out = InfoJson {
+    InfoJson {
         name: info.std.name.clone(),
         version: info.std.version.clone(),
         description: info.std.description.clone(),
@@ -82,9 +83,28 @@ pub fn to_json(data: &InfoData<'_>) -> anyhow::Result<String> {
         capabilities,
         skill,
         tools: tools_json,
-    };
+    }
+}
 
-    Ok(serde_json::to_string_pretty(&out)?)
+/// Render [`InfoData`] as a machine-readable JSON string.
+pub fn to_json(data: &InfoData<'_>) -> anyhow::Result<String> {
+    Ok(serde_json::to_string_pretty(&build_info_json(data))?)
+}
+
+/// Render [`InfoData`] as TOON (Token-Oriented Object Notation) — the same
+/// curated shape as [`to_json`], serialized in a compact, LLM-friendly
+/// encoding that uses ~40% fewer tokens than JSON.
+pub fn to_info_toon(data: &InfoData<'_>) -> anyhow::Result<String> {
+    to_toon(&build_info_json(data))
+}
+
+/// Encode any serializable value as TOON using the spec-default options.
+///
+/// TOON mirrors the JSON data model: uniform arrays of scalar-only objects
+/// collapse into a CSV-like table, nested objects use YAML-style
+/// indentation. Used wherever `--format toon` is accepted.
+pub fn to_toon<T: Serialize>(value: &T) -> anyhow::Result<String> {
+    toon_format::encode_default(value).map_err(|e| anyhow::anyhow!("encoding as TOON: {e}"))
 }
 
 /// Render the full decoded `act:component` manifest (`ComponentInfo`,
@@ -571,5 +591,62 @@ mod tests {
         assert_eq!(v["std"]["version"], "1.2.3");
         // `extra` is flattened to the top level of ComponentInfo.
         assert_eq!(v["vendor:thing"]["k"], "v");
+    }
+
+    #[test]
+    fn info_toon_basic() {
+        let info = sample_info();
+        let data = InfoData {
+            info: &info,
+            tools: None,
+        };
+        let toon = to_info_toon(&data).expect("render TOON");
+        // YAML-style scalar lines for the top-level fields. The spec-compliant
+        // encoder quotes values that would otherwise be ambiguous (hyphens,
+        // digit-leading version strings), so match on the key + value loosely.
+        assert!(toon.contains("name:"), "{toon}");
+        assert!(toon.contains("component-sqlite"), "{toon}");
+        assert!(toon.contains("0.2.0"), "{toon}");
+    }
+
+    #[test]
+    fn info_toon_round_trips_to_same_shape() {
+        let info = sample_info();
+        let data = InfoData {
+            info: &info,
+            tools: None,
+        };
+        let toon = to_info_toon(&data).expect("render TOON");
+        let decoded: serde_json::Value = toon_format::decode_default(&toon).expect("decode TOON");
+        let expected = serde_json::to_value(build_info_json(&data)).expect("to_value");
+        assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn manifest_toon_round_trips() {
+        let mut info = ComponentInfo::new("demo", "1.2.3", "desc");
+        info.extra
+            .insert("vendor:thing".to_string(), serde_json::json!({ "k": "v" }));
+
+        let toon = to_toon(&info).expect("render TOON");
+        let decoded: serde_json::Value = toon_format::decode_default(&toon).expect("decode TOON");
+        let expected = serde_json::to_value(&info).expect("to_value");
+        assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn to_toon_uniform_array_is_tabular() {
+        // A list of objects whose fields are all scalars collapses into
+        // TOON's CSV-like tabular form — this is the `store list` case.
+        let rows = serde_json::json!([
+            { "ref": "a.wasm", "version": "0.1.0" },
+            { "ref": "b.wasm", "version": "0.2.0" },
+        ]);
+        let toon = to_toon(&rows).expect("render TOON");
+        // `[2]{ref,version}:` header declares length + fields once, then one
+        // comma-separated row per element (values may be quoted).
+        assert!(toon.contains("[2]{"), "{toon}");
+        assert!(toon.contains("ref"), "{toon}");
+        assert!(toon.contains("a.wasm,"), "{toon}");
     }
 }

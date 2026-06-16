@@ -74,6 +74,9 @@ enum OutputFormat {
     #[default]
     Text,
     Json,
+    /// Token-Oriented Object Notation — compact, LLM-friendly encoding of the
+    /// same data as `json` (~40% fewer tokens).
+    Toon,
 }
 
 #[derive(Parser)]
@@ -790,11 +793,14 @@ async fn cmd_inspect_component_manifest(
     let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
     let info = runtime::read_component_info(&wasm_bytes)?;
 
-    // The raw manifest is structured JSON; `--format` is reserved for a
-    // future `cbor` value, so both current variants render JSON.
-    let _ = format;
-    let json = format::to_manifest_json(&info)?;
-    println!("{json}");
+    // The raw manifest is structured data: `json` (default) emits verbatim
+    // pretty JSON, `toon` emits the same shape in TOON. `text` has no
+    // distinct manifest form, so it falls back to JSON.
+    let rendered = match format {
+        OutputFormat::Toon => format::to_toon(&info)?,
+        OutputFormat::Json | OutputFormat::Text => format::to_manifest_json(&info)?,
+    };
+    println!("{rendered}");
     Ok(())
 }
 
@@ -847,6 +853,10 @@ async fn cmd_info(
         OutputFormat::Json => {
             let json = format::to_json(&data)?;
             println!("{json}");
+        }
+        OutputFormat::Toon => {
+            let toon = format::to_info_toon(&data)?;
+            println!("{toon}");
         }
     }
 
@@ -946,21 +956,26 @@ async fn cmd_list(format: OutputFormat) -> Result<()> {
     let store = resolve::open_store()?;
     let mut items = store.list()?;
     items.sort_by(|a, b| source_ref(&a.provenance).cmp(source_ref(&b.provenance)));
+    let rows = || -> Vec<serde_json::Value> {
+        items
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "ref": source_ref(&s.provenance),
+                    "digest": s.provenance.digest,
+                    "name": s.provenance.name,
+                    "version": s.provenance.version,
+                    "fetched_at": s.provenance.fetched_at,
+                })
+            })
+            .collect()
+    };
     match format {
         OutputFormat::Json => {
-            let rows: Vec<_> = items
-                .iter()
-                .map(|s| {
-                    serde_json::json!({
-                        "ref": source_ref(&s.provenance),
-                        "digest": s.provenance.digest,
-                        "name": s.provenance.name,
-                        "version": s.provenance.version,
-                        "fetched_at": s.provenance.fetched_at,
-                    })
-                })
-                .collect();
-            println!("{}", serde_json::to_string_pretty(&rows)?);
+            println!("{}", serde_json::to_string_pretty(&rows())?);
+        }
+        OutputFormat::Toon => {
+            println!("{}", format::to_toon(&rows())?);
         }
         OutputFormat::Text => {
             if items.is_empty() {
