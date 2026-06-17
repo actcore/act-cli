@@ -133,4 +133,20 @@ mod tests {
         }];
         assert!(validate_http(&rules).is_err());
     }
+
+    #[test]
+    fn malformed_fs_constraint_fails_validate() {
+        use act_types::{Capabilities, CapabilityRequest};
+        use std::collections::BTreeMap;
+        // A wasi:filesystem constraint missing the required `mode` cannot parse
+        // as FilesystemAllow, so the public validate() must reject it.
+        let caps = Capabilities(BTreeMap::from([(
+            "wasi:filesystem".to_string(),
+            CapabilityRequest {
+                constraints: vec![serde_json::json!({ "path": "/x/**" })],
+                ..Default::default()
+            },
+        )]));
+        assert!(validate(&caps).is_err());
+    }
 }
