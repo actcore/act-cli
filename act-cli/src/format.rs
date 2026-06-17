@@ -209,29 +209,15 @@ pub fn to_text(data: &InfoData<'_>) -> String {
         writeln!(out, "\n{}", styled(&info.std.description, p.description)).unwrap();
     }
 
-    // Capabilities — one entry per line, with mount-root / other
-    // per-capability params rendered inline.
+    // Capabilities — one entry per line, with scalar params rendered inline.
     if !info.std.capabilities.is_empty() {
         writeln!(out, "\n{}", styled("Capabilities:", p.section)).unwrap();
-        if let Some(fs) = &info.std.capabilities.filesystem {
-            out.push_str("  wasi:filesystem");
-            if let Some(root) = &fs.mount_root {
-                write!(out, " {}", styled(&format!("(mount-root: {root})"), p.dim)).unwrap();
-            }
-            out.push('\n');
-        }
-        if info.std.capabilities.http.is_some() {
-            out.push_str("  wasi:http\n");
-        }
-        if info.std.capabilities.sockets.is_some() {
-            out.push_str("  wasi:sockets\n");
-        }
-        for (id, params) in &info.std.capabilities.other {
+        for (id, req) in info.std.capabilities.iter() {
             write!(out, "  {id}").unwrap();
-            if let serde_json::Value::Object(map) = params
-                && !map.is_empty()
-            {
-                let pairs: Vec<String> = map
+            // Render scalar params inline (e.g. filesystem mount-root).
+            if !req.params.is_empty() {
+                let pairs: Vec<String> = req
+                    .params
                     .iter()
                     .map(|(k, v)| match v {
                         serde_json::Value::String(s) => format!("{k}: {s}"),
@@ -454,16 +440,21 @@ fn type_label(prop: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use act_types::FilesystemCap;
     use act_types::types::ComponentInfo;
 
     fn sample_info() -> ComponentInfo {
         let mut info = ComponentInfo::new("component-sqlite", "0.2.0", "SQLite database access");
         info.std.default_language = Some("en".to_string());
-        info.std.capabilities.filesystem = Some(FilesystemCap {
-            mount_root: Some("/data".to_string()),
-            ..Default::default()
-        });
+        info.std.capabilities.0.insert(
+            "wasi:filesystem".to_string(),
+            act_types::CapabilityRequest {
+                params: std::collections::BTreeMap::from([(
+                    "mount-root".to_string(),
+                    serde_json::json!("/data"),
+                )]),
+                ..Default::default()
+            },
+        );
         info.extra.insert(
             "std:skill".to_string(),
             serde_json::Value::String("Use this component for database operations...".to_string()),
@@ -522,7 +513,10 @@ mod tests {
         assert_eq!(v["version"], "0.2.0");
         assert_eq!(v["description"], "SQLite database access");
         assert_eq!(v["skill"], "Use this component for database operations...");
-        assert_eq!(v["capabilities"]["wasi:filesystem"]["mount-root"], "/data");
+        assert_eq!(
+            v["capabilities"]["wasi:filesystem"]["params"]["mount-root"],
+            "/data"
+        );
     }
 
     #[test]

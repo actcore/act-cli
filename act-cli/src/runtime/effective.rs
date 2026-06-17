@@ -7,7 +7,8 @@
 //! with undeclared capability classes (and declared-but-empty allow
 //! arrays) hard-denied regardless of user grant ("ceiling" model).
 
-use act_types::{Capabilities, HttpAllow};
+use act_types::constants::{CAP_FILESYSTEM, CAP_HTTP, CAP_SOCKETS};
+use act_types::{Capabilities, FilesystemAllow, HttpAllow, SocketsAllow};
 
 use crate::config::{FsConfig, HttpConfig, HttpRule, PolicyMode};
 use crate::runtime::network::NetworkRule;
@@ -25,8 +26,7 @@ pub struct EffectivePolicy<T> {
 
 #[allow(dead_code)] // wired in Task 4; module exists for tests now
 pub fn effective_fs(user: &FsConfig, caps: &Capabilities) -> EffectivePolicy<FsConfig> {
-    let Some(fs_cap) = caps.filesystem.as_ref() else {
-        // Undeclared → hard deny
+    let Some(req) = caps.get(CAP_FILESYSTEM) else {
         return EffectivePolicy {
             config: FsConfig {
                 mode: PolicyMode::Deny,
@@ -35,10 +35,11 @@ pub fn effective_fs(user: &FsConfig, caps: &Capabilities) -> EffectivePolicy<FsC
             declared: false,
         };
     };
-
-    // Empty allow = no filesystem access. Components wanting broad access
-    // declare allow = [{ path = "**", mode = "rw" }] explicitly.
-    let declared_paths: Vec<String> = fs_cap.allow.iter().map(|p| p.path.clone()).collect();
+    let declared = req.constraints_as::<FilesystemAllow>().unwrap_or_else(|e| {
+        tracing::warn!(cap = CAP_FILESYSTEM, error = %e, "ignoring malformed fs constraint");
+        Vec::new()
+    });
+    let declared_paths: Vec<String> = declared.iter().map(|p| p.path.clone()).collect();
     if declared_paths.is_empty() {
         return EffectivePolicy {
             config: FsConfig {
@@ -48,16 +49,10 @@ pub fn effective_fs(user: &FsConfig, caps: &Capabilities) -> EffectivePolicy<FsC
             declared: true,
         };
     }
-
-    // Intersection: user's allow ∩ declaration ceiling.
-    //
-    // Declaration only narrows. If user denies, user wins (deny always
-    // wins — their deny list passes through unchanged). If user allows
-    // path P but P is not covered by any declared path, P is dropped
-    // from the effective allow.
+    // ↓↓↓ from here, the existing intersection `match effective.mode { … }` block is UNCHANGED ↓↓↓
     let mut effective = user.clone();
     match effective.mode {
-        PolicyMode::Deny => {} // user has denied everything; leave it
+        PolicyMode::Deny => {}
         PolicyMode::Allowlist => {
             effective.allow.retain(|allow_pat| {
                 declared_paths
@@ -66,12 +61,10 @@ pub fn effective_fs(user: &FsConfig, caps: &Capabilities) -> EffectivePolicy<FsC
             });
         }
         PolicyMode::Open => {
-            // Open + declaration → treat as allowlist over declared paths.
             effective.mode = PolicyMode::Allowlist;
             effective.allow = declared_paths;
         }
     }
-
     EffectivePolicy {
         config: effective,
         declared: true,
@@ -80,7 +73,7 @@ pub fn effective_fs(user: &FsConfig, caps: &Capabilities) -> EffectivePolicy<FsC
 
 #[allow(dead_code)] // wired in Task 4; module exists for tests now
 pub fn effective_http(user: &HttpConfig, caps: &Capabilities) -> EffectivePolicy<HttpConfig> {
-    let Some(http_cap) = caps.http.as_ref() else {
+    let Some(req) = caps.get(CAP_HTTP) else {
         return EffectivePolicy {
             config: HttpConfig {
                 mode: PolicyMode::Deny,
@@ -89,10 +82,15 @@ pub fn effective_http(user: &HttpConfig, caps: &Capabilities) -> EffectivePolicy
             declared: false,
         };
     };
-
-    // Empty allow = no HTTP access. Components wanting broad access
-    // declare allow = [{ host = "*" }] explicitly.
-    let declared_rules: Vec<HttpRule> = http_cap.allow.iter().map(rule_from_declaration).collect();
+    let declared_rules: Vec<HttpRule> = req
+        .constraints_as::<HttpAllow>()
+        .unwrap_or_else(|e| {
+            tracing::warn!(cap = CAP_HTTP, error = %e, "ignoring malformed http constraint");
+            Vec::new()
+        })
+        .iter()
+        .map(rule_from_declaration)
+        .collect();
     if declared_rules.is_empty() {
         return EffectivePolicy {
             config: HttpConfig {
@@ -102,10 +100,10 @@ pub fn effective_http(user: &HttpConfig, caps: &Capabilities) -> EffectivePolicy
             declared: true,
         };
     }
-
+    // ↓↓↓ existing http intersection `match` block UNCHANGED ↓↓↓
     let mut effective = user.clone();
     match effective.mode {
-        PolicyMode::Deny => {} // user has denied everything; leave it
+        PolicyMode::Deny => {}
         PolicyMode::Allowlist => {
             effective.allow.retain(|user_rule| {
                 declared_rules
@@ -118,7 +116,6 @@ pub fn effective_http(user: &HttpConfig, caps: &Capabilities) -> EffectivePolicy
             effective.allow = declared_rules;
         }
     }
-
     EffectivePolicy {
         config: effective,
         declared: true,
@@ -144,7 +141,7 @@ pub fn effective_sockets(
     user: &crate::config::SocketsConfig,
     caps: &Capabilities,
 ) -> EffectivePolicy<crate::config::SocketsConfig> {
-    let Some(sockets_cap) = caps.sockets.as_ref() else {
+    let Some(req) = caps.get(CAP_SOCKETS) else {
         return EffectivePolicy {
             config: crate::config::SocketsConfig {
                 mode: PolicyMode::Deny,
@@ -153,9 +150,12 @@ pub fn effective_sockets(
             declared: false,
         };
     };
-
-    let declared_rules: Vec<crate::config::SocketsRule> = sockets_cap
-        .allow
+    let declared_rules: Vec<crate::config::SocketsRule> = req
+        .constraints_as::<SocketsAllow>()
+        .unwrap_or_else(|e| {
+            tracing::warn!(cap = CAP_SOCKETS, error = %e, "ignoring malformed sockets constraint");
+            Vec::new()
+        })
         .iter()
         .map(sockets_rule_from_declaration)
         .collect();
@@ -168,7 +168,7 @@ pub fn effective_sockets(
             declared: true,
         };
     }
-
+    // ↓↓↓ existing sockets intersection `match` block UNCHANGED ↓↓↓
     let mut effective = user.clone();
     match effective.mode {
         PolicyMode::Deny => {}
@@ -184,7 +184,6 @@ pub fn effective_sockets(
             effective.allow = declared_rules;
         }
     }
-
     EffectivePolicy {
         config: effective,
         declared: true,
@@ -334,29 +333,41 @@ fn host_covers(decl: &str, user: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use act_types::{FilesystemAllow, FilesystemCap, FsMode, HttpCap};
+    use act_types::{CapabilityRequest, FilesystemAllow, FsMode, HttpAllow};
+    use std::collections::BTreeMap;
 
     fn caps_fs(paths: Vec<(&str, FsMode)>) -> Capabilities {
-        Capabilities {
-            filesystem: Some(FilesystemCap {
-                allow: paths
-                    .into_iter()
-                    .map(|(p, m)| FilesystemAllow {
-                        path: p.to_string(),
-                        mode: m,
-                    })
-                    .collect(),
+        let constraints = paths
+            .into_iter()
+            .map(|(p, m)| {
+                serde_json::to_value(FilesystemAllow {
+                    path: p.to_string(),
+                    mode: m,
+                })
+                .unwrap()
+            })
+            .collect();
+        Capabilities(BTreeMap::from([(
+            "wasi:filesystem".to_string(),
+            CapabilityRequest {
+                constraints,
                 ..Default::default()
-            }),
-            ..Default::default()
-        }
+            },
+        )]))
     }
 
     fn caps_http(allow: Vec<HttpAllow>) -> Capabilities {
-        Capabilities {
-            http: Some(HttpCap { allow }),
-            ..Default::default()
-        }
+        let constraints = allow
+            .into_iter()
+            .map(|a| serde_json::to_value(a).unwrap())
+            .collect();
+        Capabilities(BTreeMap::from([(
+            "wasi:http".to_string(),
+            CapabilityRequest {
+                constraints,
+                ..Default::default()
+            },
+        )]))
     }
 
     #[test]
@@ -374,10 +385,10 @@ mod tests {
     #[test]
     fn fs_empty_allow_forces_deny() {
         // Declared but with empty allow → hard deny.
-        let caps = Capabilities {
-            filesystem: Some(FilesystemCap::default()),
-            ..Default::default()
-        };
+        let caps = Capabilities(BTreeMap::from([(
+            "wasi:filesystem".to_string(),
+            CapabilityRequest::default(),
+        )]));
         let user = FsConfig {
             mode: PolicyMode::Allowlist,
             allow: vec!["/tmp/**".into()],
@@ -448,10 +459,10 @@ mod tests {
 
     #[test]
     fn http_empty_allow_forces_deny() {
-        let caps = Capabilities {
-            http: Some(HttpCap::default()),
-            ..Default::default()
-        };
+        let caps = Capabilities(BTreeMap::from([(
+            "wasi:http".to_string(),
+            CapabilityRequest::default(),
+        )]));
         let user = HttpConfig {
             mode: PolicyMode::Allowlist,
             allow: vec![HttpRule {
@@ -589,10 +600,17 @@ mod tests {
     }
 
     fn caps_sockets(allow: Vec<act_types::SocketsAllow>) -> Capabilities {
-        Capabilities {
-            sockets: Some(act_types::SocketsCap { allow }),
-            ..Default::default()
-        }
+        let constraints = allow
+            .into_iter()
+            .map(|a| serde_json::to_value(a).unwrap())
+            .collect();
+        Capabilities(BTreeMap::from([(
+            "wasi:sockets".to_string(),
+            CapabilityRequest {
+                constraints,
+                ..Default::default()
+            },
+        )]))
     }
 
     fn user_sockets_allow_host(host: &str, ports: Vec<u16>) -> crate::config::SocketsRule {

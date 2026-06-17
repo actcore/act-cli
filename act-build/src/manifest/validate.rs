@@ -2,21 +2,28 @@
 //! globs / hostnames fail the build instead of silently breaking
 //! enforcement at runtime.
 
-use act_types::{Capabilities, FilesystemCap, HttpCap};
+use act_types::constants::{CAP_FILESYSTEM, CAP_HTTP};
+use act_types::{Capabilities, FilesystemAllow, HttpAllow};
 use anyhow::{Result, bail};
 
 pub fn validate(caps: &Capabilities) -> Result<()> {
-    if let Some(fs) = caps.filesystem.as_ref() {
-        validate_fs(fs)?;
+    if let Some(fs_req) = caps.get(CAP_FILESYSTEM) {
+        let entries = fs_req
+            .constraints_as::<FilesystemAllow>()
+            .map_err(|e| anyhow::anyhow!("malformed wasi:filesystem constraints: {e}"))?;
+        validate_fs(&entries)?;
     }
-    if let Some(http) = caps.http.as_ref() {
-        validate_http(http)?;
+    if let Some(http_req) = caps.get(CAP_HTTP) {
+        let rules = http_req
+            .constraints_as::<HttpAllow>()
+            .map_err(|e| anyhow::anyhow!("malformed wasi:http constraints: {e}"))?;
+        validate_http(&rules)?;
     }
     Ok(())
 }
 
-fn validate_fs(cap: &FilesystemCap) -> Result<()> {
-    for (i, entry) in cap.allow.iter().enumerate() {
+fn validate_fs(entries: &[FilesystemAllow]) -> Result<()> {
+    for (i, entry) in entries.iter().enumerate() {
         if entry.path.is_empty() {
             bail!("[std.capabilities.\"wasi:filesystem\"].allow[{i}].path is empty");
         }
@@ -31,8 +38,8 @@ fn validate_fs(cap: &FilesystemCap) -> Result<()> {
     Ok(())
 }
 
-fn validate_http(cap: &HttpCap) -> Result<()> {
-    for (i, rule) in cap.allow.iter().enumerate() {
+fn validate_http(rules: &[HttpAllow]) -> Result<()> {
+    for (i, rule) in rules.iter().enumerate() {
         if rule.host.is_empty() {
             bail!("[std.capabilities.\"wasi:http\"].allow[{i}].host is empty");
         }
@@ -55,90 +62,75 @@ mod tests {
 
     #[test]
     fn valid_fs_paths_pass() {
-        let cap = FilesystemCap {
-            allow: vec![
-                FilesystemAllow {
-                    path: "/tmp/**".into(),
-                    mode: FsMode::Rw,
-                },
-                FilesystemAllow {
-                    path: "/etc/foo".into(),
-                    mode: FsMode::Ro,
-                },
-            ],
-            ..Default::default()
-        };
-        validate_fs(&cap).expect("valid globs");
+        let entries = vec![
+            FilesystemAllow {
+                path: "/tmp/**".into(),
+                mode: FsMode::Rw,
+            },
+            FilesystemAllow {
+                path: "/etc/foo".into(),
+                mode: FsMode::Ro,
+            },
+        ];
+        validate_fs(&entries).expect("valid globs");
     }
 
     #[test]
     fn invalid_fs_glob_fails() {
-        let cap = FilesystemCap {
-            allow: vec![FilesystemAllow {
-                path: "[unclosed".into(),
-                mode: FsMode::Rw,
-            }],
-            ..Default::default()
-        };
-        assert!(validate_fs(&cap).is_err());
+        let entries = vec![FilesystemAllow {
+            path: "[unclosed".into(),
+            mode: FsMode::Rw,
+        }];
+        assert!(validate_fs(&entries).is_err());
     }
 
     #[test]
     fn empty_fs_path_fails() {
-        let cap = FilesystemCap {
-            allow: vec![FilesystemAllow {
-                path: String::new(),
-                mode: FsMode::Rw,
-            }],
-            ..Default::default()
-        };
-        assert!(validate_fs(&cap).is_err());
+        let entries = vec![FilesystemAllow {
+            path: String::new(),
+            mode: FsMode::Rw,
+        }];
+        assert!(validate_fs(&entries).is_err());
     }
 
     #[test]
     fn valid_http_rules_pass() {
-        let cap = HttpCap {
-            allow: vec![
-                HttpAllow {
-                    host: "api.example.com".into(),
-                    scheme: Some("https".into()),
-                    methods: None,
-                    ports: None,
-                },
-                HttpAllow {
-                    host: "*".into(),
-                    scheme: None,
-                    methods: None,
-                    ports: None,
-                },
-            ],
-        };
-        validate_http(&cap).expect("valid rules");
+        let rules = vec![
+            HttpAllow {
+                host: "api.example.com".into(),
+                scheme: Some("https".into()),
+                methods: None,
+                ports: None,
+            },
+            HttpAllow {
+                host: "*".into(),
+                scheme: None,
+                methods: None,
+                ports: None,
+            },
+        ];
+        validate_http(&rules).expect("valid rules");
     }
 
     #[test]
     fn empty_http_host_fails() {
-        let cap = HttpCap {
-            allow: vec![HttpAllow {
-                host: String::new(),
-                scheme: None,
-                methods: None,
-                ports: None,
-            }],
-        };
-        assert!(validate_http(&cap).is_err());
+        let rules = vec![HttpAllow {
+            host: String::new(),
+            scheme: None,
+            methods: None,
+            ports: None,
+        }];
+        assert!(validate_http(&rules).is_err());
     }
 
     #[test]
     fn bad_scheme_fails() {
-        let cap = HttpCap {
-            allow: vec![HttpAllow {
-                host: "example.com".into(),
-                scheme: Some("ftp".into()),
-                methods: None,
-                ports: None,
-            }],
-        };
-        assert!(validate_http(&cap).is_err());
+        let rules = vec![HttpAllow {
+            host: "example.com".into(),
+            scheme: Some("ftp".into()),
+            methods: None,
+            ports: None,
+        }];
+        assert!(validate_http(&rules).is_err());
     }
 }
