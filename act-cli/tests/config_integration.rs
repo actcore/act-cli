@@ -5,12 +5,9 @@ fn cli_run_help_shows_policy_flags() {
         .output()
         .expect("failed to run act");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("fs-policy"), "missing --fs-policy flag");
-    assert!(stdout.contains("fs-allow"), "missing --fs-allow flag");
-    assert!(stdout.contains("fs-deny"), "missing --fs-deny flag");
-    assert!(stdout.contains("http-policy"), "missing --http-policy flag");
-    assert!(stdout.contains("http-allow"), "missing --http-allow flag");
-    assert!(stdout.contains("http-deny"), "missing --http-deny flag");
+    assert!(stdout.contains("--grant"), "missing --grant flag");
+    assert!(stdout.contains("--allow"), "missing --allow flag");
+    assert!(stdout.contains("--deny"), "missing --deny flag");
     assert!(stdout.contains("profile"), "missing --profile flag");
     assert!(stdout.contains("config"), "missing --config flag");
 }
@@ -22,11 +19,9 @@ fn cli_call_help_shows_policy_flags() {
         .output()
         .expect("failed to run act");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("fs-policy"), "missing --fs-policy in call");
-    assert!(
-        stdout.contains("http-policy"),
-        "missing --http-policy in call"
-    );
+    assert!(stdout.contains("--grant"), "missing --grant in call");
+    assert!(stdout.contains("--allow"), "missing --allow in call");
+    assert!(stdout.contains("--deny"), "missing --deny in call");
 }
 
 #[test]

@@ -81,8 +81,8 @@ fn http_allow_matching_host_succeeds() {
     let wasm_s = wasm.to_string_lossy().to_string();
     let (ok, stdout, stderr) = run_call(&[
         "call",
-        "--http-allow",
-        "example.com",
+        "--grant",
+        r#"{"wasi:http":{"mode":"allowlist","allow":[{"host":"example.com"}]}}"#,
         &wasm_s,
         "fetch",
         "--args",
@@ -90,7 +90,7 @@ fn http_allow_matching_host_succeeds() {
     ]);
     assert!(
         ok,
-        "expected call to succeed with --http-allow example.com; stderr: {stderr}"
+        "expected call to succeed with --grant wasi:http allowlist example.com; stderr: {stderr}"
     );
     assert!(
         stdout.contains("Example Domain") || stdout.contains("example"),
@@ -106,8 +106,8 @@ fn http_allow_mismatched_host_blocks() {
     let wasm_s = wasm.to_string_lossy().to_string();
     let (ok, _stdout, stderr) = run_call(&[
         "call",
-        "--http-allow",
-        "evil.example",
+        "--grant",
+        r#"{"wasi:http":{"mode":"allowlist","allow":[{"host":"evil.example"}]}}"#,
         &wasm_s,
         "fetch",
         "--args",
@@ -131,8 +131,8 @@ fn http_policy_open_allows_any_host() {
     let wasm_s = wasm.to_string_lossy().to_string();
     let (ok, stdout, stderr) = run_call(&[
         "call",
-        "--http-policy",
-        "open",
+        "--allow",
+        "wasi:http",
         &wasm_s,
         "fetch",
         "--args",
@@ -162,12 +162,8 @@ fn deny_cidr_blocks_with_dns_error() {
     let wasm_s = wasm.to_string_lossy().to_string();
     let (ok, _stdout, stderr) = run_call(&[
         "call",
-        "--http-allow",
-        "example.com",
-        "--http-deny",
-        "0.0.0.0/0",
-        "--http-deny",
-        "::/0",
+        "--grant",
+        r#"{"wasi:http":{"mode":"allowlist","allow":[{"host":"example.com"}],"deny":[{"cidr":"0.0.0.0/0"},{"cidr":"::/0"}]}}"#,
         &wasm_s,
         "fetch",
         "--args",
@@ -195,8 +191,8 @@ fn allow_cidr_only_blocks_when_no_host_match() {
     let wasm_s = wasm.to_string_lossy().to_string();
     let (ok, _stdout, stderr) = run_call(&[
         "call",
-        "--http-allow",
-        "10.0.0.0/8",
+        "--grant",
+        r#"{"wasi:http":{"mode":"allowlist","allow":[{"cidr":"10.0.0.0/8"}]}}"#,
         &wasm_s,
         "fetch",
         "--args",
@@ -219,10 +215,8 @@ fn allow_cidr_with_host_match_succeeds() {
     let wasm_s = wasm.to_string_lossy().to_string();
     let (ok, stdout, stderr) = run_call(&[
         "call",
-        "--http-allow",
-        "example.com",
-        "--http-allow",
-        "10.0.0.0/8",
+        "--grant",
+        r#"{"wasi:http":{"mode":"allowlist","allow":[{"host":"example.com"},{"cidr":"10.0.0.0/8"}]}}"#,
         &wasm_s,
         "fetch",
         "--args",
