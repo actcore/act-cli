@@ -68,7 +68,8 @@ act call <component> <tool-name> --args '<json>' [options]
 | Option | Purpose |
 |--------|---------|
 | `--args '<json>'` | Tool parameters (matches `parameters_schema`) |
-| `--metadata '<json>'` | Per-call metadata (component-defined keys) |
+| `-m, --metadata key=value` | Per-call metadata (component-defined keys), repeatable; values are strings |
+| `--metadata-json '<json>'` | Per-call metadata as a JSON object (use for typed values) |
 | `--allow-dir guest:host` | Grant directory access to the sandbox |
 | `--allow-fs` | Grant full filesystem access |
 
@@ -92,19 +93,19 @@ This extracts the embedded skill to `.agents/skills/<name>/`, making it availabl
 # Create a table
 act call ghcr.io/actpkg/sqlite:0.1.0 execute-batch \
   --args '{"sql":"CREATE TABLE notes (id INTEGER PRIMARY KEY, text TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)"}' \
-  --metadata '{"database_path":"/data/notes.db"}' \
+  -m database_path=/data/notes.db \
   --allow-dir /data:/tmp/act-data
 
 # Insert
 act call ghcr.io/actpkg/sqlite:0.1.0 execute \
   --args '{"sql":"INSERT INTO notes (text) VALUES (?1)","params":["Hello from ACT"]}' \
-  --metadata '{"database_path":"/data/notes.db"}' \
+  -m database_path=/data/notes.db \
   --allow-dir /data:/tmp/act-data
 
 # Query
 act call ghcr.io/actpkg/sqlite:0.1.0 query \
   --args '{"sql":"SELECT * FROM notes"}' \
-  --metadata '{"database_path":"/data/notes.db"}' \
+  -m database_path=/data/notes.db \
   --allow-dir /data:/tmp/act-data
 ```
 

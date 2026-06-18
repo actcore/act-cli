@@ -16,9 +16,13 @@ use std::sync::Arc;
 
 #[derive(clap::Args, Clone, Debug)]
 struct CommonOpts {
-    /// JSON metadata to pass to the component
-    #[arg(short, long)]
-    metadata: Option<String>,
+    /// Metadata to pass to the component as `key=value` (string value).
+    /// Repeatable. For typed values use `--metadata-json` or `--metadata-file`.
+    #[arg(short, long, value_name = "KEY=VALUE")]
+    metadata: Vec<String>,
+    /// JSON object of metadata to pass to the component
+    #[arg(long, value_name = "JSON")]
+    metadata_json: Option<String>,
     /// Path to a JSON metadata file
     #[arg(long)]
     metadata_file: Option<PathBuf>,
@@ -309,22 +313,63 @@ async fn main() -> Result<()> {
     }
 }
 
-/// Parse JSON metadata from --metadata or --metadata-file CLI arguments.
-fn parse_cli_metadata(
-    metadata: Option<String>,
-    metadata_file: Option<PathBuf>,
-) -> Result<Option<serde_json::Value>> {
-    match (metadata, metadata_file) {
-        (Some(json_str), _) => Ok(Some(
-            serde_json::from_str(&json_str).context("invalid --metadata JSON")?,
-        )),
-        (_, Some(path)) => {
-            let contents = std::fs::read_to_string(&path).context("reading metadata file")?;
-            Ok(Some(
-                serde_json::from_str(&contents).context("invalid metadata file JSON")?,
-            ))
+/// Merge a JSON value (which must be an object) into `target`, with `source`
+/// naming the CLI flag for error messages.
+fn merge_metadata_object(
+    target: &mut serde_json::Map<String, serde_json::Value>,
+    value: serde_json::Value,
+    source: &str,
+) -> Result<()> {
+    match value {
+        serde_json::Value::Object(map) => {
+            target.extend(map);
+            Ok(())
         }
-        (None, None) => Ok(None),
+        _ => anyhow::bail!("{source} must be a JSON object"),
+    }
+}
+
+/// Assemble CLI metadata from `--metadata-file`, `--metadata-json`, and
+/// repeatable `-m/--metadata key=value` pairs.
+///
+/// Precedence (lowest to highest): file < `--metadata-json` < `key=value`.
+/// `key=value` values are always strings; the value may contain `=` (only the
+/// first `=` splits). Use `--metadata-json`/`--metadata-file` for typed values.
+fn parse_cli_metadata(
+    metadata: &[String],
+    metadata_json: Option<&str>,
+    metadata_file: Option<&std::path::Path>,
+) -> Result<Option<serde_json::Value>> {
+    let mut map = serde_json::Map::new();
+
+    if let Some(path) = metadata_file {
+        let contents = std::fs::read_to_string(path).context("reading metadata file")?;
+        let value = serde_json::from_str(&contents).context("invalid metadata file JSON")?;
+        merge_metadata_object(&mut map, value, "--metadata-file")?;
+    }
+
+    if let Some(json_str) = metadata_json {
+        let value = serde_json::from_str(json_str).context("invalid --metadata-json JSON")?;
+        merge_metadata_object(&mut map, value, "--metadata-json")?;
+    }
+
+    for pair in metadata {
+        let (key, value) = pair
+            .split_once('=')
+            .with_context(|| format!("invalid --metadata '{pair}': expected key=value"))?;
+        if key.is_empty() {
+            anyhow::bail!("invalid --metadata '{pair}': empty key");
+        }
+        map.insert(
+            key.to_string(),
+            serde_json::Value::String(value.to_string()),
+        );
+    }
+
+    if map.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(serde_json::Value::Object(map)))
     }
 }
 
@@ -369,7 +414,11 @@ fn resolve_opts(opts: &CommonOpts) -> Result<ResolvedOpts> {
     let fs = config::to_fs_config(&grant_policy)?;
     let http = config::to_http_config(&grant_policy)?;
     let sockets = config::to_sockets_config(&grant_policy)?;
-    let cli_metadata = parse_cli_metadata(opts.metadata.clone(), opts.metadata_file.clone())?;
+    let cli_metadata = parse_cli_metadata(
+        &opts.metadata,
+        opts.metadata_json.as_deref(),
+        opts.metadata_file.as_deref(),
+    )?;
     let merged_metadata = config::resolve_metadata(profile, cli_metadata.as_ref());
     let metadata = if merged_metadata.is_null() {
         None
@@ -1018,9 +1067,70 @@ mod tests {
     use tempfile::NamedTempFile;
 
     #[test]
-    fn parse_cli_metadata_from_string() {
-        let result = parse_cli_metadata(Some(r#"{"key":"value"}"#.to_string()), None).unwrap();
+    fn parse_cli_metadata_kv_pair() {
+        let result = parse_cli_metadata(&["key=value".to_string()], None, None).unwrap();
         assert_eq!(result, Some(serde_json::json!({"key": "value"})));
+    }
+
+    #[test]
+    fn parse_cli_metadata_kv_values_are_strings() {
+        // Bare `k=v` values are always strings; use --metadata-json for typed values.
+        let result = parse_cli_metadata(&["port=8080".to_string()], None, None).unwrap();
+        assert_eq!(result, Some(serde_json::json!({"port": "8080"})));
+    }
+
+    #[test]
+    fn parse_cli_metadata_kv_repeatable() {
+        let result =
+            parse_cli_metadata(&["a=1".to_string(), "b=2".to_string()], None, None).unwrap();
+        assert_eq!(result, Some(serde_json::json!({"a": "1", "b": "2"})));
+    }
+
+    #[test]
+    fn parse_cli_metadata_kv_value_keeps_extra_equals() {
+        // Split on the first `=` only; the value may contain `=`.
+        let result = parse_cli_metadata(&["q=a=b".to_string()], None, None).unwrap();
+        assert_eq!(result, Some(serde_json::json!({"q": "a=b"})));
+    }
+
+    #[test]
+    fn parse_cli_metadata_kv_empty_value() {
+        let result = parse_cli_metadata(&["key=".to_string()], None, None).unwrap();
+        assert_eq!(result, Some(serde_json::json!({"key": ""})));
+    }
+
+    #[test]
+    fn parse_cli_metadata_kv_missing_equals_is_error() {
+        assert!(parse_cli_metadata(&["nokey".to_string()], None, None).is_err());
+    }
+
+    #[test]
+    fn parse_cli_metadata_kv_empty_key_is_error() {
+        assert!(parse_cli_metadata(&["=value".to_string()], None, None).is_err());
+    }
+
+    #[test]
+    fn parse_cli_metadata_json_object() {
+        let result = parse_cli_metadata(&[], Some(r#"{"key":"value","n":7}"#), None).unwrap();
+        assert_eq!(result, Some(serde_json::json!({"key": "value", "n": 7})));
+    }
+
+    #[test]
+    fn parse_cli_metadata_json_non_object_is_error() {
+        assert!(parse_cli_metadata(&[], Some(r#""just a string""#), None).is_err());
+    }
+
+    #[test]
+    fn parse_cli_metadata_invalid_json() {
+        assert!(parse_cli_metadata(&[], Some("not json"), None).is_err());
+    }
+
+    #[test]
+    fn parse_cli_metadata_kv_overrides_json() {
+        // k=v pairs overlay --metadata-json (highest precedence among CLI sources).
+        let result =
+            parse_cli_metadata(&["b=3".to_string()], Some(r#"{"a":"1","b":"2"}"#), None).unwrap();
+        assert_eq!(result, Some(serde_json::json!({"a": "1", "b": "3"})));
     }
 
     #[test]
@@ -1040,34 +1150,34 @@ mod tests {
     }
 
     #[test]
-    fn parse_cli_metadata_from_file() {
+    fn parse_cli_metadata_from_file_preserves_types() {
         let mut file = NamedTempFile::new().unwrap();
         write!(file, r#"{{"port": 8080}}"#).unwrap();
-        let result = parse_cli_metadata(None, Some(file.path().to_path_buf())).unwrap();
+        let result = parse_cli_metadata(&[], None, Some(file.path())).unwrap();
         assert_eq!(result, Some(serde_json::json!({"port": 8080})));
     }
 
     #[test]
     fn parse_cli_metadata_none() {
-        let result = parse_cli_metadata(None, None).unwrap();
+        let result = parse_cli_metadata(&[], None, None).unwrap();
         assert_eq!(result, None);
     }
 
     #[test]
-    fn parse_cli_metadata_string_takes_precedence() {
+    fn parse_cli_metadata_precedence_file_json_kv() {
+        // file is the base; --metadata-json overlays it; k=v pairs overlay last.
         let mut file = NamedTempFile::new().unwrap();
-        write!(file, r#"{{"from":"file"}}"#).unwrap();
+        write!(file, r#"{{"a":"file","b":"file","c":"file"}}"#).unwrap();
         let result = parse_cli_metadata(
-            Some(r#"{"from":"arg"}"#.to_string()),
-            Some(file.path().to_path_buf()),
+            &["c=kv".to_string()],
+            Some(r#"{"b":"json","c":"json"}"#),
+            Some(file.path()),
         )
         .unwrap();
-        assert_eq!(result, Some(serde_json::json!({"from": "arg"})));
-    }
-
-    #[test]
-    fn parse_cli_metadata_invalid_json() {
-        assert!(parse_cli_metadata(Some("not json".to_string()), None).is_err());
+        assert_eq!(
+            result,
+            Some(serde_json::json!({"a": "file", "b": "json", "c": "kv"}))
+        );
     }
 
     #[test]

@@ -32,7 +32,7 @@ act info --tools ghcr.io/actpkg/sqlite:0.1.0
 # Call a tool
 act call ghcr.io/actpkg/sqlite:0.1.0 query \
   --args '{"sql":"SELECT sqlite_version()"}' \
-  --metadata '{"database_path":"/data/app.db"}' \
+  -m database_path=/data/app.db \
   --allow-dir /data:./data
 
 # Serve over HTTP
