@@ -16,6 +16,3 @@ wasmparser = "0.250.0"
 
 [profile.release]
 lto = "thin"
-
-[patch.crates-io]
-act-types = { path = "../act-sdk-rs/act-types" }
