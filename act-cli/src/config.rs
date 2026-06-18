@@ -158,16 +158,6 @@ impl GrantPolicy {
             deny: vec![],
         }
     }
-
-    /// Merge `higher` over self: entries in `higher` replace those in self;
-    /// `higher.default` replaces self.default only if explicitly set by the caller
-    /// (callers pass the lower default through when not overriding).
-    pub fn merge_over(&mut self, higher: GrantPolicy) {
-        self.default = higher.default;
-        for (k, v) in higher.entries {
-            self.entries.insert(k, v);
-        }
-    }
 }
 
 /// Map the `wasi:filesystem` grant to the enforcement-facing `FsConfig`.
@@ -284,16 +274,26 @@ impl GrantToml {
 }
 
 impl PolicyConfig {
-    fn to_grant_policy(&self) -> anyhow::Result<GrantPolicy> {
-        let default = match &self.default {
-            Some(m) => PolicyMode::parse(m)?,
-            None => PolicyMode::Deny,
-        };
+    /// Returns the explicit default (None if unset) and per-id entries for
+    /// layer-aware merging. Only a `Some` default should override the lower layer.
+    fn layer(&self) -> anyhow::Result<(Option<PolicyMode>, BTreeMap<String, CapabilityGrant>)> {
+        let default = self.default.as_deref().map(PolicyMode::parse).transpose()?;
         let mut entries = BTreeMap::new();
         for (id, g) in &self.entries {
             entries.insert(id.clone(), g.to_grant()?);
         }
-        Ok(GrantPolicy { default, entries })
+        Ok((default, entries))
+    }
+
+    /// Materializes a `GrantPolicy` treating an absent `default` as Deny.
+    /// Used in tests for single-layer assertions.
+    #[cfg(test)]
+    fn to_grant_policy(&self) -> anyhow::Result<GrantPolicy> {
+        let (default, entries) = self.layer()?;
+        Ok(GrantPolicy {
+            default: default.unwrap_or(PolicyMode::Deny),
+            entries,
+        })
     }
 }
 
@@ -356,11 +356,13 @@ pub struct CliGrants {
 }
 
 impl CliGrants {
-    fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.grant_json.is_empty() && self.allow_ids.is_empty() && self.deny_ids.is_empty()
     }
 
-    fn to_grant_policy(&self) -> anyhow::Result<GrantPolicy> {
+    /// Returns `(None, entries)`: CLI grants never set a global default; the
+    /// lower layer's default is always inherited.
+    fn layer(&self) -> anyhow::Result<(Option<PolicyMode>, BTreeMap<String, CapabilityGrant>)> {
         let mut entries = BTreeMap::new();
         for raw in &self.grant_json {
             let map: BTreeMap<String, GrantToml> = serde_json::from_str(raw)
@@ -387,35 +389,46 @@ impl CliGrants {
                 },
             );
         }
-        Ok(GrantPolicy {
-            default: PolicyMode::Deny,
-            entries,
-        })
+        Ok((None, entries))
     }
 }
 
 /// Build the effective grant policy: global [policy] < profile [policy] < CLI grants.
+///
+/// Each layer's `default` is inherited from the layer below when not explicitly
+/// set. Only an explicitly present `default` key overrides the accumulated value.
 pub fn build_grant_policy(
     config: &ConfigFile,
     profile: Option<&ProfileConfig>,
     cli: &CliGrants,
 ) -> anyhow::Result<GrantPolicy> {
-    let mut gp = GrantPolicy::default();
+    let mut gp = GrantPolicy::default(); // default = Deny, empty entries
+
+    // Helper: apply one layer onto gp — only update default when Some.
+    let mut apply = |def: Option<PolicyMode>, entries: BTreeMap<String, CapabilityGrant>| {
+        if let Some(d) = def {
+            gp.default = d;
+        }
+        for (k, v) in entries {
+            gp.entries.insert(k, v);
+        }
+    };
+
     if let Some(p) = &config.policy {
-        gp = p.to_grant_policy()?;
+        let (d, e) = p.layer()?;
+        apply(d, e);
     }
     if let Some(prof) = profile
         && let Some(p) = &prof.policy
     {
-        let prof_gp = p.to_grant_policy()?;
-        gp.merge_over(prof_gp);
+        let (d, e) = p.layer()?;
+        apply(d, e);
     }
     if !cli.is_empty() {
-        let mut cli_gp = cli.to_grant_policy()?;
-        // CLI doesn't set a global default; keep the lower layer's default.
-        cli_gp.default = gp.default;
-        gp.merge_over(cli_gp);
+        let (d, e) = cli.layer()?;
+        apply(d, e); // d is always None for CLI
     }
+
     Ok(gp)
 }
 
@@ -671,6 +684,25 @@ default = "deny"
         assert_eq!(cfg.allow[0].net.ports.as_deref(), Some(&[80u16, 443][..]));
         // No protocols field in the JSON → None (any protocol)
         assert!(cfg.allow[0].protocols.is_none());
+    }
+
+    #[test]
+    fn profile_layering_inherits_global_default_and_overrides_per_id() {
+        let toml_input = r#"
+[policy]
+default = "allowlist"
+"wasi:http" = "open"
+
+[profile.p.policy]
+"wasi:http" = "deny"
+"#;
+        let cfg: ConfigFile = toml::from_str(toml_input).expect("parses");
+        let prof = cfg.profile.get("p");
+        let gp = build_grant_policy(&cfg, prof, &CliGrants::default()).unwrap();
+        // profile overrides wasi:http -> deny
+        assert_eq!(gp.resolve("wasi:http").mode, PolicyMode::Deny);
+        // profile omits `default` -> inherits global default (allowlist), NOT reset to Deny
+        assert_eq!(gp.resolve("something:else").mode, PolicyMode::Allowlist);
     }
 
     #[test]
