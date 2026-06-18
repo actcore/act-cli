@@ -12,6 +12,7 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use wasmtime_wasi_http::WasiHttpCtx;
 use wasmtime_wasi_http::p3::WasiHttpCtxView;
 
+pub mod consent;
 pub mod effective;
 pub mod fs_matcher;
 pub mod fs_policy;
