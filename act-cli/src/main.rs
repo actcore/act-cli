@@ -23,37 +23,16 @@ struct CommonOpts {
     #[arg(long)]
     metadata_file: Option<PathBuf>,
 
-    /// Filesystem policy mode: deny | allowlist | open
-    #[arg(long = "fs-policy")]
-    fs_policy: Option<String>,
-    /// Filesystem allow entry (path or path/**). Repeatable.
-    #[arg(long = "fs-allow")]
-    fs_allow: Vec<String>,
-    /// Filesystem deny entry. Repeatable.
-    #[arg(long = "fs-deny")]
-    fs_deny: Vec<String>,
-
-    /// HTTP policy mode: deny | allowlist | open
-    #[arg(long = "http-policy")]
-    http_policy: Option<String>,
-    /// HTTP allow entry: hostname (`api.example.com`) or CIDR (`10.0.0.0/8`). Repeatable.
-    #[arg(long = "http-allow")]
-    http_allow: Vec<String>,
-    /// HTTP deny entry. Repeatable.
-    #[arg(long = "http-deny")]
-    http_deny: Vec<String>,
-
-    /// Sockets policy mode: deny | allowlist | open
-    #[arg(long = "sockets-policy")]
-    sockets_policy: Option<String>,
-    /// Sockets allow entry: `<host_or_cidr>:<ports>[/<protos>]`.
-    /// Examples: `vnc.example.com:5900/tcp`, `10.0.0.0/8:80,443`.
-    /// Repeatable.
-    #[arg(long = "sockets-allow")]
-    sockets_allow: Vec<String>,
-    /// Sockets deny entry. Same grammar as `--sockets-allow`. Repeatable.
-    #[arg(long = "sockets-deny")]
-    sockets_deny: Vec<String>,
+    /// Grant a capability: full JSON grant `{"<id>": "open"|{"mode":..,"allow":[..],"deny":[..]}}`.
+    /// Repeatable / merged. For CI; interactive runs resolve grants by prompt (ask, later).
+    #[arg(long = "grant")]
+    grant: Vec<String>,
+    /// Open a capability class by id (full declared ceiling), e.g. `--allow wasi:http`. Repeatable.
+    #[arg(long = "allow")]
+    allow: Vec<String>,
+    /// Deny a capability class by id, e.g. `--deny db:drop-database`. Repeatable.
+    #[arg(long = "deny")]
+    deny: Vec<String>,
 
     /// Cap the component's wasm linear memory. Accepts a byte count or a size
     /// with a unit — binary (`512MiB`) or decimal (`512MB`). Growth past the cap
@@ -381,20 +360,15 @@ fn resolve_opts(opts: &CommonOpts) -> Result<ResolvedOpts> {
         Some(name) => Some(config::get_profile(&config_file, name)?),
         None => None,
     };
-    let cli_overrides = config::CliPolicyOverrides {
-        fs_mode: opts.fs_policy.clone(),
-        fs_allow: opts.fs_allow.clone(),
-        fs_deny: opts.fs_deny.clone(),
-        http_mode: opts.http_policy.clone(),
-        http_allow: opts.http_allow.clone(),
-        http_deny: opts.http_deny.clone(),
-        sockets_mode: opts.sockets_policy.clone(),
-        sockets_allow: opts.sockets_allow.clone(),
-        sockets_deny: opts.sockets_deny.clone(),
+    let cli_grants = config::CliGrants {
+        grant_json: opts.grant.clone(),
+        allow_ids: opts.allow.clone(),
+        deny_ids: opts.deny.clone(),
     };
-    let fs = config::resolve_fs_config(&config_file, profile, &cli_overrides)?;
-    let http = config::resolve_http_config(&config_file, profile, &cli_overrides)?;
-    let sockets = config::resolve_sockets_config(&config_file, profile, &cli_overrides)?;
+    let grant_policy = config::build_grant_policy(&config_file, profile, &cli_grants)?;
+    let fs = config::to_fs_config(&grant_policy)?;
+    let http = config::to_http_config(&grant_policy)?;
+    let sockets = config::to_sockets_config(&grant_policy)?;
     let cli_metadata = parse_cli_metadata(opts.metadata.clone(), opts.metadata_file.clone())?;
     let merged_metadata = config::resolve_metadata(profile, cli_metadata.as_ref());
     let metadata = if merged_metadata.is_null() {
