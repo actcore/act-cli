@@ -84,9 +84,24 @@ impl FsMatcher {
         match self.mode {
             PolicyMode::Deny => FsDecision::Deny,
             PolicyMode::Open => FsDecision::Allow,
-            // Ask: defer every path to the interactive prompt (resolved by
-            // the async caller). No static allow/deny lists apply.
-            PolicyMode::Ask => FsDecision::Ask,
+            // Ask is bounded by the declared ceiling: run the same allow/deny
+            // matching as Allowlist, but emit `Ask` (defer to the interactive
+            // prompt) where Allowlist would emit `Allow`. Deny still wins, and
+            // out-of-ceiling targets are denied WITHOUT prompting.
+            PolicyMode::Ask => {
+                if self.deny.is_match(path) {
+                    return FsDecision::Deny;
+                }
+                if self.allow.is_match(path)
+                    || self
+                        .allow_prefixes
+                        .iter()
+                        .any(|prefix| is_ancestor(path, prefix))
+                {
+                    return FsDecision::Ask;
+                }
+                FsDecision::Deny
+            }
             PolicyMode::Allowlist => {
                 if self.deny.is_match(path) {
                     return FsDecision::Deny;
@@ -349,12 +364,44 @@ mod tests {
     }
 
     #[test]
-    fn ask_mode_defers_every_path() {
-        // In Ask mode the sync matcher never decides — it always returns the
-        // `Ask` sentinel for the async consent layer to resolve.
-        let m = FsMatcher::compile(&cfg(PolicyMode::Ask, &[], &[])).unwrap();
-        assert_eq!(m.decide(&PathBuf::from("/etc/passwd")), FsDecision::Ask);
+    fn ask_mode_defers_in_ceiling_paths() {
+        // In Ask mode the matcher prompts (returns `Ask`) for paths inside the
+        // declared ceiling, and hard-denies paths outside it (no prompt).
+        let m = FsMatcher::compile(&cfg(PolicyMode::Ask, &["/tmp/**"], &[])).unwrap();
         assert_eq!(m.decide(&PathBuf::from("/tmp/x")), FsDecision::Ask);
+        assert_eq!(m.decide(&PathBuf::from("/etc/passwd")), FsDecision::Deny);
+    }
+
+    #[test]
+    fn ask_mode_is_bounded_by_allow_ceiling() {
+        // mode=Ask with allow=["/data/**"]: in-ceiling -> Ask (prompt),
+        // out-of-ceiling -> Deny (no prompt). This is the security ceiling:
+        // a path the component never declared must never even reach the
+        // operator as a prompt.
+        let m = FsMatcher::compile(&cfg(PolicyMode::Ask, &["/data/**"], &[])).unwrap();
+        assert_eq!(m.decide(&PathBuf::from("/data/x")), FsDecision::Ask);
+        assert_eq!(m.decide(&PathBuf::from("/etc/passwd")), FsDecision::Deny);
+    }
+
+    #[test]
+    fn ask_mode_deny_rule_beats_ceiling() {
+        // A deny rule wins over the ceiling even in Ask mode (no prompt).
+        let m = FsMatcher::compile(&cfg(PolicyMode::Ask, &["/data/**"], &["/data/secrets/**"]))
+            .unwrap();
+        assert_eq!(m.decide(&PathBuf::from("/data/ok")), FsDecision::Ask);
+        assert_eq!(
+            m.decide(&PathBuf::from("/data/secrets/key")),
+            FsDecision::Deny
+        );
+    }
+
+    #[test]
+    fn ask_mode_empty_ceiling_denies_everything() {
+        // No declared paths → nothing is in the ceiling → every path denied
+        // without prompting.
+        let m = FsMatcher::compile(&cfg(PolicyMode::Ask, &[], &[])).unwrap();
+        assert_eq!(m.decide(&PathBuf::from("/etc/passwd")), FsDecision::Deny);
+        assert_eq!(m.decide(&PathBuf::from("/tmp/x")), FsDecision::Deny);
     }
 
     /// End-to-end ask path: matcher in `Ask` mode defers, and the consent
@@ -383,7 +430,9 @@ mod tests {
             }
         }
 
-        let m = FsMatcher::compile(&cfg(PolicyMode::Ask, &[], &[])).unwrap();
+        // Ceiling covers both probed paths so the matcher defers (returns
+        // `Ask`); the consent layer then resolves the per-path verdict.
+        let m = FsMatcher::compile(&cfg(PolicyMode::Ask, &["/data/**", "/etc/**"], &[])).unwrap();
         let cache = DecisionCache::new();
         let p = Scripted {
             allow_path: "/data/ok".to_string(),

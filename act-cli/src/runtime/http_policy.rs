@@ -82,13 +82,23 @@ impl PolicyHttpHooks {
     /// `allow = [{ cidr = "..." }]` rules take effect against hostnames —
     /// the HTTP layer doesn't know the resolved IPs yet.
     fn decide_uri(&self, method: Option<&str>, uri: &Uri) -> Decision {
-        match self.config.mode {
+        // `Ask` runs the same host/cidr/port/scheme/method matching as
+        // `Allowlist`, but emits `Ask` (defer to the interactive prompt) where
+        // Allowlist would emit `Allow`. This bounds `Ask` by the declared
+        // ceiling: deny still wins, out-of-ceiling requests are denied WITHOUT
+        // prompting.
+        let asking = match self.config.mode {
             PolicyMode::Deny => return Decision::Deny,
             PolicyMode::Open => return Decision::Allow,
-            // Ask defers to the interactive prompt resolved in the async hook.
-            PolicyMode::Ask => return Decision::Ask,
-            PolicyMode::Allowlist => {}
-        }
+            PolicyMode::Ask => true,
+            PolicyMode::Allowlist => false,
+        };
+        // The verdict to return for an in-ceiling match.
+        let on_match = if asking {
+            Decision::Ask
+        } else {
+            Decision::Allow
+        };
 
         let host = uri.host().unwrap_or("");
         let host_is_ip_literal = host.parse::<std::net::IpAddr>().is_ok();
@@ -112,12 +122,12 @@ impl PolicyHttpHooks {
             .iter()
             .any(|r| http_rule_matches(r, scheme, method, &check))
         {
-            return Decision::Allow;
+            return on_match;
         }
         if !host_is_ip_literal && self.config.allow.iter().any(|r| r.net.cidr.is_some()) {
             // Defer to DNS resolver: it will drop resolved IPs that don't
             // match any allow-CIDR (see `PolicyDnsResolver`).
-            return Decision::Allow;
+            return on_match;
         }
         Decision::Deny
     }
@@ -345,6 +355,48 @@ mod tests {
         assert_eq!(
             h.decide_uri(Some("GET"), &uri("https://api.openai.com/v1/chat")),
             Decision::Allow
+        );
+    }
+
+    #[test]
+    fn ask_mode_is_bounded_by_allow_ceiling() {
+        // mode=Ask with an allow ceiling of api.openai.com: in-ceiling -> Ask
+        // (prompt), out-of-ceiling -> Deny (no prompt). Deny rules still win.
+        let h = hooks(HttpConfig {
+            mode: PolicyMode::Ask,
+            allow: vec![rule(
+                Some("api.openai.com"),
+                Some("https"),
+                None,
+                None,
+                None,
+            )],
+            ..Default::default()
+        });
+        assert_eq!(
+            h.decide_uri(Some("POST"), &uri("https://api.openai.com/v1/chat")),
+            Decision::Ask
+        );
+        assert_eq!(
+            h.decide_uri(Some("GET"), &uri("https://evil.com/")),
+            Decision::Deny
+        );
+    }
+
+    #[test]
+    fn ask_mode_deny_rule_beats_ceiling() {
+        let h = hooks(HttpConfig {
+            mode: PolicyMode::Ask,
+            allow: vec![rule(Some("*.example.com"), None, None, None, None)],
+            deny: vec![rule(Some("admin.example.com"), None, None, None, None)],
+        });
+        assert_eq!(
+            h.decide_uri(Some("GET"), &uri("https://api.example.com/")),
+            Decision::Ask
+        );
+        assert_eq!(
+            h.decide_uri(Some("GET"), &uri("https://admin.example.com/")),
+            Decision::Deny
         );
     }
 

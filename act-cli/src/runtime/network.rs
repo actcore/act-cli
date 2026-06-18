@@ -177,21 +177,23 @@ pub fn decide(
     deny: &[NetworkRule],
     check: &NetworkCheck,
 ) -> Decision {
-    match mode {
-        PolicyMode::Deny => Decision::Deny,
-        PolicyMode::Open => Decision::Allow,
-        // Ask is a per-op interactive gate; the sync decider defers it.
+    // `Ask` is bounded by the declared ceiling: it runs the same deny/allow
+    // matching as `Allowlist`, but emits `Ask` (defer to the interactive
+    // prompt) where Allowlist emits `Allow`. Deny still wins, and a target
+    // matching no allow rule is denied WITHOUT prompting.
+    let on_match = match mode {
+        PolicyMode::Deny => return Decision::Deny,
+        PolicyMode::Open => return Decision::Allow,
         PolicyMode::Ask => Decision::Ask,
-        PolicyMode::Allowlist => {
-            if deny.iter().any(|r| rule_matches(r, check)) {
-                return Decision::Deny;
-            }
-            if allow.iter().any(|r| rule_matches(r, check)) {
-                Decision::Allow
-            } else {
-                Decision::Deny
-            }
-        }
+        PolicyMode::Allowlist => Decision::Allow,
+    };
+    if deny.iter().any(|r| rule_matches(r, check)) {
+        return Decision::Deny;
+    }
+    if allow.iter().any(|r| rule_matches(r, check)) {
+        on_match
+    } else {
+        Decision::Deny
     }
 }
 
@@ -363,6 +365,29 @@ mod tests {
         );
         assert_eq!(
             decide(PolicyMode::Allowlist, &allow, &deny, &bad),
+            Decision::Deny
+        );
+    }
+
+    #[test]
+    fn decide_ask_is_bounded_by_allow_ceiling() {
+        // Ask runs allow/deny matching: in-ceiling -> Ask, out-of-ceiling ->
+        // Deny (no prompt), deny rule -> Deny.
+        let allow = vec![rule(Some("*.example.com"), None, None, None)];
+        let deny = vec![rule(Some("admin.example.com"), None, None, None)];
+        let in_ceiling = NetworkCheck::new("api.example.com", 443);
+        let out_of_ceiling = NetworkCheck::new("evil.com", 443);
+        let denied = NetworkCheck::new("admin.example.com", 443);
+        assert_eq!(
+            decide(PolicyMode::Ask, &allow, &deny, &in_ceiling),
+            Decision::Ask
+        );
+        assert_eq!(
+            decide(PolicyMode::Ask, &allow, &deny, &out_of_ceiling),
+            Decision::Deny
+        );
+        assert_eq!(
+            decide(PolicyMode::Ask, &allow, &deny, &denied),
             Decision::Deny
         );
     }

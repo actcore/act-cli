@@ -175,13 +175,21 @@ impl SocketsPolicy {
     fn decide(&self, addr: SocketAddr, reason: SocketAddrUse) -> Decision {
         let proto = proto_of(reason);
 
-        match self.mode {
+        // `Ask` runs the same deny/allow rule matching as `Allowlist`, but
+        // emits `Ask` (defer to the interactive prompt) where Allowlist would
+        // emit `Allow`. This bounds `Ask` by the declared ceiling: deny still
+        // wins, out-of-ceiling addresses are denied WITHOUT prompting.
+        let asking = match self.mode {
             PolicyMode::Deny => return Decision::Deny,
             PolicyMode::Open => return Decision::Allow,
-            // Ask defers to the interactive prompt resolved by the closure.
-            PolicyMode::Ask => return Decision::Ask,
-            PolicyMode::Allowlist => {}
-        }
+            PolicyMode::Ask => true,
+            PolicyMode::Allowlist => false,
+        };
+        let on_match = if asking {
+            Decision::Ask
+        } else {
+            Decision::Allow
+        };
 
         if self.deny.iter().any(|r| matches_rule(r, addr, proto)) {
             tracing::warn!(
@@ -192,8 +200,8 @@ impl SocketsPolicy {
             return Decision::Deny;
         }
         if self.allow.iter().any(|r| matches_rule(r, addr, proto)) {
-            tracing::debug!(addr = %addr, ?reason, "sockets policy allow");
-            return Decision::Allow;
+            tracing::debug!(addr = %addr, ?reason, "sockets policy decision (in ceiling)");
+            return on_match;
         }
         tracing::warn!(
             addr = %addr,
@@ -337,6 +345,64 @@ mod tests {
         assert!(p.allows(p443, SocketAddrUse::TcpConnect));
         // 80 matches the deny (cidr, port not excepted) → blocked.
         assert!(!p.allows(p80, SocketAddrUse::TcpConnect));
+    }
+
+    #[tokio::test]
+    async fn ask_mode_is_bounded_by_allow_ceiling() {
+        // mode=Ask with an allow ceiling of 127.0.0.1:5900/tcp: in-ceiling ->
+        // Ask (prompt), out-of-ceiling -> Deny (no prompt).
+        let p = SocketsPolicy::build(SocketsConfig {
+            mode: PolicyMode::Ask,
+            allow: vec![rule(
+                Some("127.0.0.1"),
+                None,
+                Some(vec![5900]),
+                Some(vec![SocketProtocol::Tcp]),
+            )],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let in_ceiling = SocketAddr::from(([127, 0, 0, 1], 5900));
+        let out_of_ceiling = SocketAddr::from(([8, 8, 8, 8], 5900));
+        let bad_port = SocketAddr::from(([127, 0, 0, 1], 5901));
+        assert_eq!(
+            p.decide(in_ceiling, SocketAddrUse::TcpConnect),
+            Decision::Ask
+        );
+        assert_eq!(
+            p.decide(out_of_ceiling, SocketAddrUse::TcpConnect),
+            Decision::Deny
+        );
+        assert_eq!(
+            p.decide(bad_port, SocketAddrUse::TcpConnect),
+            Decision::Deny
+        );
+    }
+
+    #[tokio::test]
+    async fn ask_mode_deny_rule_beats_ceiling() {
+        let p = SocketsPolicy::build(SocketsConfig {
+            mode: PolicyMode::Ask,
+            allow: vec![rule(
+                None,
+                Some("10.0.0.0/8"),
+                Some(vec![80]),
+                Some(vec![SocketProtocol::Tcp]),
+            )],
+            deny: vec![rule(
+                Some("10.1.2.3"),
+                None,
+                Some(vec![80]),
+                Some(vec![SocketProtocol::Tcp]),
+            )],
+        })
+        .await
+        .unwrap();
+        let allowed = SocketAddr::from(([10, 9, 9, 9], 80));
+        let denied = SocketAddr::from(([10, 1, 2, 3], 80));
+        assert_eq!(p.decide(allowed, SocketAddrUse::TcpConnect), Decision::Ask);
+        assert_eq!(p.decide(denied, SocketAddrUse::TcpConnect), Decision::Deny);
     }
 
     #[tokio::test]

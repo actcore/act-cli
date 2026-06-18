@@ -52,11 +52,14 @@ pub fn effective_fs(user: &FsConfig, caps: &Capabilities) -> EffectivePolicy<FsC
     // ↓↓↓ from here, the existing intersection `match effective.mode { … }` block is UNCHANGED ↓↓↓
     let mut effective = user.clone();
     match effective.mode {
-        // Ask is a per-op gate layered above the ceiling; it has no static
-        // allow rules to intersect, so leave mode/allow untouched (same as
-        // Deny here). Undeclared/empty-declaration classes already hard-deny
-        // above, so `ask` only survives for declared classes.
-        PolicyMode::Deny | PolicyMode::Ask => {}
+        PolicyMode::Deny => {}
+        // Ask is a per-op gate, but it MUST stay bounded by the declared
+        // ceiling: set the effective allow list to the declaration (the upper
+        // bound) while keeping `mode = Ask` so the matcher still prompts for
+        // in-ceiling targets and hard-denies out-of-ceiling ones (no prompt).
+        PolicyMode::Ask => {
+            effective.allow = declared_paths;
+        }
         PolicyMode::Allowlist => {
             effective.allow.retain(|allow_pat| {
                 declared_paths
@@ -107,8 +110,13 @@ pub fn effective_http(user: &HttpConfig, caps: &Capabilities) -> EffectivePolicy
     // ↓↓↓ existing http intersection `match` block UNCHANGED ↓↓↓
     let mut effective = user.clone();
     match effective.mode {
-        // Ask is a per-op gate layered above the ceiling (see `effective_fs`).
-        PolicyMode::Deny | PolicyMode::Ask => {}
+        PolicyMode::Deny => {}
+        // Ask stays bounded by the declared ceiling (see `effective_fs`):
+        // set the effective allow list to the declaration but keep `mode = Ask`
+        // so the matcher prompts in-ceiling and hard-denies out-of-ceiling.
+        PolicyMode::Ask => {
+            effective.allow = declared_rules;
+        }
         PolicyMode::Allowlist => {
             effective.allow.retain(|user_rule| {
                 declared_rules
@@ -176,8 +184,13 @@ pub fn effective_sockets(
     // ↓↓↓ existing sockets intersection `match` block UNCHANGED ↓↓↓
     let mut effective = user.clone();
     match effective.mode {
-        // Ask is a per-op gate layered above the ceiling (see `effective_fs`).
-        PolicyMode::Deny | PolicyMode::Ask => {}
+        PolicyMode::Deny => {}
+        // Ask stays bounded by the declared ceiling (see `effective_fs`):
+        // set the effective allow list to the declaration but keep `mode = Ask`
+        // so the matcher prompts in-ceiling and hard-denies out-of-ceiling.
+        PolicyMode::Ask => {
+            effective.allow = declared_rules;
+        }
         PolicyMode::Allowlist => {
             effective.allow.retain(|user_rule| {
                 declared_rules
@@ -430,6 +443,43 @@ mod tests {
         let eff = effective_fs(&user, &caps);
         assert_eq!(eff.config.mode, PolicyMode::Allowlist);
         assert_eq!(eff.config.allow, vec!["/tmp/**".to_string()]);
+    }
+
+    #[test]
+    fn fs_ask_is_bounded_by_declared_ceiling() {
+        // User mode = Ask, component declares /data/**. Effective policy must
+        // keep mode = Ask (so per-op prompts still fire) but set the allow
+        // list to the declared ceiling so out-of-ceiling paths are denied
+        // without prompting.
+        let caps = caps_fs(vec![("/data/**", FsMode::Rw)]);
+        let user = FsConfig {
+            mode: PolicyMode::Ask,
+            ..Default::default()
+        };
+        let eff = effective_fs(&user, &caps);
+        assert_eq!(eff.config.mode, PolicyMode::Ask);
+        assert_eq!(eff.config.allow, vec!["/data/**".to_string()]);
+    }
+
+    #[test]
+    fn http_ask_is_bounded_by_declared_ceiling() {
+        let caps = caps_http(vec![HttpAllow {
+            host: "api.openai.com".into(),
+            scheme: Some("https".into()),
+            methods: None,
+            ports: None,
+        }]);
+        let user = HttpConfig {
+            mode: PolicyMode::Ask,
+            ..Default::default()
+        };
+        let eff = effective_http(&user, &caps);
+        assert_eq!(eff.config.mode, PolicyMode::Ask);
+        assert_eq!(eff.config.allow.len(), 1);
+        assert_eq!(
+            eff.config.allow[0].net.host.as_deref(),
+            Some("api.openai.com")
+        );
     }
 
     #[test]
@@ -697,6 +747,27 @@ mod tests {
         assert_eq!(
             eff.config.allow[0].protocols.as_deref(),
             Some(&[act_types::SocketProtocol::Tcp][..])
+        );
+    }
+
+    #[test]
+    fn sockets_ask_is_bounded_by_declared_ceiling() {
+        let caps = caps_sockets(vec![act_types::SocketsAllow {
+            host: Some("vnc.example.com".into()),
+            cidr: None,
+            ports: vec![5900],
+            protocols: vec![act_types::SocketProtocol::Tcp],
+        }]);
+        let user = crate::config::SocketsConfig {
+            mode: PolicyMode::Ask,
+            ..Default::default()
+        };
+        let eff = effective_sockets(&user, &caps);
+        assert_eq!(eff.config.mode, PolicyMode::Ask);
+        assert_eq!(eff.config.allow.len(), 1);
+        assert_eq!(
+            eff.config.allow[0].net.host.as_deref(),
+            Some("vnc.example.com")
         );
     }
 
