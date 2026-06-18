@@ -39,6 +39,10 @@ pub struct HostState {
     fs_matcher: crate::runtime::fs_matcher::FsMatcher,
     fs_mode: crate::config::PolicyMode,
     fd_paths: crate::runtime::fs_policy::FdPathMap,
+    /// Interactive-consent prompter + per-session decision cache, shared by
+    /// every `ask`-mode decision point (fs / http / sockets).
+    consent_prompter: std::sync::Arc<dyn crate::runtime::consent::ConsentPrompter>,
+    consent_cache: std::sync::Arc<crate::runtime::consent::DecisionCache>,
     /// Caps the component's wasm linear memory growth (via `store.limiter`).
     /// Default `StoreLimits` is unlimited.
     limits: StoreLimits,
@@ -53,6 +57,8 @@ impl HostState {
             matcher: &self.fs_matcher,
             fd_paths: &mut self.fd_paths,
             mode: self.fs_mode,
+            prompter: self.consent_prompter.clone(),
+            cache: self.consent_cache.clone(),
         }
     }
 }
@@ -152,6 +158,7 @@ pub fn create_linker(engine: &Engine) -> Result<Linker<HostState>> {
 /// intersected with the component's declared capabilities before building the store.
 /// Undeclared capability classes and empty allow arrays hard-deny regardless of the
 /// user's grant.
+#[allow(clippy::too_many_arguments)]
 pub async fn create_store(
     engine: &Engine,
     preopens: &[crate::runtime::fs_policy::Preopen],
@@ -160,6 +167,8 @@ pub async fn create_store(
     sockets: &crate::config::SocketsConfig,
     info: &ComponentInfo,
     max_memory: Option<usize>,
+    prompter: std::sync::Arc<dyn crate::runtime::consent::ConsentPrompter>,
+    cache: std::sync::Arc<crate::runtime::consent::DecisionCache>,
 ) -> Result<Store<HostState>> {
     // Intersect user policy with the component's declared capabilities.
     let effective_fs = crate::runtime::effective::effective_fs(fs, &info.std.capabilities).config;
@@ -192,7 +201,7 @@ pub async fn create_store(
         preopen_pairs.push((mount.guest.clone(), mount.host.clone()));
     }
 
-    socket_policy.install(&mut builder);
+    socket_policy.install(&mut builder, prompter.clone(), cache.clone());
 
     let wasi = builder.build();
     let matcher = crate::runtime::fs_matcher::FsMatcher::compile(&effective_fs)?;
@@ -207,6 +216,8 @@ pub async fn create_store(
         http_hooks: crate::runtime::http_policy::PolicyHttpHooks::new(
             effective_http.clone(),
             http_client.clone(),
+            prompter.clone(),
+            cache.clone(),
         ),
         http_client,
         fs_matcher: matcher,
@@ -215,6 +226,8 @@ pub async fn create_store(
             preopens: preopen_pairs,
             by_rep: Default::default(),
         },
+        consent_prompter: prompter,
+        consent_cache: cache,
         limits: match max_memory {
             Some(bytes) => StoreLimitsBuilder::new().memory_size(bytes).build(),
             None => StoreLimits::default(),
@@ -363,12 +376,17 @@ pub async fn instantiate_component(
     sockets: &crate::config::SocketsConfig,
     info: &ComponentInfo,
     max_memory: Option<usize>,
+    prompter: std::sync::Arc<dyn crate::runtime::consent::ConsentPrompter>,
+    cache: std::sync::Arc<crate::runtime::consent::DecisionCache>,
 ) -> Result<(
     ActWorld,
     Option<sessions::SessionProvider>,
     Store<HostState>,
 )> {
-    let mut store = create_store(engine, preopens, http, fs, sockets, info, max_memory).await?;
+    let mut store = create_store(
+        engine, preopens, http, fs, sockets, info, max_memory, prompter, cache,
+    )
+    .await?;
 
     // Manual instantiation flow (replicates ActWorld::instantiate_async)
     // so we keep access to the raw `Instance` for session-provider lookup.

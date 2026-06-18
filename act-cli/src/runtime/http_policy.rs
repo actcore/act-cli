@@ -27,6 +27,7 @@ use http::Uri;
 use wasmtime_wasi::TrappableError;
 
 use crate::config::{HttpConfig, PolicyMode};
+use crate::runtime::consent::{ConsentAsk, ConsentPrompter, ConsentRisk, DecisionCache};
 use crate::runtime::network::{self, Decision, NetworkCheck};
 
 type P2ErrorCode = wasmtime_wasi_http::p2::bindings::http::types::ErrorCode;
@@ -36,16 +37,38 @@ type P3ErrorCode = wasmtime_wasi_http::p3::bindings::http::types::ErrorCode;
 pub struct PolicyHttpHooks {
     config: Arc<HttpConfig>,
     client: Arc<crate::runtime::http_client::ActHttpClient>,
+    prompter: Arc<dyn ConsentPrompter>,
+    cache: Arc<DecisionCache>,
 }
 
 impl PolicyHttpHooks {
     pub fn new(
         config: HttpConfig,
         client: Arc<crate::runtime::http_client::ActHttpClient>,
+        prompter: Arc<dyn ConsentPrompter>,
+        cache: Arc<DecisionCache>,
     ) -> Self {
         Self {
             config: Arc::new(config),
             client,
+            prompter,
+            cache,
+        }
+    }
+
+    /// Build the `ConsentAsk` for an outgoing request: cache key is
+    /// `host:port`, summary names the method + URI.
+    fn http_ask(method: Option<&str>, uri: &Uri) -> ConsentAsk {
+        let host = uri.host().unwrap_or("");
+        let scheme = uri.scheme_str();
+        let port = uri
+            .port_u16()
+            .unwrap_or(if scheme == Some("https") { 443 } else { 80 });
+        ConsentAsk {
+            cap_id: act_types::constants::CAP_HTTP.to_string(),
+            key: format!("{host}:{port}"),
+            summary: format!("HTTP {} {}", method.unwrap_or("?"), uri),
+            risk: ConsentRisk::Normal,
         }
     }
 
@@ -62,6 +85,8 @@ impl PolicyHttpHooks {
         match self.config.mode {
             PolicyMode::Deny => return Decision::Deny,
             PolicyMode::Open => return Decision::Allow,
+            // Ask defers to the interactive prompt resolved in the async hook.
+            PolicyMode::Ask => return Decision::Ask,
             PolicyMode::Allowlist => {}
         }
 
@@ -154,6 +179,25 @@ impl wasmtime_wasi_http::p2::WasiHttpHooks for PolicyHttpHooks {
                 });
                 Ok(wasmtime_wasi_http::p2::types::HostFutureIncomingResponse::pending(handle))
             }
+            Decision::Ask => {
+                // Resolve interactive consent in the spawned future so the
+                // sync hook can return a pending response immediately.
+                let client = self.client.clone();
+                let cache = self.cache.clone();
+                let prompter = self.prompter.clone();
+                let ask = Self::http_ask(method, &uri);
+                let log_uri = uri.clone();
+                let handle = wasmtime_wasi::runtime::spawn(async move {
+                    if cache.decide_cached(&*prompter, ask).await {
+                        tracing::debug!(%log_uri, "http policy ask allowed (p2)");
+                        Ok(client.send_p2(request, config).await)
+                    } else {
+                        tracing::warn!(%log_uri, "http policy ask denied (p2)");
+                        Ok(Err(P2ErrorCode::HttpRequestDenied))
+                    }
+                });
+                Ok(wasmtime_wasi_http::p2::types::HostFutureIncomingResponse::pending(handle))
+            }
         }
     }
 }
@@ -201,6 +245,32 @@ impl wasmtime_wasi_http::p3::WasiHttpHooks for PolicyHttpHooks {
                     }
                 })
             }
+            Decision::Ask => {
+                let _ = fut;
+                let _ = options;
+                let client = self.client.clone();
+                let cache = self.cache.clone();
+                let prompter = self.prompter.clone();
+                let ask = Self::http_ask(method.as_deref(), &uri);
+                let log_uri = uri.clone();
+                Box::new(async move {
+                    if !cache.decide_cached(&*prompter, ask).await {
+                        tracing::warn!(%log_uri, "http policy ask denied (p3)");
+                        return Err(TrappableError::<P3ErrorCode>::from(
+                            P3ErrorCode::HttpRequestDenied,
+                        ));
+                    }
+                    tracing::debug!(%log_uri, "http policy ask allowed (p3)");
+                    match client.send_p3(request).await {
+                        Ok((resp, io)) => {
+                            let io: Box<dyn Future<Output = Result<(), P3ErrorCode>> + Send> =
+                                Box::new(io);
+                            Ok((resp, io))
+                        }
+                        Err(code) => Err(TrappableError::<P3ErrorCode>::from(code)),
+                    }
+                })
+            }
             Decision::Deny => {
                 tracing::warn!(?method, %uri, "{}", deny_reason(method.as_deref(), &uri));
                 Box::new(async move {
@@ -227,7 +297,12 @@ mod tests {
         let client = std::sync::Arc::new(
             crate::runtime::http_client::ActHttpClient::new(cfg.clone()).expect("client builds"),
         );
-        PolicyHttpHooks::new(cfg, client)
+        PolicyHttpHooks::new(
+            cfg,
+            client,
+            std::sync::Arc::new(crate::runtime::consent::DenyPrompter),
+            std::sync::Arc::new(crate::runtime::consent::DecisionCache::new()),
+        )
     }
 
     fn rule(

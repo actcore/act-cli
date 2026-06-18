@@ -1,9 +1,6 @@
 //! Interactive consent: prompt-on-access for `ask`-mode capabilities,
 //! with a per-session decision cache and fail-safe (no channel = deny).
 
-// Types are consumed by later tasks (capability provider integration).
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -11,8 +8,15 @@ use std::sync::Mutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConsentRisk {
+    // `Low` / `Destructive` are the risk taxonomy consumed by the prompter's
+    // rendering (`TtyPrompter` already flags `Destructive` in the prompt
+    // string). The three current decision points all classify as `Normal`;
+    // destructive-op classification (unlink / rmdir / rename → `Destructive`)
+    // is a later phase, so these two are constructed by no caller yet.
+    #[allow(dead_code)]
     Low,
     Normal,
+    #[allow(dead_code)]
     Destructive,
 }
 
@@ -150,5 +154,53 @@ mod tests {
     async fn deny_prompter_denies() {
         let cache = DecisionCache::new();
         assert!(!cache.decide_cached(&DenyPrompter, ask("/x")).await);
+    }
+
+    /// Prompter scripted per cache-key: returns the configured verdict for the
+    /// key and records every prompt (post-cache misses only).
+    struct ScriptedPrompter {
+        decisions: HashMap<String, bool>,
+        prompts: Mutex<Vec<String>>,
+    }
+
+    impl ConsentPrompter for ScriptedPrompter {
+        fn decide<'a>(
+            &'a self,
+            ask: &'a ConsentAsk,
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            self.prompts.lock().unwrap().push(ask.key.clone());
+            let verdict = self.decisions.get(&ask.key).copied().unwrap_or(false);
+            Box::pin(async move { verdict })
+        }
+    }
+
+    #[tokio::test]
+    async fn ask_allow_remembered_deny_blocked_and_degrade() {
+        // Scripted: "/allow" → allow, "/deny" → deny.
+        let p = ScriptedPrompter {
+            decisions: HashMap::from([("/allow".to_string(), true), ("/deny".to_string(), false)]),
+            prompts: Mutex::new(Vec::new()),
+        };
+        let cache = DecisionCache::new();
+
+        // First access to an allowed key prompts and is allowed.
+        assert!(cache.decide_cached(&p, ask("/allow")).await);
+        // Repeat is served from cache — no second prompt.
+        assert!(cache.decide_cached(&p, ask("/allow")).await);
+        // A denied key is blocked.
+        assert!(!cache.decide_cached(&p, ask("/deny")).await);
+        // Repeat denied key is also cached (no re-prompt).
+        assert!(!cache.decide_cached(&p, ask("/deny")).await);
+
+        // Exactly one prompt per distinct key: ["/allow", "/deny"].
+        let prompts = p.prompts.lock().unwrap();
+        assert_eq!(
+            prompts.as_slice(),
+            &["/allow".to_string(), "/deny".to_string()]
+        );
+
+        // DenyPrompter degrades any ask → deny (fail-safe, no channel).
+        let deny_cache = DecisionCache::new();
+        assert!(!deny_cache.decide_cached(&DenyPrompter, ask("/allow")).await);
     }
 }

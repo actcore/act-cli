@@ -161,6 +161,11 @@ fn build_redirect_policy(cfg: Arc<HttpConfig>) -> redirect::Policy {
         );
         match decision {
             crate::runtime::network::Decision::Allow => attempt.follow(),
+            // `Ask` mode gates each request interactively at `send_request`;
+            // the redirect callback is sync and can't prompt, so redirects
+            // within an already-consented request are followed (the top-level
+            // send was approved). Per-hop ask-prompting is a later phase.
+            crate::runtime::network::Decision::Ask => attempt.follow(),
             crate::runtime::network::Decision::Deny => {
                 tracing::warn!(%url, "http policy: redirect hop blocked");
                 attempt.error("redirect target blocked by ACT policy")

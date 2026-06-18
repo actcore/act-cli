@@ -447,9 +447,15 @@ struct PreparedComponent {
 }
 
 /// Resolve, load, and instantiate a component. Returns a running actor handle.
+///
+/// `is_mcp` forces the headless `DenyPrompter` for `ask`-mode capabilities:
+/// MCP runs over stdio, so there is no free terminal channel to prompt on and
+/// `ask` must degrade to deny (fail-safe). For every other transport the
+/// prompter is interactive only when stdin is a TTY.
 async fn prepare_component(
     component: &ComponentRef,
     opts: &CommonOpts,
+    is_mcp: bool,
 ) -> Result<PreparedComponent> {
     let resolved = resolve_opts(opts)?;
 
@@ -479,11 +485,23 @@ async fn prepare_component(
         "Loading component"
     );
 
+    // Select the interactive-consent prompter for `ask`-mode capabilities.
+    // Interactive (y/N on the terminal) only when stdin is a TTY and we're not
+    // serving MCP over stdio; otherwise headless deny (fail-safe).
+    let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin()) && !is_mcp;
+    let prompter: Arc<dyn runtime::consent::ConsentPrompter> = if interactive {
+        Arc::new(runtime::consent::TtyPrompter)
+    } else {
+        Arc::new(runtime::consent::DenyPrompter)
+    };
+    let cache = Arc::new(runtime::consent::DecisionCache::new());
+
     let engine = runtime::create_engine()?;
     let wasm = runtime::load_component(&engine, &component_path)?;
     let linker = runtime::create_linker(&engine)?;
     let (instance, session_provider, store) = runtime::instantiate_component(
-        &engine, &wasm, &linker, &preopens, &http, &fs, &sockets, &info, max_memory,
+        &engine, &wasm, &linker, &preopens, &http, &fs, &sockets, &info, max_memory, prompter,
+        cache,
     )
     .await?;
     let has_sessions = session_provider.is_some();
@@ -554,7 +572,7 @@ async fn cmd_run(
             Some(s) => parse_listen_addr(s)?,
             None => "[::1]:3000".parse().unwrap(),
         };
-        let pc = prepare_component(&component, &opts).await?;
+        let pc = prepare_component(&component, &opts, true).await?;
         let default_session_id = maybe_open_default_session(&pc, &session_args).await?;
         return rmcp_bridge::run_http(
             addr,
@@ -571,7 +589,7 @@ async fn cmd_run(
         if listen.is_some() {
             anyhow::bail!("--listen requires --http (MCP stdio has no listen address)");
         }
-        let pc = prepare_component(&component, &opts).await?;
+        let pc = prepare_component(&component, &opts, true).await?;
         let default_session_id = maybe_open_default_session(&pc, &session_args).await?;
         return rmcp_bridge::run_stdio(
             pc.info,
@@ -589,7 +607,7 @@ async fn cmd_run(
             None => "[::1]:3000".parse().unwrap(),
         };
 
-        let pc = prepare_component(&component, &opts).await?;
+        let pc = prepare_component(&component, &opts, false).await?;
         let default_session_id = maybe_open_default_session(&pc, &session_args).await?;
 
         let state = Arc::new(http::AppState {
@@ -620,7 +638,7 @@ async fn cmd_call(
     session_args: Option<String>,
     opts: CommonOpts,
 ) -> Result<()> {
-    let pc = prepare_component(&component, &opts).await?;
+    let pc = prepare_component(&component, &opts, false).await?;
 
     let arguments: serde_json::Value =
         serde_json::from_str(&args).context("invalid --args JSON")?;
@@ -780,7 +798,7 @@ async fn close_session_best_effort(pc: &PreparedComponent, session_id: String) {
 // ── Session subcommands ────────────────────────────────────────────────────
 
 async fn cmd_session_open_args_schema(component: ComponentRef, opts: CommonOpts) -> Result<()> {
-    let pc = prepare_component(&component, &opts).await?;
+    let pc = prepare_component(&component, &opts, false).await?;
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     pc.handle
         .send(runtime::ComponentRequest::GetOpenSessionArgsSchema {
@@ -843,7 +861,7 @@ async fn cmd_info(
     let component_info = runtime::read_component_info(&wasm_bytes)?;
 
     let tools = if show_tools {
-        let pc = prepare_component(&component, &opts).await?;
+        let pc = prepare_component(&component, &opts, false).await?;
 
         let (tools_tx, tools_rx) = tokio::sync::oneshot::channel();
         pc.handle

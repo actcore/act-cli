@@ -20,6 +20,11 @@ pub enum PolicyMode {
     Deny,
     Allowlist,
     Open,
+    /// Prompt the operator on first access to each key, remember the decision
+    /// for the session, and degrade to deny when no prompt channel exists
+    /// (headless / --mcp / non-TTY). A per-op gate layered on top of the
+    /// ceiling intersection.
+    Ask,
 }
 
 impl PolicyMode {
@@ -28,8 +33,9 @@ impl PolicyMode {
             "deny" => Ok(Self::Deny),
             "allowlist" => Ok(Self::Allowlist),
             "open" => Ok(Self::Open),
+            "ask" => Ok(Self::Ask),
             other => anyhow::bail!(
-                "unknown policy mode '{}' (expected deny / allowlist / open)",
+                "unknown policy mode '{}' (expected deny / allowlist / open / ask)",
                 other
             ),
         }
@@ -127,7 +133,11 @@ pub struct GrantPolicy {
 impl Default for GrantPolicy {
     fn default() -> Self {
         Self {
-            default: PolicyMode::Deny,
+            // Ask-by-default: an undeclared `[policy] default` resolves to
+            // `ask`, so interactive runs prompt-on-access and headless runs
+            // degrade to deny. The `PolicyMode` enum `Default` stays `Deny`
+            // (used for empty single-layer configs elsewhere).
+            default: PolicyMode::Ask,
             entries: BTreeMap::new(),
         }
     }
@@ -402,7 +412,7 @@ pub fn build_grant_policy(
     profile: Option<&ProfileConfig>,
     cli: &CliGrants,
 ) -> anyhow::Result<GrantPolicy> {
-    let mut gp = GrantPolicy::default(); // default = Deny, empty entries
+    let mut gp = GrantPolicy::default(); // default = Ask, empty entries
 
     // Helper: apply one layer onto gp — only update default when Some.
     let mut apply = |def: Option<PolicyMode>, entries: BTreeMap<String, CapabilityGrant>| {
@@ -469,7 +479,42 @@ mod tests {
             PolicyMode::Allowlist
         );
         assert_eq!(PolicyMode::parse("open").unwrap(), PolicyMode::Open);
+        assert_eq!(PolicyMode::parse("ask").unwrap(), PolicyMode::Ask);
         assert!(PolicyMode::parse("bogus").is_err());
+    }
+
+    #[test]
+    fn parse_error_lists_ask() {
+        let err = PolicyMode::parse("bogus").unwrap_err().to_string();
+        assert!(err.contains("ask"), "error should list 'ask': {err}");
+    }
+
+    #[test]
+    fn grant_policy_default_resolves_to_ask() {
+        // With no `[policy]` / profile / CLI grant, the global default is
+        // ask-by-default: an undeclared capability id resolves to `Ask`
+        // (interactive runs prompt; headless degrades to deny).
+        let gp = build_grant_policy(&ConfigFile::default(), None, &CliGrants::default()).unwrap();
+        assert_eq!(gp.default, PolicyMode::Ask);
+        assert_eq!(gp.resolve("wasi:filesystem").mode, PolicyMode::Ask);
+        assert_eq!(gp.resolve("some:undeclared").mode, PolicyMode::Ask);
+        // The to_*_config mappers carry the ask mode through.
+        assert_eq!(to_fs_config(&gp).unwrap().mode, PolicyMode::Ask);
+        assert_eq!(to_http_config(&gp).unwrap().mode, PolicyMode::Ask);
+        assert_eq!(to_sockets_config(&gp).unwrap().mode, PolicyMode::Ask);
+    }
+
+    #[test]
+    fn explicit_default_overrides_ask() {
+        // An explicit `[policy] default = "deny"` still wins over ask-default.
+        let toml_input = r#"
+[policy]
+default = "deny"
+"#;
+        let cfg: ConfigFile = toml::from_str(toml_input).unwrap();
+        let gp = build_grant_policy(&cfg, None, &CliGrants::default()).unwrap();
+        assert_eq!(gp.default, PolicyMode::Deny);
+        assert_eq!(gp.resolve("some:undeclared").mode, PolicyMode::Deny);
     }
 
     #[test]

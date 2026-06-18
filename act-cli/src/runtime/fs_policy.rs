@@ -28,6 +28,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use path_clean::PathClean;
 use wasmtime::component::{HasData, Resource, ResourceTable};
@@ -39,6 +40,7 @@ use wasmtime_wasi::p2::bindings::filesystem::types::{
 use wasmtime_wasi::p2::{DynInputStream, DynOutputStream, FsError, FsResult};
 
 use crate::config::{FsConfig, PolicyMode};
+use crate::runtime::consent::{ConsentAsk, ConsentPrompter, ConsentRisk, DecisionCache};
 use crate::runtime::fs_matcher::{FsDecision, FsMatcher};
 
 // ── Preopen derivation ────────────────────────────────────────────────────
@@ -64,7 +66,9 @@ pub struct Preopen {
 pub fn derive_preopens(cfg: &FsConfig) -> Vec<Preopen> {
     match cfg.mode {
         PolicyMode::Deny => Vec::new(),
-        PolicyMode::Open | PolicyMode::Allowlist => platform_root_preopens(),
+        // Ask needs the root preopen so the guest can name paths the per-op
+        // matcher then prompts on (the prompt happens in `check_path`).
+        PolicyMode::Open | PolicyMode::Allowlist | PolicyMode::Ask => platform_root_preopens(),
     }
 }
 
@@ -138,6 +142,11 @@ pub struct PolicyFilesystemCtxView<'a> {
     /// mode is anything but `Open` we return zero preopens from p3 and p3
     /// guests can't acquire a `Descriptor::Dir` handle at all.
     pub mode: PolicyMode,
+    /// Interactive-consent prompter, consulted when the matcher returns
+    /// `FsDecision::Ask`. Shared across the store.
+    pub prompter: Arc<dyn ConsentPrompter>,
+    /// Per-session memory of ask decisions, keyed by `(cap-id, path)`.
+    pub cache: Arc<DecisionCache>,
 }
 
 /// Tracks the host path associated with each open filesystem descriptor,
@@ -147,6 +156,46 @@ pub struct PolicyFilesystemCtxView<'a> {
 pub struct FdPathMap {
     pub preopens: Vec<(String, PathBuf)>,
     pub by_rep: HashMap<u32, PathBuf>,
+}
+
+/// Sync matcher outcome for one path op. `Deny` is folded into the `Err` arm
+/// of `check_path_sync`; `Ask` carries owned `Arc` clones so the async prompt
+/// resolution never borrows the (`!Sync`) view.
+enum PathDecision {
+    Allow(PathBuf),
+    Ask {
+        canonical: PathBuf,
+        cache: Arc<DecisionCache>,
+        prompter: Arc<dyn ConsentPrompter>,
+    },
+}
+
+/// Resolve an `Ask`-mode filesystem decision via the interactive prompter
+/// (cached per canonical path). Free function over owned data so the returned
+/// future is `Send` (it captures only `Arc`s + a `PathBuf`, never the view).
+async fn resolve_ask(
+    cache: Arc<DecisionCache>,
+    prompter: Arc<dyn ConsentPrompter>,
+    canonical: PathBuf,
+) -> FsResult<PathBuf> {
+    let path = canonical.display().to_string();
+    let allowed = cache
+        .decide_cached(
+            &*prompter,
+            ConsentAsk {
+                cap_id: act_types::constants::CAP_FILESYSTEM.to_string(),
+                key: path.clone(),
+                summary: format!("filesystem access: {path}"),
+                risk: ConsentRisk::Normal,
+            },
+        )
+        .await;
+    if allowed {
+        Ok(canonical)
+    } else {
+        tracing::warn!(path = %path, "fs policy: ask denied");
+        Err(ErrorCode::NotPermitted.into())
+    }
 }
 
 impl<'a> PolicyFilesystemCtxView<'a> {
@@ -162,10 +211,43 @@ impl<'a> PolicyFilesystemCtxView<'a> {
     }
 
     /// Resolve `(parent_fd, rel_path)` to an absolute canonical host path and
-    /// run it through the matcher. Returns `Ok(())` on allow,
-    /// `Err(NotPermitted)` on deny. Records the resolved path for the
-    /// caller to associate with a newly-opened fd if desired.
-    fn check_path(&self, parent_fd: &Resource<types::Descriptor>, rel: &str) -> FsResult<PathBuf> {
+    /// run it through the matcher. Returns `Ok(canonical)` on allow,
+    /// `Err(NotPermitted)` on deny. In `Ask` mode the matcher defers and we
+    /// resolve the verdict through the interactive consent prompter (cached
+    /// per path). Records the resolved path for the caller to associate with a
+    /// newly-opened fd if desired.
+    ///
+    /// This is the async entry point used by every path-taking method. It must
+    /// NOT hold a borrow of `self` across the `.await` (the host descriptor
+    /// futures must be `Send`, and `&PolicyFilesystemCtxView` is not `Sync`),
+    /// so it is a *sync* fn that performs the matcher decision (borrowing
+    /// `self`) and then returns a `Send` future that captures only owned data
+    /// (`Arc` clones + the path) — never `self`.
+    fn check_path(
+        &self,
+        parent_fd: &Resource<types::Descriptor>,
+        rel: &str,
+    ) -> impl Future<Output = FsResult<PathBuf>> + Send + 'static {
+        let decision = self.check_path_sync(parent_fd, rel);
+        async move {
+            match decision? {
+                PathDecision::Allow(canonical) => Ok(canonical),
+                PathDecision::Ask {
+                    canonical,
+                    cache,
+                    prompter,
+                } => resolve_ask(cache, prompter, canonical).await,
+            }
+        }
+    }
+
+    /// Synchronous part of `check_path`: resolve + matcher decision. Borrows
+    /// `self` but never awaits, so the borrow ends before `check_path`'s await.
+    fn check_path_sync(
+        &self,
+        parent_fd: &Resource<types::Descriptor>,
+        rel: &str,
+    ) -> FsResult<PathDecision> {
         let Some(parent) = self.parent_path(parent_fd) else {
             // Parent fd has no tracked path — belongs to an unknown preopen
             // or was never witnessed. Deny conservatively.
@@ -174,11 +256,16 @@ impl<'a> PolicyFilesystemCtxView<'a> {
         };
         let canonical = parent.join(rel).clean();
         match self.matcher.decide(&canonical) {
-            FsDecision::Allow => Ok(canonical),
+            FsDecision::Allow => Ok(PathDecision::Allow(canonical)),
             FsDecision::Deny => {
                 tracing::warn!(path = %canonical.display(), "fs policy: blocked");
                 Err(ErrorCode::NotPermitted.into())
             }
+            FsDecision::Ask => Ok(PathDecision::Ask {
+                canonical,
+                cache: self.cache.clone(),
+                prompter: self.prompter.clone(),
+            }),
         }
     }
 
@@ -314,7 +401,7 @@ impl HostDescriptor for PolicyFilesystemCtxView<'_> {
         fd: Resource<types::Descriptor>,
         path: String,
     ) -> FsResult<()> {
-        let _checked = self.check_path(&fd, &path)?;
+        let _checked = self.check_path(&fd, &path).await?;
         self.inner().create_directory_at(fd, path).await
     }
 
@@ -328,7 +415,7 @@ impl HostDescriptor for PolicyFilesystemCtxView<'_> {
         path_flags: types::PathFlags,
         path: String,
     ) -> FsResult<types::DescriptorStat> {
-        let _checked = self.check_path(&fd, &path)?;
+        let _checked = self.check_path(&fd, &path).await?;
         self.inner().stat_at(fd, path_flags, path).await
     }
 
@@ -340,7 +427,7 @@ impl HostDescriptor for PolicyFilesystemCtxView<'_> {
         atim: types::NewTimestamp,
         mtim: types::NewTimestamp,
     ) -> FsResult<()> {
-        let _checked = self.check_path(&fd, &path)?;
+        let _checked = self.check_path(&fd, &path).await?;
         self.inner()
             .set_times_at(fd, path_flags, path, atim, mtim)
             .await
@@ -354,8 +441,8 @@ impl HostDescriptor for PolicyFilesystemCtxView<'_> {
         new_descriptor: Resource<types::Descriptor>,
         new_path: String,
     ) -> FsResult<()> {
-        let _old = self.check_path(&fd, &old_path)?;
-        let _new = self.check_path(&new_descriptor, &new_path)?;
+        let _old = self.check_path(&fd, &old_path).await?;
+        let _new = self.check_path(&new_descriptor, &new_path).await?;
         self.inner()
             .link_at(fd, old_path_flags, old_path, new_descriptor, new_path)
             .await
@@ -369,7 +456,7 @@ impl HostDescriptor for PolicyFilesystemCtxView<'_> {
         oflags: types::OpenFlags,
         flags: types::DescriptorFlags,
     ) -> FsResult<Resource<types::Descriptor>> {
-        let canonical = self.check_path(&fd, &path)?;
+        let canonical = self.check_path(&fd, &path).await?;
         let new_fd = self
             .inner()
             .open_at(fd, path_flags, path, oflags, flags)
@@ -388,7 +475,7 @@ impl HostDescriptor for PolicyFilesystemCtxView<'_> {
         fd: Resource<types::Descriptor>,
         path: String,
     ) -> FsResult<String> {
-        let _checked = self.check_path(&fd, &path)?;
+        let _checked = self.check_path(&fd, &path).await?;
         self.inner().readlink_at(fd, path).await
     }
 
@@ -397,7 +484,7 @@ impl HostDescriptor for PolicyFilesystemCtxView<'_> {
         fd: Resource<types::Descriptor>,
         path: String,
     ) -> FsResult<()> {
-        let _checked = self.check_path(&fd, &path)?;
+        let _checked = self.check_path(&fd, &path).await?;
         self.inner().remove_directory_at(fd, path).await
     }
 
@@ -408,8 +495,8 @@ impl HostDescriptor for PolicyFilesystemCtxView<'_> {
         new_fd: Resource<types::Descriptor>,
         new_path: String,
     ) -> FsResult<()> {
-        let _old = self.check_path(&fd, &old_path)?;
-        let _new = self.check_path(&new_fd, &new_path)?;
+        let _old = self.check_path(&fd, &old_path).await?;
+        let _new = self.check_path(&new_fd, &new_path).await?;
         self.inner().rename_at(fd, old_path, new_fd, new_path).await
     }
 
@@ -419,7 +506,7 @@ impl HostDescriptor for PolicyFilesystemCtxView<'_> {
         src_path: String,
         dest_path: String,
     ) -> FsResult<()> {
-        let _checked = self.check_path(&fd, &dest_path)?;
+        let _checked = self.check_path(&fd, &dest_path).await?;
         self.inner().symlink_at(fd, src_path, dest_path).await
     }
 
@@ -428,7 +515,7 @@ impl HostDescriptor for PolicyFilesystemCtxView<'_> {
         fd: Resource<types::Descriptor>,
         path: String,
     ) -> FsResult<()> {
-        let _checked = self.check_path(&fd, &path)?;
+        let _checked = self.check_path(&fd, &path).await?;
         self.inner().unlink_file_at(fd, path).await
     }
 
@@ -476,7 +563,7 @@ impl HostDescriptor for PolicyFilesystemCtxView<'_> {
         path_flags: types::PathFlags,
         path: String,
     ) -> FsResult<types::MetadataHashValue> {
-        let _checked = self.check_path(&fd, &path)?;
+        let _checked = self.check_path(&fd, &path).await?;
         self.inner().metadata_hash_at(fd, path_flags, path).await
     }
 }

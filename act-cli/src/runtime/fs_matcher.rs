@@ -39,10 +39,13 @@ use crate::config::{FsConfig, PolicyMode};
 
 /// Result of a policy decision for one filesystem operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // wired in phase C1 part 2 (HostDescriptor wrapper)
 pub enum FsDecision {
     Allow,
     Deny,
+    /// `Ask` mode: defer to interactive consent. The sync matcher never
+    /// prompts; the async caller (`fs_policy::check_path`) resolves this
+    /// through the `DecisionCache` / `ConsentPrompter`.
+    Ask,
 }
 
 /// Compiled glob sets ready to decide access for a given host path.
@@ -81,6 +84,9 @@ impl FsMatcher {
         match self.mode {
             PolicyMode::Deny => FsDecision::Deny,
             PolicyMode::Open => FsDecision::Allow,
+            // Ask: defer every path to the interactive prompt (resolved by
+            // the async caller). No static allow/deny lists apply.
+            PolicyMode::Ask => FsDecision::Ask,
             PolicyMode::Allowlist => {
                 if self.deny.is_match(path) {
                     return FsDecision::Deny;
@@ -339,6 +345,74 @@ mod tests {
         assert_eq!(
             m.decide(&PathBuf::from("/tmp/notes/secret.txt")),
             FsDecision::Deny
+        );
+    }
+
+    #[test]
+    fn ask_mode_defers_every_path() {
+        // In Ask mode the sync matcher never decides — it always returns the
+        // `Ask` sentinel for the async consent layer to resolve.
+        let m = FsMatcher::compile(&cfg(PolicyMode::Ask, &[], &[])).unwrap();
+        assert_eq!(m.decide(&PathBuf::from("/etc/passwd")), FsDecision::Ask);
+        assert_eq!(m.decide(&PathBuf::from("/tmp/x")), FsDecision::Ask);
+    }
+
+    /// End-to-end ask path: matcher in `Ask` mode defers, and the consent
+    /// cache + scripted prompter resolve the verdict (per-path, remembered).
+    #[tokio::test]
+    async fn ask_decision_resolved_through_consent_cache() {
+        use crate::runtime::consent::{
+            ConsentAsk, ConsentPrompter, ConsentRisk, DecisionCache, DenyPrompter,
+        };
+        use std::future::Future;
+        use std::pin::Pin;
+        use std::sync::Mutex;
+
+        struct Scripted {
+            allow_path: String,
+            calls: Mutex<usize>,
+        }
+        impl ConsentPrompter for Scripted {
+            fn decide<'a>(
+                &'a self,
+                ask: &'a ConsentAsk,
+            ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+                *self.calls.lock().unwrap() += 1;
+                let allow = ask.key == self.allow_path;
+                Box::pin(async move { allow })
+            }
+        }
+
+        let m = FsMatcher::compile(&cfg(PolicyMode::Ask, &[], &[])).unwrap();
+        let cache = DecisionCache::new();
+        let p = Scripted {
+            allow_path: "/data/ok".to_string(),
+            calls: Mutex::new(0),
+        };
+
+        let mk_ask = |path: &str| ConsentAsk {
+            cap_id: "wasi:filesystem".to_string(),
+            key: path.to_string(),
+            summary: format!("filesystem access: {path}"),
+            risk: ConsentRisk::Normal,
+        };
+
+        // Allowed path: matcher defers, prompt allows, repeat is cached.
+        assert_eq!(m.decide(&PathBuf::from("/data/ok")), FsDecision::Ask);
+        assert!(cache.decide_cached(&p, mk_ask("/data/ok")).await);
+        assert!(cache.decide_cached(&p, mk_ask("/data/ok")).await);
+        assert_eq!(*p.calls.lock().unwrap(), 1, "second access must be cached");
+
+        // Different, unscripted path: matcher defers, prompt denies.
+        assert_eq!(m.decide(&PathBuf::from("/etc/shadow")), FsDecision::Ask);
+        assert!(!cache.decide_cached(&p, mk_ask("/etc/shadow")).await);
+
+        // No channel → degrade ask to deny even for the otherwise-allowed path.
+        let deny_cache = DecisionCache::new();
+        assert!(
+            !deny_cache
+                .decide_cached(&DenyPrompter, mk_ask("/data/ok"))
+                .await
         );
     }
 }

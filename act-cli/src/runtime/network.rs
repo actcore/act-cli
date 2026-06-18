@@ -76,6 +76,10 @@ pub fn host_matches(pattern: &str, host: &str) -> bool {
 pub enum Decision {
     Allow,
     Deny,
+    /// `Ask` mode: defer to interactive consent. The sync decider never
+    /// prompts; the async caller (e.g. `PolicyHttpHooks::send_request`)
+    /// resolves this through the `DecisionCache` / `ConsentPrompter`.
+    Ask,
 }
 
 /// A network operation the rule checker inspects. Fields a raw socket
@@ -176,6 +180,8 @@ pub fn decide(
     match mode {
         PolicyMode::Deny => Decision::Deny,
         PolicyMode::Open => Decision::Allow,
+        // Ask is a per-op interactive gate; the sync decider defers it.
+        PolicyMode::Ask => Decision::Ask,
         PolicyMode::Allowlist => {
             if deny.iter().any(|r| rule_matches(r, check)) {
                 return Decision::Deny;

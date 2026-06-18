@@ -13,7 +13,8 @@ use wasmtime_wasi::WasiCtxBuilder;
 use wasmtime_wasi::sockets::SocketAddrUse;
 
 use crate::config::{PolicyMode, SocketsConfig, SocketsRule};
-use crate::runtime::network::cidr_contains;
+use crate::runtime::consent::{ConsentAsk, ConsentPrompter, ConsentRisk, DecisionCache};
+use crate::runtime::network::{Decision, cidr_contains};
 use act_types::SocketProtocol;
 
 /// Resolved policy ready to install on `WasiCtxBuilder::socket_addr_check`.
@@ -118,25 +119,67 @@ impl SocketsPolicy {
 
     /// Install on a `WasiCtxBuilder` — also configures `allow_tcp(true)`,
     /// `allow_udp(true)`, and `allow_ip_name_lookup(any_host_rule)`.
-    pub fn install(self, builder: &mut WasiCtxBuilder) {
+    ///
+    /// `prompter` + `cache` resolve `Ask`-mode verdicts: the per-op closure
+    /// awaits `decide_cached` (cap-id `wasi:sockets`, key = addr string) when
+    /// the sync decider returns `Decision::Ask`.
+    pub fn install(
+        self,
+        builder: &mut WasiCtxBuilder,
+        prompter: Arc<dyn ConsentPrompter>,
+        cache: Arc<DecisionCache>,
+    ) {
         let any_host = self.any_host_rule;
         let me = Arc::new(self);
         builder
             .socket_addr_check(move |addr, reason| {
                 let me = me.clone();
-                Box::pin(async move { me.decide(addr, reason) })
+                let prompter = prompter.clone();
+                let cache = cache.clone();
+                // `socket_addr_check` requires a `Send + Sync` future, but the
+                // `ConsentPrompter::decide` future is `Send`-only, so awaiting
+                // it directly here would make this future `!Sync`. Run the
+                // prompt on a spawned task and await its `JoinHandle` (which is
+                // `Send + Sync` for a `Send` output) to satisfy the bound.
+                Box::pin(async move {
+                    match me.decide(addr, reason) {
+                        Decision::Allow => true,
+                        Decision::Deny => false,
+                        Decision::Ask => {
+                            let proto = proto_of(reason);
+                            let ask = ConsentAsk {
+                                cap_id: act_types::constants::CAP_SOCKETS.to_string(),
+                                key: addr.to_string(),
+                                summary: format!("socket {proto:?} {addr}"),
+                                risk: ConsentRisk::Normal,
+                            };
+                            tokio::spawn(async move { cache.decide_cached(&*prompter, ask).await })
+                                .await
+                                .unwrap_or(false)
+                        }
+                    }
+                })
             })
             .allow_tcp(true)
             .allow_udp(true)
             .allow_ip_name_lookup(any_host);
     }
 
-    fn decide(&self, addr: SocketAddr, reason: SocketAddrUse) -> bool {
+    /// Test-only bool view of `decide` (deny/allowlist/open paths never yield
+    /// `Ask`, so an `Ask` verdict here would be a test misconfiguration).
+    #[cfg(test)]
+    fn allows(&self, addr: SocketAddr, reason: SocketAddrUse) -> bool {
+        matches!(self.decide(addr, reason), Decision::Allow)
+    }
+
+    fn decide(&self, addr: SocketAddr, reason: SocketAddrUse) -> Decision {
         let proto = proto_of(reason);
 
         match self.mode {
-            PolicyMode::Deny => return false,
-            PolicyMode::Open => return true,
+            PolicyMode::Deny => return Decision::Deny,
+            PolicyMode::Open => return Decision::Allow,
+            // Ask defers to the interactive prompt resolved by the closure.
+            PolicyMode::Ask => return Decision::Ask,
             PolicyMode::Allowlist => {}
         }
 
@@ -146,18 +189,18 @@ impl SocketsPolicy {
                 ?reason,
                 "blocked by ACT sockets policy (deny rule)"
             );
-            return false;
+            return Decision::Deny;
         }
         if self.allow.iter().any(|r| matches_rule(r, addr, proto)) {
             tracing::debug!(addr = %addr, ?reason, "sockets policy allow");
-            return true;
+            return Decision::Allow;
         }
         tracing::warn!(
             addr = %addr,
             ?reason,
             "blocked by ACT sockets policy (no allow rule matched)"
         );
-        false
+        Decision::Deny
     }
 }
 
@@ -230,7 +273,7 @@ mod tests {
         .await
         .unwrap();
         let addr = SocketAddr::from(([127, 0, 0, 1], 5900));
-        assert!(!p.decide(addr, SocketAddrUse::TcpConnect));
+        assert!(!p.allows(addr, SocketAddrUse::TcpConnect));
     }
 
     #[tokio::test]
@@ -242,7 +285,7 @@ mod tests {
         .await
         .unwrap();
         let addr = SocketAddr::from(([1, 1, 1, 1], 53));
-        assert!(p.decide(addr, SocketAddrUse::UdpConnect));
+        assert!(p.allows(addr, SocketAddrUse::UdpConnect));
     }
 
     #[tokio::test]
@@ -262,9 +305,9 @@ mod tests {
         let ok = SocketAddr::from(([127, 0, 0, 1], 5900));
         let bad_port = SocketAddr::from(([127, 0, 0, 1], 5901));
         let bad_ip = SocketAddr::from(([127, 0, 0, 2], 5900));
-        assert!(p.decide(ok, SocketAddrUse::TcpConnect));
-        assert!(!p.decide(bad_port, SocketAddrUse::TcpConnect));
-        assert!(!p.decide(bad_ip, SocketAddrUse::TcpConnect));
+        assert!(p.allows(ok, SocketAddrUse::TcpConnect));
+        assert!(!p.allows(bad_port, SocketAddrUse::TcpConnect));
+        assert!(!p.allows(bad_ip, SocketAddrUse::TcpConnect));
     }
 
     #[tokio::test]
@@ -291,9 +334,9 @@ mod tests {
         let p443 = SocketAddr::from(([10, 1, 2, 3], 443));
         let p80 = SocketAddr::from(([10, 1, 2, 3], 80));
         // 443 is excepted from the deny, so the allow can fire.
-        assert!(p.decide(p443, SocketAddrUse::TcpConnect));
+        assert!(p.allows(p443, SocketAddrUse::TcpConnect));
         // 80 matches the deny (cidr, port not excepted) → blocked.
-        assert!(!p.decide(p80, SocketAddrUse::TcpConnect));
+        assert!(!p.allows(p80, SocketAddrUse::TcpConnect));
     }
 
     #[tokio::test]
@@ -311,8 +354,8 @@ mod tests {
         .await
         .unwrap();
         let addr = SocketAddr::from(([127, 0, 0, 1], 5900));
-        assert!(p.decide(addr, SocketAddrUse::TcpConnect));
-        assert!(!p.decide(addr, SocketAddrUse::UdpConnect));
+        assert!(p.allows(addr, SocketAddrUse::TcpConnect));
+        assert!(!p.allows(addr, SocketAddrUse::UdpConnect));
     }
 
     #[tokio::test]
@@ -329,16 +372,16 @@ mod tests {
         })
         .await
         .unwrap();
-        assert!(p.decide(
+        assert!(p.allows(
             SocketAddr::from(([8, 8, 8, 8], 80)),
             SocketAddrUse::TcpConnect
         ));
-        assert!(p.decide(
+        assert!(p.allows(
             SocketAddr::from(([192, 168, 1, 1], 80)),
             SocketAddrUse::TcpConnect
         ));
         // Wrong port — blocked even with wildcard host.
-        assert!(!p.decide(
+        assert!(!p.allows(
             SocketAddr::from(([8, 8, 8, 8], 81)),
             SocketAddrUse::TcpConnect
         ));
@@ -369,15 +412,15 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(p.decide(
+        assert!(p.allows(
             SocketAddr::from(([127, 0, 0, 1], port)),
             SocketAddrUse::TcpConnect
         ));
-        assert!(!p.decide(
+        assert!(!p.allows(
             SocketAddr::from(([127, 0, 0, 1], port.wrapping_add(1))),
             SocketAddrUse::TcpConnect
         ));
-        assert!(!p.decide(
+        assert!(!p.allows(
             SocketAddr::from(([127, 0, 0, 1], port)),
             SocketAddrUse::UdpConnect
         ));

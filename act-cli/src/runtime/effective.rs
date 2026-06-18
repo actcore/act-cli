@@ -52,7 +52,11 @@ pub fn effective_fs(user: &FsConfig, caps: &Capabilities) -> EffectivePolicy<FsC
     // ↓↓↓ from here, the existing intersection `match effective.mode { … }` block is UNCHANGED ↓↓↓
     let mut effective = user.clone();
     match effective.mode {
-        PolicyMode::Deny => {}
+        // Ask is a per-op gate layered above the ceiling; it has no static
+        // allow rules to intersect, so leave mode/allow untouched (same as
+        // Deny here). Undeclared/empty-declaration classes already hard-deny
+        // above, so `ask` only survives for declared classes.
+        PolicyMode::Deny | PolicyMode::Ask => {}
         PolicyMode::Allowlist => {
             effective.allow.retain(|allow_pat| {
                 declared_paths
@@ -103,7 +107,8 @@ pub fn effective_http(user: &HttpConfig, caps: &Capabilities) -> EffectivePolicy
     // ↓↓↓ existing http intersection `match` block UNCHANGED ↓↓↓
     let mut effective = user.clone();
     match effective.mode {
-        PolicyMode::Deny => {}
+        // Ask is a per-op gate layered above the ceiling (see `effective_fs`).
+        PolicyMode::Deny | PolicyMode::Ask => {}
         PolicyMode::Allowlist => {
             effective.allow.retain(|user_rule| {
                 declared_rules
@@ -171,7 +176,8 @@ pub fn effective_sockets(
     // ↓↓↓ existing sockets intersection `match` block UNCHANGED ↓↓↓
     let mut effective = user.clone();
     match effective.mode {
-        PolicyMode::Deny => {}
+        // Ask is a per-op gate layered above the ceiling (see `effective_fs`).
+        PolicyMode::Deny | PolicyMode::Ask => {}
         PolicyMode::Allowlist => {
             effective.allow.retain(|user_rule| {
                 declared_rules
