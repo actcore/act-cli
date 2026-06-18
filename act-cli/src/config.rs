@@ -203,21 +203,9 @@ pub fn to_http_config(gp: &GrantPolicy) -> anyhow::Result<HttpConfig> {
 }
 
 fn parse_http_constraints(cs: &[serde_json::Value]) -> anyhow::Result<Vec<HttpRule>> {
-    use crate::runtime::network::NetworkRule;
     cs.iter()
         .map(|c| {
-            let a: act_types::HttpAllow =
-                serde_json::from_value(c.clone()).context("invalid wasi:http constraint")?;
-            Ok(HttpRule {
-                net: NetworkRule {
-                    host: Some(a.host),
-                    ports: a.ports,
-                    cidr: None,
-                    except_ports: None,
-                },
-                scheme: a.scheme,
-                methods: a.methods,
-            })
+            serde_json::from_value::<HttpRule>(c.clone()).context("invalid wasi:http constraint")
         })
         .collect()
 }
@@ -233,20 +221,10 @@ pub fn to_sockets_config(gp: &GrantPolicy) -> anyhow::Result<SocketsConfig> {
 }
 
 fn parse_sockets_constraints(cs: &[serde_json::Value]) -> anyhow::Result<Vec<SocketsRule>> {
-    use crate::runtime::network::NetworkRule;
     cs.iter()
         .map(|c| {
-            let a: act_types::SocketsAllow =
-                serde_json::from_value(c.clone()).context("invalid wasi:sockets constraint")?;
-            Ok(SocketsRule {
-                net: NetworkRule {
-                    host: a.host,
-                    cidr: a.cidr,
-                    ports: Some(a.ports),
-                    except_ports: None,
-                },
-                protocols: Some(a.protocols),
-            })
+            serde_json::from_value::<SocketsRule>(c.clone())
+                .context("invalid wasi:sockets constraint")
         })
         .collect()
 }
@@ -441,106 +419,6 @@ pub fn build_grant_policy(
     Ok(gp)
 }
 
-/// Parse a single socket spec string.
-///
-/// Grammar: `<host_or_cidr>:<ports>[/<protos>]`
-/// - host: exact, `*.suffix`, or `*`
-/// - cidr: `A.B.C.D/N` (must contain `/` and a numeric suffix)
-/// - ports: comma-separated u16 list; non-empty
-/// - protos: comma-separated subset of `tcp`, `udp`; default unset (any)
-#[allow(dead_code)]
-pub fn parse_socket_spec(s: &str) -> Result<SocketsRule> {
-    use crate::runtime::network::NetworkRule;
-    use act_types::SocketProtocol;
-
-    // Split off optional /<protocols>. A protocol section is purely
-    // alphabetic (comma-separated for multiples); anything containing
-    // digits or colons after the last `/` is part of a CIDR mask, not
-    // a protocol separator.
-    let (host_port, protos) = match s.rsplit_once('/') {
-        Some((before, after))
-            if !after.is_empty() && after.chars().all(|c| c.is_ascii_alphabetic() || c == ',') =>
-        {
-            (before, Some(after))
-        }
-        _ => (s, None),
-    };
-
-    let (host_or_cidr, ports_str) = host_port
-        .rsplit_once(':')
-        .with_context(|| format!("socket spec missing ':<port>' — got {s:?}"))?;
-
-    let mut ports = Vec::new();
-    for p in ports_str.split(',') {
-        let p = p.trim();
-        if p.is_empty() {
-            anyhow::bail!("empty port entry in {ports_str:?}");
-        }
-        ports.push(
-            p.parse::<u16>()
-                .with_context(|| format!("invalid port {p:?}"))?,
-        );
-    }
-    if ports.is_empty() {
-        anyhow::bail!("at least one port required in {s:?}");
-    }
-
-    let net = if let Some((_, mask)) = host_or_cidr.rsplit_once('/')
-        && mask.parse::<u8>().is_ok()
-    {
-        NetworkRule {
-            cidr: Some(host_or_cidr.to_string()),
-            ports: Some(ports),
-            ..Default::default()
-        }
-    } else {
-        NetworkRule {
-            host: Some(host_or_cidr.to_string()),
-            ports: Some(ports),
-            ..Default::default()
-        }
-    };
-
-    let protocols = match protos {
-        None => None,
-        Some(list) => {
-            let mut v = Vec::new();
-            for p in list.split(',') {
-                v.push(match p.trim() {
-                    "tcp" => SocketProtocol::Tcp,
-                    "udp" => SocketProtocol::Udp,
-                    other => anyhow::bail!("unknown socket protocol {other:?}"),
-                });
-            }
-            Some(v)
-        }
-    };
-
-    Ok(SocketsRule { net, protocols })
-}
-
-#[allow(dead_code)]
-fn parse_host_or_cidr(s: &str) -> HttpRule {
-    use crate::runtime::network::NetworkRule;
-    let net = if let Some(slash) = s.find('/')
-        && s[slash + 1..].parse::<u32>().is_ok()
-    {
-        NetworkRule {
-            cidr: Some(s.to_string()),
-            ..Default::default()
-        }
-    } else {
-        NetworkRule {
-            host: Some(s.to_string()),
-            ..Default::default()
-        }
-    };
-    HttpRule {
-        net,
-        ..Default::default()
-    }
-}
-
 /// Resolve the merged metadata from profile + CLI.
 /// CLI metadata takes precedence over profile metadata.
 pub fn resolve_metadata(
@@ -583,7 +461,6 @@ mod tests {
 
     #[test]
     fn grant_resolve_priority() {
-        use serde_json::json;
         let mut entries = std::collections::BTreeMap::new();
         entries.insert(
             "db:*".into(),
@@ -606,7 +483,6 @@ mod tests {
         assert_eq!(gp.resolve("db:drop-database").mode, PolicyMode::Deny); // exact wins
         assert_eq!(gp.resolve("db:truncate").mode, PolicyMode::Allowlist); // wildcard
         assert_eq!(gp.resolve("email:send").mode, PolicyMode::Deny); // default
-        let _ = json!({});
     }
 
     #[test]
@@ -659,7 +535,7 @@ mod tests {
                 serde_json::to_string(&json!({
                     "wasi:http": {
                         "mode": "deny",
-                        "deny": [{ "host": "10.0.0.0", "cidr": "10.0.0.0/8" }]
+                        "deny": [{ "cidr": "10.0.0.0/8" }]
                     }
                 }))
                 .unwrap(),
@@ -668,43 +544,8 @@ mod tests {
         };
         let gp = build_grant_policy(&ConfigFile::default(), None, &cli).unwrap();
         let cfg = to_http_config(&gp).unwrap();
-        // For CIDR in http deny we need a different approach — use raw grant
-        // that sets mode=deny and a deny entry with cidr directly via GrantPolicy
-        let mut entries = BTreeMap::new();
-        entries.insert(
-            "wasi:http".into(),
-            CapabilityGrant {
-                mode: PolicyMode::Deny,
-                allow: vec![],
-                deny: vec![json!({ "host": "10.x.x.x" })],
-            },
-        );
-        let gp2 = GrantPolicy {
-            default: PolicyMode::Deny,
-            entries,
-        };
-        // But the actual test is: CLI deny grant sets mode=Deny and deny[0].net.cidr
-        // We need to test parse_host_or_cidr path via raw GrantPolicy
-        let mut entries3 = BTreeMap::new();
-        entries3.insert(
-            act_types::constants::CAP_HTTP.to_string(),
-            CapabilityGrant {
-                mode: PolicyMode::Deny,
-                allow: vec![],
-                deny: vec![json!({ "host": "10.0.0.0" })],
-            },
-        );
-        let gp3 = GrantPolicy {
-            default: PolicyMode::Deny,
-            entries: entries3,
-        };
-        let cfg3 = to_http_config(&gp3).unwrap();
-        assert_eq!(cfg3.mode, PolicyMode::Deny);
-        assert_eq!(cfg3.deny[0].net.host.as_deref(), Some("10.0.0.0"));
-        // Confirm the cidr path works via the parse helper
-        let rule = parse_host_or_cidr("10.0.0.0/8");
-        assert_eq!(rule.net.cidr.as_deref(), Some("10.0.0.0/8"));
-        drop((cfg, gp2));
+        assert_eq!(cfg.mode, PolicyMode::Deny);
+        assert_eq!(cfg.deny[0].net.cidr.as_deref(), Some("10.0.0.0/8"));
     }
 
     #[test]
@@ -752,7 +593,6 @@ allow = [{ host = "api.openai.com", scheme = "https" }]
         assert_eq!(http.mode, PolicyMode::Allowlist);
         assert_eq!(http.allow[0].net.host.as_deref(), Some("api.openai.com"));
         assert_eq!(http.allow[0].scheme.as_deref(), Some("https"));
-        let _ = json!({});
     }
 
     #[test]
@@ -829,8 +669,8 @@ default = "deny"
         assert_eq!(cfg.allow[0].net.cidr.as_deref(), Some("10.0.0.0/8"));
         assert_eq!(cfg.allow[0].net.host, None);
         assert_eq!(cfg.allow[0].net.ports.as_deref(), Some(&[80u16, 443][..]));
-        // SocketsAllow.protocols defaults to [tcp, udp], so Some([tcp, udp])
-        assert!(cfg.allow[0].protocols.is_some());
+        // No protocols field in the JSON → None (any protocol)
+        assert!(cfg.allow[0].protocols.is_none());
     }
 
     #[test]
@@ -839,26 +679,14 @@ default = "deny"
 [policy."wasi:sockets"]
 mode = "allowlist"
 allow = [{ host = "vnc.example.com", ports = [5900], protocols = ["tcp"] }]
-deny = [{ cidr = "127.0.0.0/8", ports = [5900] }]
+deny = [{ cidr = "127.0.0.0/8", ports = [5900], "except-ports" = [5901] }]
 "#;
         let cfg: ConfigFile = toml::from_str(toml_input).expect("parses");
         let gp = cfg.policy.as_ref().unwrap().to_grant_policy().unwrap();
         let s = to_sockets_config(&gp).unwrap();
         assert_eq!(s.mode, PolicyMode::Allowlist);
         assert_eq!(s.allow[0].net.host.as_deref(), Some("vnc.example.com"));
-        // Note: the old test checked except_ports; new schema uses ports directly
         assert_eq!(s.deny[0].net.cidr.as_deref(), Some("127.0.0.0/8"));
-    }
-
-    #[test]
-    fn sockets_spec_rejects_missing_port() {
-        let r = parse_socket_spec("vnc.example.com");
-        assert!(r.is_err(), "spec without port must be rejected");
-    }
-
-    #[test]
-    fn sockets_spec_rejects_bad_protocol() {
-        let r = parse_socket_spec("host:80/sctp");
-        assert!(r.is_err(), "unknown protocol must be rejected");
+        assert_eq!(s.deny[0].net.except_ports.as_deref(), Some(&[5901u16][..]));
     }
 }
