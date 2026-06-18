@@ -42,7 +42,7 @@ toml = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 wasmparser.workspace = true
-wasm-encoder = "0.250.0"
+wasm-encoder = "0.252.0"
 minijinja = "2"
 walkdir = "2"
 include_dir = "0.7"
