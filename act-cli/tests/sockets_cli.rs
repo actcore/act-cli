@@ -1,4 +1,4 @@
-//! Integration coverage for --allow-socket / --deny-socket flag parsing.
+//! Integration coverage for sockets policy flag parsing.
 //! Lives in tests/ so it picks up clap's derive surface as users see it.
 
 use std::process::Command;
@@ -9,7 +9,7 @@ fn act_bin() -> Command {
 }
 
 #[test]
-fn allow_socket_help_lists_flags() {
+fn sockets_help_lists_flags() {
     let out = act_bin()
         .args(["call", "--help"])
         .output()
@@ -17,12 +17,12 @@ fn allow_socket_help_lists_flags() {
     assert!(out.status.success(), "act call --help failed");
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
-        text.contains("--allow-socket"),
-        "missing --allow-socket in help"
+        text.contains("--sockets-allow"),
+        "missing --sockets-allow in help"
     );
     assert!(
-        text.contains("--deny-socket"),
-        "missing --deny-socket in help"
+        text.contains("--sockets-deny"),
+        "missing --sockets-deny in help"
     );
     assert!(
         text.contains("--sockets-policy"),
@@ -37,7 +37,7 @@ fn bad_socket_spec_is_rejected_clearly() {
             "call",
             "nonexistent.wasm",
             "noop",
-            "--allow-socket",
+            "--sockets-allow",
             "missing-port",
             "--args",
             "{}",

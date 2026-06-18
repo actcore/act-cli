@@ -303,7 +303,7 @@ fn parse_host_or_cidr(s: &str) -> HttpRule {
     }
 }
 
-/// Parse a single `--allow-socket` / `--deny-socket` spec.
+/// Parse a single `--sockets-allow` / `--sockets-deny` spec.
 ///
 /// Grammar: `<host_or_cidr>:<ports>[/<protos>]`
 /// - host: exact, `*.suffix`, or `*`

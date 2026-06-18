@@ -49,10 +49,10 @@ struct CommonOpts {
     /// Sockets allow entry: `<host_or_cidr>:<ports>[/<protos>]`.
     /// Examples: `vnc.example.com:5900/tcp`, `10.0.0.0/8:80,443`.
     /// Repeatable.
-    #[arg(long = "allow-socket")]
+    #[arg(long = "sockets-allow")]
     sockets_allow: Vec<String>,
-    /// Sockets deny entry. Same grammar as `--allow-socket`. Repeatable.
-    #[arg(long = "deny-socket")]
+    /// Sockets deny entry. Same grammar as `--sockets-allow`. Repeatable.
+    #[arg(long = "sockets-deny")]
     sockets_deny: Vec<String>,
 
     /// Cap the component's wasm linear memory. Accepts a byte count or a size
