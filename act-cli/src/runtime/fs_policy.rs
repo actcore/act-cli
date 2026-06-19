@@ -104,6 +104,10 @@ pub fn resolve_mounts(caps: &Capabilities, mode: PolicyMode) -> Vec<ResolvedMoun
         }
     }
 
+    // mount-root sugar → a root mount. "/" and "" are treated as no-ops (NOT a
+    // whole-fs root): a degenerate mount-root must never silently expose the
+    // entire host filesystem next to declared binds. Use an explicit
+    // `{type = "root"}` mount to combine whole-fs with binds.
     if !has_explicit_root
         && let Some(mr) = caps.fs_mount_root()
         && mr != "/"
@@ -776,6 +780,54 @@ mod mount_tests {
         assert_eq!(mounts.len(), 1);
         assert_eq!(mounts[0].kind, MountType::Root);
         assert_eq!(mounts[0].guest, "/data");
+    }
+
+    #[test]
+    fn mount_root_slash_is_noop_with_binds() {
+        // A degenerate `mount-root = "/"` alongside binds must NOT silently add a
+        // whole-fs root mount — the guest gets only the declared bind.
+        let mut caps = Capabilities::default();
+        let mut params = BTreeMap::new();
+        params.insert(
+            "mounts".to_string(),
+            serde_json::json!([{ "guest": "/ows", "host": "/tmp/x" }]),
+        );
+        params.insert("mount-root".to_string(), serde_json::json!("/"));
+        caps.0.insert(
+            "wasi:filesystem".into(),
+            CapabilityRequest {
+                params,
+                ..Default::default()
+            },
+        );
+        let mounts = resolve_mounts(&caps, PolicyMode::Ask);
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].kind, MountType::Bind);
+        assert_eq!(mounts[0].guest, "/ows");
+    }
+
+    #[test]
+    fn explicit_root_suppresses_mount_root_sugar() {
+        // An explicit `{type = "root"}` mount suppresses the mount-root sugar
+        // entirely — `/data` is NOT added.
+        let mut caps = Capabilities::default();
+        let mut params = BTreeMap::new();
+        params.insert(
+            "mounts".to_string(),
+            serde_json::json!([{ "type": "root", "guest": "/x" }]),
+        );
+        params.insert("mount-root".to_string(), serde_json::json!("/data"));
+        caps.0.insert(
+            "wasi:filesystem".into(),
+            CapabilityRequest {
+                params,
+                ..Default::default()
+            },
+        );
+        let mounts = resolve_mounts(&caps, PolicyMode::Allowlist);
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].kind, MountType::Root);
+        assert_eq!(mounts[0].guest, "/x");
     }
 
     #[test]
