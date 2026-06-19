@@ -63,6 +63,7 @@ dependencies = [
  "regex",
  "reqwest 0.13.4",
  "rmcp",
+ "schemars 1.2.1",
  "serde",
  "serde_json",
  "serde_with",
@@ -2834,6 +2835,7 @@ dependencies = [
  "tokio-util",
  "tower-service",
  "tracing",
+ "url",
  "uuid",
 ]
 

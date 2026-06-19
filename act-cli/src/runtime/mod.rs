@@ -14,6 +14,7 @@ use wasmtime_wasi_http::p3::WasiHttpCtxView;
 
 pub mod consent;
 pub mod effective;
+pub mod elicit;
 pub mod fs_matcher;
 pub mod fs_policy;
 pub mod http_client;

@@ -54,7 +54,8 @@ wasmtime-wasi-http = { version = "45", default-features = false, features = ["p2
 http = "1"
 http-body-util = "0.1"
 hyper = "1"
-rmcp = { version = "1.7", features = ["server", "transport-io", "transport-streamable-http-server"] }
+rmcp = { version = "1.7", features = ["server", "transport-io", "transport-streamable-http-server", "elicitation", "schemars"] }
+schemars = "1.0"
 bytes = "1"
 cidr = "0.3"
 globset = "0.4"
