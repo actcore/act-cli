@@ -36,6 +36,9 @@ pub struct ActRmcpBridge {
     /// this id is forced into every call's `std:session-id` metadata,
     /// overriding any client-supplied value.
     pub default_session_id: Option<String>,
+    /// Shared slot holding the active MCP peer. Filled per `call_tool`
+    /// so the elicitation channel can send consent requests to the client.
+    pub peer_slot: Arc<crate::runtime::elicit::PeerSlot>,
 }
 
 fn map_content_part(part: &runtime::exports::act::tools::tool_provider::ContentPart) -> Content {
@@ -204,6 +207,7 @@ pub async fn run_stdio(
     metadata: runtime::Metadata,
     has_sessions: bool,
     default_session_id: Option<String>,
+    peer_slot: Arc<crate::runtime::elicit::PeerSlot>,
 ) -> anyhow::Result<()> {
     let bridge = ActRmcpBridge {
         handle,
@@ -211,6 +215,7 @@ pub async fn run_stdio(
         metadata,
         has_sessions,
         default_session_id,
+        peer_slot,
     };
 
     let service = rmcp::serve_server(bridge, (tokio::io::stdin(), tokio::io::stdout()))
@@ -237,6 +242,7 @@ pub async fn run_http(
     metadata: runtime::Metadata,
     has_sessions: bool,
     default_session_id: Option<String>,
+    peer_slot: Arc<crate::runtime::elicit::PeerSlot>,
 ) -> anyhow::Result<()> {
     use rmcp::transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
@@ -250,6 +256,7 @@ pub async fn run_http(
                 metadata: metadata.clone(),
                 has_sessions,
                 default_session_id: default_session_id.clone(),
+                peer_slot: peer_slot.clone(),
             })
         },
         Arc::new(LocalSessionManager::default()),
@@ -646,10 +653,12 @@ impl rmcp::ServerHandler for ActRmcpBridge {
     fn list_tools(
         &self,
         _request: Option<rmcp::model::PaginatedRequestParams>,
-        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> impl std::future::Future<Output = Result<rmcp::model::ListToolsResult, rmcp::ErrorData>>
     + Send
     + '_ {
+        // Seed the peer slot early so any elicitation during list_tools has a peer.
+        self.peer_slot.set(context.peer.clone());
         self.list_tools_impl()
     }
 
@@ -658,6 +667,9 @@ impl rmcp::ServerHandler for ActRmcpBridge {
         request: rmcp::model::CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        // Always refresh the slot so consent elicitations during this call
+        // reach the active client peer.
+        self.peer_slot.set(context.peer.clone());
         self.call_tool_impl(request, &context.meta).await
     }
 }
@@ -770,6 +782,7 @@ mod tests {
             metadata: runtime::Metadata::default(),
             has_sessions: true,
             default_session_id: default.map(str::to_string),
+            peer_slot: Arc::new(crate::runtime::elicit::PeerSlot::new()),
         }
     }
 
@@ -836,6 +849,7 @@ mod tests {
             metadata: runtime::Metadata::default(),
             has_sessions: false,
             default_session_id: None,
+            peer_slot: Arc::new(crate::runtime::elicit::PeerSlot::new()),
         };
         let info = rmcp::ServerHandler::get_info(&bridge);
         assert_eq!(info.server_info.name, "example");
