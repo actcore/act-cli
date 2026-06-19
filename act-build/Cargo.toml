@@ -17,30 +17,30 @@ path = "src/main.rs"
 
 [dependencies]
 act-types.workspace = true
-anyhow = "1"
-base64 = "0.22"
-globset = "0.4"
-clap = { version = "4", features = ["derive"] }
+anyhow.workspace = true
+base64.workspace = true
+globset.workspace = true
+clap.workspace = true
 # `oci-client::Client::push_manifest_raw` takes an `http::HeaderValue` for the
 # manifest content-type; same `http` 1.x oci-client itself uses.
-http = "1"
-ciborium = "0.2"
-dirs = "6"
+http.workspace = true
+ciborium.workspace = true
+dirs.workspace = true
 json-patch = "4"
-oci-client = "0.17"
+oci-client.workspace = true
 # Canonical-JSON formatter — must match what `oci-client` uses to serialize
 # manifests on push, so our computed digest equals the registry's stored one.
 olpc-cjson = "0.1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.11"
-tar = "0.4"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
 flate2 = "1"
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
-tokio = { version = "1", features = ["rt", "macros", "fs", "io-util"] }
-toml = "1"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reqwest.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "fs", "io-util"] }
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 wasmparser.workspace = true
 wasm-encoder = "0.250.0"
 minijinja = "2"
@@ -48,4 +48,4 @@ walkdir = "2"
 include_dir = "0.7"
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true
