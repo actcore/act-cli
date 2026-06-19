@@ -1,0 +1,12 @@
+[package]
+name = "act-policy"
+version = "0.0.0"
+description = "Capability policy decision core (PDP) for the ACT toolchain"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["act", "capability", "policy", "wasm", "security"]
+
+[dependencies]
