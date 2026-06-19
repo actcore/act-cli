@@ -4,6 +4,7 @@
 //! - [`to_text`] — markdown-like human-readable output
 //! - [`to_json`] — machine-readable JSON output
 
+use crate::runtime::exports::act::tools::tool_provider::ListToolsResponse;
 use act_types::{
     constants::{
         META_ANTI_USAGE_HINTS, META_DESTRUCTIVE, META_IDEMPOTENT, META_READ_ONLY, META_STREAMING,
@@ -113,6 +114,61 @@ pub fn to_toon<T: Serialize>(value: &T) -> anyhow::Result<String> {
 /// curation: it is the stable machine contract for registry tooling.
 pub fn to_manifest_json(info: &act_types::ComponentInfo) -> anyhow::Result<String> {
     Ok(serde_json::to_string_pretty(info)?)
+}
+
+/// A single tool serialized verbatim from `list-tools` — full localized-string
+/// description and the complete metadata map (every key, no curation).
+#[derive(Serialize)]
+struct RawTool {
+    name: String,
+    description: LocalizedString,
+    parameters_schema: serde_json::Value,
+    metadata: serde_json::Value,
+}
+
+/// The full `list-tools-response` serialized verbatim, including the
+/// response-level metadata map.
+#[derive(Serialize)]
+struct RawToolsResponse {
+    metadata: serde_json::Value,
+    tools: Vec<RawTool>,
+}
+
+/// Faithfully project the generated `ListToolsResponse` into a serializable
+/// shape. Unlike [`tool_to_json`], this performs no curation: ALL metadata
+/// keys survive and the description keeps its full localized-string variant.
+fn build_raw_tools(resp: &ListToolsResponse) -> RawToolsResponse {
+    let tools = resp
+        .tools
+        .iter()
+        .map(|td| {
+            let description = LocalizedString::from(&td.description);
+            let metadata = serde_json::Value::from(Metadata::from(td.metadata.clone()));
+            // parameters-schema is a JSON Schema string; parse it so the output
+            // nests real JSON, falling back to the raw string if it is not JSON.
+            let parameters_schema = serde_json::from_str(&td.parameters_schema)
+                .unwrap_or_else(|_| serde_json::Value::String(td.parameters_schema.clone()));
+            RawTool {
+                name: td.name.clone(),
+                description,
+                parameters_schema,
+                metadata,
+            }
+        })
+        .collect();
+    let metadata = serde_json::Value::from(Metadata::from(resp.metadata.clone()));
+    RawToolsResponse { metadata, tools }
+}
+
+/// Render the raw `list-tools` response behind `act inspect tools` as pretty
+/// JSON — the stable machine view, distinct from the curated `act info --tools`.
+pub fn to_tools_json(resp: &ListToolsResponse) -> anyhow::Result<String> {
+    Ok(serde_json::to_string_pretty(&build_raw_tools(resp))?)
+}
+
+/// Render the raw `list-tools` response as TOON.
+pub fn to_tools_toon(resp: &ListToolsResponse) -> anyhow::Result<String> {
+    to_toon(&build_raw_tools(resp))
 }
 
 fn tool_to_json(

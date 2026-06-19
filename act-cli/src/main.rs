@@ -213,6 +213,10 @@ enum SessionCommand {
     },
 }
 
+// `Tools` carries `CommonOpts` (it instantiates the component) while the other
+// leaves are read-only and tiny; clap subcommand enums can't box a flattened
+// field, so accept the size skew rather than box every variant's payload.
+#[allow(clippy::large_enum_variant)]
 #[derive(clap::Subcommand)]
 enum InspectCommand {
     /// Print the raw decoded `act:component` manifest (full ComponentInfo).
@@ -224,6 +228,20 @@ enum InspectCommand {
         /// Output format (raw manifest is JSON; `cbor` reserved for future use)
         #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
         format: OutputFormat,
+    },
+    /// Dump the raw `list-tools` response verbatim (instantiates the
+    /// component — distinct from the curated `act info --tools`).
+    Tools {
+        /// Component reference (path, URL, OCI ref, or name)
+        #[arg(name = "ref")]
+        reference: ComponentRef,
+
+        /// Output format (`json` default; `text` falls back to JSON, `toon` supported)
+        #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
+        format: OutputFormat,
+
+        #[command(flatten)]
+        opts: CommonOpts,
     },
 }
 
@@ -309,6 +327,11 @@ async fn main() -> Result<()> {
             InspectCommand::ComponentManifest { reference, format } => {
                 cmd_inspect_component_manifest(reference, format).await
             }
+            InspectCommand::Tools {
+                reference,
+                format,
+                opts,
+            } => cmd_inspect_tools(reference, format, opts).await,
         },
     }
 }
@@ -859,6 +882,41 @@ async fn cmd_inspect_component_manifest(
     let rendered = match format {
         OutputFormat::Toon => format::to_toon(&info)?,
         OutputFormat::Json | OutputFormat::Text => format::to_manifest_json(&info)?,
+    };
+    println!("{rendered}");
+    Ok(())
+}
+
+async fn cmd_inspect_tools(
+    component: ComponentRef,
+    format: OutputFormat,
+    opts: CommonOpts,
+) -> Result<()> {
+    // `list-tools` runs component code, so this leaf instantiates (same
+    // capability handling as `act info --tools`).
+    let pc = prepare_component(&component, &opts, tty_or_deny_prompter()).await?;
+
+    let (tools_tx, tools_rx) = tokio::sync::oneshot::channel();
+    pc.handle
+        .send(runtime::ComponentRequest::ListTools {
+            metadata: pc.metadata,
+            reply: tools_tx,
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("component actor unavailable"))?;
+
+    let response = match tools_rx.await? {
+        Ok(list_response) => list_response,
+        Err(runtime::ComponentError::Tool(te)) => {
+            let ls = act_types::types::LocalizedString::from(&te.message);
+            anyhow::bail!("list-tools error: {}: {}", te.kind, ls.any_text());
+        }
+        Err(runtime::ComponentError::Internal(e)) => return Err(e),
+    };
+
+    let rendered = match format {
+        OutputFormat::Toon => format::to_tools_toon(&response)?,
+        OutputFormat::Json | OutputFormat::Text => format::to_tools_json(&response)?,
     };
     println!("{rendered}");
     Ok(())
