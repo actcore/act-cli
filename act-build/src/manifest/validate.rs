@@ -12,6 +12,11 @@ pub fn validate(caps: &Capabilities) -> Result<()> {
             .constraints_as::<FilesystemAllow>()
             .map_err(|e| anyhow::anyhow!("malformed wasi:filesystem constraints: {e}"))?;
         validate_fs(&entries)?;
+        let mounts = caps
+            .fs_mounts()
+            .map_err(|e| anyhow::anyhow!("malformed wasi:filesystem params.mounts: {e}"))?;
+        act_types::validate_mounts(&mounts).map_err(anyhow::Error::msg)?;
+        warn_mount_issues(&mounts, &entries, caps);
     }
     if let Some(http_req) = caps.get(CAP_HTTP) {
         let rules = http_req
@@ -53,6 +58,94 @@ fn validate_http(rules: &[HttpAllow]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Non-fatal lints: bind mounts with no covering constraint, and mount-root
+/// declared alongside an explicit root mount.
+fn warn_mount_issues(
+    mounts: &[act_types::FilesystemMount],
+    constraints: &[act_types::FilesystemAllow],
+    caps: &act_types::Capabilities,
+) {
+    for m in mounts {
+        if m.kind == act_types::MountType::Bind
+            && let Some(h) = m.host.as_deref()
+        {
+            let covered = constraints
+                .iter()
+                .any(|c| c.path.starts_with(h) || h.starts_with(trim_glob(&c.path)));
+            if !covered {
+                tracing::warn!(
+                    host = h,
+                    "bind mount host is not covered by any wasi:filesystem constraint; \
+                     it will be preopened but access-denied"
+                );
+            }
+        }
+    }
+    if caps.fs_mount_root().is_some() && mounts.iter().any(|m| m.kind == act_types::MountType::Root)
+    {
+        tracing::warn!(
+            "both `mount-root` and an explicit `root` mount declared; `mount-root` is ignored"
+        );
+    }
+}
+
+/// Strip a trailing glob segment so a prefix comparison is meaningful
+/// (`~/.ows/**` → `~/.ows`).
+fn trim_glob(pattern: &str) -> &str {
+    let cut = pattern.find(['*', '?', '[', '{']).unwrap_or(pattern.len());
+    pattern[..cut].trim_end_matches('/')
+}
+
+#[cfg(test)]
+mod mount_validate_tests {
+    use super::validate;
+    use act_types::{Capabilities, CapabilityRequest};
+    use std::collections::BTreeMap;
+
+    fn caps(fs_params: serde_json::Value, allow: serde_json::Value) -> Capabilities {
+        let mut c = Capabilities::default();
+        let mut params = BTreeMap::new();
+        params.insert("mounts".to_string(), fs_params);
+        c.0.insert(
+            "wasi:filesystem".into(),
+            CapabilityRequest {
+                params,
+                constraints: allow.as_array().unwrap().clone(),
+                ..Default::default()
+            },
+        );
+        c
+    }
+
+    #[test]
+    fn valid_bind_with_constraint_passes() {
+        let c = caps(
+            serde_json::json!([{ "guest": "/ows", "host": "~/.ows" }]),
+            serde_json::json!([{ "path": "~/.ows/**", "mode": "rw" }]),
+        );
+        assert!(validate(&c).is_ok());
+    }
+
+    #[test]
+    fn bind_without_host_is_rejected() {
+        let c = caps(
+            serde_json::json!([{ "guest": "/ows" }]),
+            serde_json::json!([{ "path": "~/.ows/**", "mode": "rw" }]),
+        );
+        let e = format!("{}", validate(&c).unwrap_err());
+        assert!(e.contains("host"), "got: {e}");
+    }
+
+    #[test]
+    fn root_with_host_is_rejected() {
+        let c = caps(
+            serde_json::json!([{ "type": "root", "guest": "/", "host": "/x" }]),
+            serde_json::json!([{ "path": "**", "mode": "rw" }]),
+        );
+        assert!(validate(&c).is_err());
+    }
 }
 
 #[cfg(test)]
