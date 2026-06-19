@@ -11,8 +11,11 @@ homepage = "https://actcore.dev"
 readme = "README.md"
 
 [workspace.dependencies]
-act-types = "0.10"
+act-types = "0.11"
 wasmparser = "0.250.0"
 
 [profile.release]
 lto = "thin"
+
+[patch.crates-io]
+act-types = { path = "../act-sdk-rs/act-types" }

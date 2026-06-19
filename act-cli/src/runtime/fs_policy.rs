@@ -20,7 +20,7 @@
 //!
 //! fd→path tracking:
 //! - Preopens are recorded at construction (we know their host paths from
-//!   `FsConfig::preopens()` before calling `WasiCtxBuilder::preopened_dir`).
+//!   `derive_preopens` before calling `WasiCtxBuilder::preopened_dir`).
 //!   Their Resource reps aren't known at that point; we match reps to host
 //!   paths lazily the first time `get_directories()` is called.
 //! - New descriptors produced by `open_at` are recorded with the
@@ -39,11 +39,13 @@ use wasmtime_wasi::p2::bindings::filesystem::types::{
 };
 use wasmtime_wasi::p2::{DynInputStream, DynOutputStream, FsError, FsResult};
 
-use crate::config::{FsConfig, PolicyMode};
+use act_types::{Capabilities, MountType};
+
+use crate::config::PolicyMode;
 use crate::runtime::consent::{ConsentAsk, ConsentPrompter, ConsentRisk, DecisionCache};
 use crate::runtime::fs_matcher::{FsDecision, FsMatcher};
 
-// ── Preopen derivation ────────────────────────────────────────────────────
+// ── Mounts → preopens ─────────────────────────────────────────────────────
 
 /// A (guest path → host path) pair handed to wasmtime-wasi's `preopened_dir`.
 ///
@@ -57,69 +59,150 @@ pub struct Preopen {
     pub host: PathBuf,
 }
 
-/// Derive the preopen list for an `FsConfig`.
+/// A resolved mount: concrete guest path + (for binds) an expanded host dir.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedMount {
+    pub kind: MountType,
+    pub guest: String,
+    /// Expanded host directory for `bind`; `None` for `root`.
+    pub host: Option<PathBuf>,
+}
+
+/// Resolve a component's declared mounts into concrete topology.
 ///
-/// - `Deny` → no preopens (guest can't name anything).
-/// - `Open` / `Allowlist` → platform root preopens. Unix: one `/` preopen.
-///   Windows: one per accessible drive letter (`/c` → `C:\`, `/d` → `D:\`, …;
-///   absent drives are skipped).
-pub fn derive_preopens(cfg: &FsConfig) -> Vec<Preopen> {
-    match cfg.mode {
-        PolicyMode::Deny => Vec::new(),
-        // Ask needs the root preopen so the guest can name paths the per-op
-        // matcher then prompts on (the prompt happens in `check_path`).
-        PolicyMode::Open | PolicyMode::Allowlist | PolicyMode::Ask => platform_root_preopens(),
+/// Order: explicit `params.mounts`, then `mount-root` sugar (a `root` mount,
+/// skipped if an explicit `root` mount already exists), then a default `root`
+/// mount when nothing else is declared. Returns empty under `Deny` (the guest
+/// can name nothing).
+pub fn resolve_mounts(caps: &Capabilities, mode: PolicyMode) -> Vec<ResolvedMount> {
+    if mode == PolicyMode::Deny {
+        return Vec::new();
+    }
+    let declared = caps.fs_mounts().unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "ignoring malformed wasi:filesystem mounts");
+        Vec::new()
+    });
+    let has_explicit_root = declared.iter().any(|m| m.kind == MountType::Root);
+
+    let mut out = Vec::new();
+    for m in &declared {
+        match m.kind {
+            MountType::Bind => {
+                if let (Some(g), Some(h)) = (m.guest.as_deref(), m.host.as_deref()) {
+                    out.push(ResolvedMount {
+                        kind: MountType::Bind,
+                        guest: g.to_string(),
+                        host: Some(expand_host_dir(h)),
+                    });
+                }
+            }
+            MountType::Root => out.push(ResolvedMount {
+                kind: MountType::Root,
+                guest: m.guest.as_deref().unwrap_or("/").to_string(),
+                host: None,
+            }),
+        }
+    }
+
+    if !has_explicit_root
+        && let Some(mr) = caps.fs_mount_root()
+        && mr != "/"
+        && !mr.is_empty()
+    {
+        out.push(ResolvedMount {
+            kind: MountType::Root,
+            guest: mr.to_string(),
+            host: None,
+        });
+    }
+
+    if out.is_empty() {
+        out.push(ResolvedMount {
+            kind: MountType::Root,
+            guest: "/".to_string(),
+            host: None,
+        });
+    }
+    out
+}
+
+/// Expand `~` and make a host directory path absolute (no glob handling — this
+/// is a directory, not a matcher pattern).
+fn expand_host_dir(s: &str) -> PathBuf {
+    let expanded = shellexpand::tilde(s).into_owned();
+    let p = PathBuf::from(&expanded);
+    if p.is_absolute() {
+        p
+    } else {
+        std::env::current_dir().map(|c| c.join(&p)).unwrap_or(p)
     }
 }
 
+/// Build the preopen list from resolved mounts.
+pub fn derive_preopens(mounts: &[ResolvedMount]) -> Vec<Preopen> {
+    let mut out = Vec::new();
+    for m in mounts {
+        match m.kind {
+            MountType::Bind => {
+                if let Some(host) = &m.host {
+                    out.push(Preopen {
+                        guest: m.guest.clone(),
+                        host: host.clone(),
+                    });
+                }
+            }
+            MountType::Root => out.extend(root_preopens_under(&m.guest)),
+        }
+    }
+    out
+}
+
+/// Create missing `bind` host directories so they can be preopened. `root`
+/// mounts point at the platform root and create nothing.
+pub fn create_mount_dirs(mounts: &[ResolvedMount]) -> std::io::Result<()> {
+    for m in mounts {
+        if m.kind == MountType::Bind
+            && let Some(host) = &m.host
+        {
+            std::fs::create_dir_all(host)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
-fn platform_root_preopens() -> Vec<Preopen> {
+fn root_preopens_under(guest: &str) -> Vec<Preopen> {
     vec![Preopen {
-        guest: "/".to_string(),
+        guest: guest.to_string(),
         host: PathBuf::from("/"),
     }]
 }
 
 #[cfg(windows)]
-fn platform_root_preopens() -> Vec<Preopen> {
-    let mut mounts = Vec::new();
+fn root_preopens_under(guest: &str) -> Vec<Preopen> {
+    let base = guest.trim_end_matches('/');
+    let mut out = Vec::new();
     for letter in b'A'..=b'Z' {
         let c = letter as char;
         let host = PathBuf::from(format!("{}:\\", c));
-        // `metadata` trips DriveNotReady / access errors for absent drives;
-        // treat any failure as "skip this letter".
         if std::fs::metadata(&host).is_ok() {
-            let guest = format!("/{}", c.to_ascii_lowercase());
-            mounts.push(Preopen { guest, host });
+            let g = if base.is_empty() {
+                format!("/{}", c.to_ascii_lowercase())
+            } else {
+                format!("{}/{}", base, c.to_ascii_lowercase())
+            };
+            out.push(Preopen { guest: g, host });
         }
     }
-    mounts
+    out
 }
 
 #[cfg(not(any(unix, windows)))]
-fn platform_root_preopens() -> Vec<Preopen> {
+fn root_preopens_under(guest: &str) -> Vec<Preopen> {
     vec![Preopen {
-        guest: "/".to_string(),
+        guest: guest.to_string(),
         host: PathBuf::from("/"),
     }]
-}
-
-/// Adjust guest paths based on the component's `std:fs:mount-root` —
-/// cosmetic renaming of the preopen entries. Host paths are untouched and
-/// the policy matcher always operates on host paths.
-pub fn apply_mount_root(preopens: &mut [Preopen], mount_root: &str) {
-    if mount_root == "/" || mount_root.is_empty() {
-        return;
-    }
-    let root = mount_root.trim_end_matches('/');
-    for p in preopens {
-        if p.guest == "/" {
-            p.guest = root.to_string();
-        } else {
-            let guest = p.guest.trim_start_matches('/');
-            p.guest = format!("{}/{}", root, guest);
-        }
-    }
 }
 
 // ── Wasmtime host impl ────────────────────────────────────────────────────
@@ -622,65 +705,99 @@ impl HostDirectoryEntryStream for PolicyFilesystemCtxView<'_> {
 }
 
 #[cfg(test)]
-mod preopen_tests {
+mod mount_tests {
     use super::*;
+    use crate::config::PolicyMode;
+    use act_types::{Capabilities, CapabilityRequest, MountType};
+    use std::collections::BTreeMap;
 
-    #[test]
-    fn deny_mode_yields_no_preopens() {
-        let cfg = FsConfig::deny();
-        assert!(derive_preopens(&cfg).is_empty());
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn unix_open_and_allowlist_yield_root() {
-        for mode in [PolicyMode::Open, PolicyMode::Allowlist] {
-            let cfg = FsConfig {
-                mode,
+    fn caps_with_mounts(mounts: serde_json::Value) -> Capabilities {
+        let mut caps = Capabilities::default();
+        let mut params = BTreeMap::new();
+        params.insert("mounts".to_string(), mounts);
+        caps.0.insert(
+            "wasi:filesystem".into(),
+            CapabilityRequest {
+                params,
                 ..Default::default()
-            };
-            let preopens = derive_preopens(&cfg);
-            assert_eq!(preopens.len(), 1);
-            assert_eq!(preopens[0].guest, "/");
-            assert_eq!(preopens[0].host, PathBuf::from("/"));
-        }
-    }
-
-    #[test]
-    fn apply_mount_root_is_a_noop_for_root() {
-        let mut preopens = vec![Preopen {
-            guest: "/".to_string(),
-            host: PathBuf::from("/host"),
-        }];
-        apply_mount_root(&mut preopens, "/");
-        assert_eq!(preopens[0].guest, "/");
-    }
-
-    #[test]
-    fn apply_mount_root_rewrites_virtual_root() {
-        let mut preopens = vec![Preopen {
-            guest: "/".to_string(),
-            host: PathBuf::from("/host"),
-        }];
-        apply_mount_root(&mut preopens, "/data");
-        assert_eq!(preopens[0].guest, "/data");
-        assert_eq!(preopens[0].host, PathBuf::from("/host"));
-    }
-
-    #[test]
-    fn apply_mount_root_prefixes_drive_letters() {
-        let mut preopens = vec![
-            Preopen {
-                guest: "/c".to_string(),
-                host: PathBuf::from("C:\\"),
             },
-            Preopen {
-                guest: "/d".to_string(),
-                host: PathBuf::from("D:\\"),
+        );
+        caps
+    }
+
+    #[test]
+    fn deny_mode_yields_no_mounts() {
+        let caps = caps_with_mounts(serde_json::json!([{ "guest": "/ows", "host": "/tmp/x" }]));
+        assert!(resolve_mounts(&caps, PolicyMode::Deny).is_empty());
+    }
+
+    #[test]
+    fn bind_only_component_gets_just_the_bind_preopen() {
+        let caps = caps_with_mounts(serde_json::json!([{ "guest": "/ows", "host": "/tmp/x" }]));
+        let mounts = resolve_mounts(&caps, PolicyMode::Ask);
+        let pre = derive_preopens(&mounts);
+        assert_eq!(pre.len(), 1);
+        assert_eq!(pre[0].guest, "/ows");
+        assert_eq!(pre[0].host, std::path::PathBuf::from("/tmp/x"));
+    }
+
+    #[test]
+    fn no_mounts_declared_defaults_to_root() {
+        let caps = Capabilities::default();
+        let mounts = resolve_mounts(&caps, PolicyMode::Allowlist);
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].kind, MountType::Root);
+        assert_eq!(mounts[0].guest, "/");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_mount_preopens_the_filesystem_root() {
+        let caps = caps_with_mounts(serde_json::json!([{ "type": "root", "guest": "/" }]));
+        let pre = derive_preopens(&resolve_mounts(&caps, PolicyMode::Open));
+        assert_eq!(pre.len(), 1);
+        assert_eq!(pre[0].guest, "/");
+        assert_eq!(pre[0].host, std::path::PathBuf::from("/"));
+    }
+
+    #[test]
+    fn mount_root_sugar_becomes_a_root_mount() {
+        let mut caps = Capabilities::default();
+        let mut params = BTreeMap::new();
+        params.insert("mount-root".to_string(), serde_json::json!("/data"));
+        caps.0.insert(
+            "wasi:filesystem".into(),
+            CapabilityRequest {
+                params,
+                ..Default::default()
             },
-        ];
-        apply_mount_root(&mut preopens, "/host");
-        assert_eq!(preopens[0].guest, "/host/c");
-        assert_eq!(preopens[1].guest, "/host/d");
+        );
+        let mounts = resolve_mounts(&caps, PolicyMode::Allowlist);
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].kind, MountType::Root);
+        assert_eq!(mounts[0].guest, "/data");
+    }
+
+    #[test]
+    fn tilde_in_bind_host_is_expanded() {
+        let caps = caps_with_mounts(serde_json::json!([{ "guest": "/ows", "host": "~/.ows" }]));
+        let mounts = resolve_mounts(&caps, PolicyMode::Ask);
+        let host = mounts[0].host.clone().unwrap();
+        assert!(host.is_absolute());
+        assert!(!host.to_string_lossy().starts_with('~'));
+    }
+
+    #[test]
+    fn create_mount_dirs_makes_bind_targets() {
+        let tmp = std::env::temp_dir().join(format!("act-mount-test-{}", std::process::id()));
+        let target = tmp.join("nested");
+        let mounts = vec![ResolvedMount {
+            kind: MountType::Bind,
+            guest: "/d".into(),
+            host: Some(target.clone()),
+        }];
+        create_mount_dirs(&mounts).unwrap();
+        assert!(target.is_dir());
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

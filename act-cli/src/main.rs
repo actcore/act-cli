@@ -501,9 +501,9 @@ async fn prepare_component(
     let sockets = resolved.sockets;
     let max_memory = resolved.max_memory;
 
-    let mut preopens = runtime::fs_policy::derive_preopens(&fs);
-    let mount_root = info.std.capabilities.fs_mount_root().unwrap_or("/");
-    runtime::fs_policy::apply_mount_root(&mut preopens, mount_root);
+    let mounts = runtime::fs_policy::resolve_mounts(&info.std.capabilities, fs.mode);
+    runtime::fs_policy::create_mount_dirs(&mounts).context("creating mount directories")?;
+    let preopens = runtime::fs_policy::derive_preopens(&mounts);
 
     let metadata: runtime::Metadata = resolved
         .metadata
