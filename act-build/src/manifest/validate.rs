@@ -71,6 +71,8 @@ fn warn_mount_issues(
         if m.kind == act_types::MountType::Bind
             && let Some(h) = m.host.as_deref()
         {
+            // Best-effort substring check (raw, unexpanded act.toml strings), not a
+            // full glob-containment test — it only drives a non-fatal lint.
             let covered = constraints
                 .iter()
                 .any(|c| c.path.starts_with(h) || h.starts_with(trim_glob(&c.path)));

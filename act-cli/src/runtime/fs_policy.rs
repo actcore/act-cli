@@ -49,10 +49,11 @@ use crate::runtime::fs_matcher::{FsDecision, FsMatcher};
 
 /// A (guest path → host path) pair handed to wasmtime-wasi's `preopened_dir`.
 ///
-/// With the virtual-root policy model the guest always sees the whole host
-/// filesystem at `/` (Unix) or at `/c`, `/d`, ... (Windows drives); the
-/// `FsMatcher` gates per-op access. These records are the bridge between
-/// config and the wasmtime setup code.
+/// Preopens are derived from the component's resolved mounts (see
+/// `resolve_mounts`): a `bind` mount preopens one host dir at its guest path,
+/// a `root` mount preopens the platform root(s). A component that declares
+/// only `bind` mounts sees ONLY those dirs (sandbox); the `FsMatcher` still
+/// gates per-op access on the host paths within them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Preopen {
     pub guest: String,
@@ -189,6 +190,8 @@ fn root_preopens_under(guest: &str) -> Vec<Preopen> {
     for letter in b'A'..=b'Z' {
         let c = letter as char;
         let host = PathBuf::from(format!("{}:\\", c));
+        // metadata trips DriveNotReady / access errors for absent drives;
+        // treat any failure as "skip this letter".
         if std::fs::metadata(&host).is_ok() {
             let g = if base.is_empty() {
                 format!("/{}", c.to_ascii_lowercase())
