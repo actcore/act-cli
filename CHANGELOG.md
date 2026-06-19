@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-06-22
+
+This release reworks the capability/sandbox surface into one uniform grant model
+and switches to ask-by-default. It is a breaking release — the flag, metadata,
+and default-policy changes are called out below.
+
+### Added
+
+- **`act inspect` subcommands.** `act inspect component-manifest --format json`
+  dumps the raw `act:component` manifest (used by actpkg.dev for capability
+  extraction); `act inspect tools` dumps the raw `list-tools` output.
+- **TOON output format** (`--format toon`) for `info`, `store list`, and
+  `inspect` — a compact, LLM-friendly encoding (~40% fewer tokens than JSON).
+- **Declarative filesystem mounts.** Typed `bind`/`root` mounts declared by a
+  component are resolved into wasmtime preopens, converging the legacy
+  `mount-root` onto the same path-rewriting model. `act-build` validates declared
+  mounts and warns on drift/redundant sugar.
+
+### Changed
+
+- **Uniform capability grant model (breaking).** The per-class
+  `--fs-*/--http-*/--sockets-*` flags are replaced by generic, id-keyed grants:
+  `--grant '<json>'`, `--allow <id>`, `--deny <id>`. Grants key on a capability
+  id (`wasi:filesystem`, `wasi:http`, `wasi:sockets`, or a semantic class) with
+  provider-defined constraints, resolving exact > longest `*`-prefix > default
+  across the global/profile/CLI layers (default inherits across layers). HTTP
+  CIDRs and socket port/protocol scoping are preserved. Built on the uniform
+  `act-types` 0.11 capability model.
+- **Ask-by-default (breaking).** With no grant, a capability now resolves to
+  `ask` (prompt-on-access, remembered per session) instead of a hard deny.
+  Interactive runs prompt on the TTY; `--mcp` runs prompt the client over an MCP
+  elicitation channel; headless runs with no prompt channel degrade to deny.
+  Prompts are bounded by the component's declared ceiling — out-of-ceiling access
+  is denied without prompting.
+- **`--metadata` split (breaking).** Repeatable `-m key=value` passes string
+  metadata; `--metadata-json '<obj>'` passes a typed JSON object.
+
+### Removed
+
+- Per-class capability flags (`--fs-policy/--fs-allow/--fs-deny` and the `http`/
+  `sockets` equivalents) and the `ACT_FS_ALLOW`/`ACT_HTTP_ALLOW`/
+  `ACT_SOCKETS_ALLOW` env vars — superseded by the uniform grant flags and the
+  `[policy]` config section.
+
 ## [0.8.4] - 2026-06-17
 
 ### Changed
