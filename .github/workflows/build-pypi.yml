@@ -26,7 +26,7 @@ jobs:
           - { name: windows-x64, os: windows-latest, target: "", manylinux: "", zig: false }
           - { name: windows-arm64, os: windows-latest, target: aarch64-pc-windows-msvc, manylinux: "", zig: false }
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
@@ -58,7 +58,7 @@ jobs:
           - { name: act-cli, manifest: act-cli/Cargo.toml }
           - { name: act-build, manifest: act-build/Cargo.toml }
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: moonrepo/setup-rust@v1
         with:
           bins: wit-deps-cli

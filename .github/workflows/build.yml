@@ -34,7 +34,7 @@ jobs:
             ext: .exe
             dest: windows-aarch64.exe
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: moonrepo/setup-rust@v1
         with:
           channel: stable
@@ -78,7 +78,7 @@ jobs:
           - name: linux-riscv64-musl
             target: riscv64gc-unknown-linux-musl
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: moonrepo/setup-rust@v1
         with:
           channel: stable
