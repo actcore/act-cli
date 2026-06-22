@@ -1,12 +1,31 @@
 [package]
 name = "act-policy"
-version = "0.0.0"
+version.workspace = true
+edition = "2024"
+license = "MIT OR Apache-2.0"
 description = "Capability policy decision core (PDP) for the ACT toolchain"
-edition.workspace = true
-license.workspace = true
-repository.workspace = true
-homepage.workspace = true
-readme = "README.md"
+repository = "https://github.com/actcore/act-cli"
+homepage = "https://actcore.dev"
 keywords = ["act", "capability", "policy", "wasm", "security"]
 
 [dependencies]
+act-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+globset.workspace = true
+tracing.workspace = true
+shellexpand = "3"
+thiserror = "2"
+cidr = "0.3"
+tokio = { workspace = true, features = ["net"], optional = true }
+async-trait = { version = "0.1", optional = true }
+
+[features]
+default = ["host"]
+# Host-only async prompting helpers (ConsentPrompter, DecisionCache) and
+# tokio-backed DNS resolver used by net.rs.
+# Disabled for the wasm32 build, where the future's Send bound doesn't hold.
+host = ["tokio", "async-trait"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

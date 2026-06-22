@@ -39,9 +39,11 @@ dependencies = [
 name = "act-cli"
 version = "0.9.0"
 dependencies = [
+ "act-policy",
  "act-store",
  "act-types",
  "anyhow",
+ "async-trait",
  "axum",
  "base64",
  "bytes",
@@ -86,7 +88,19 @@ dependencies = [
 
 [[package]]
 name = "act-policy"
-version = "0.0.0"
+version = "0.9.0"
+dependencies = [
+ "act-types",
+ "async-trait",
+ "cidr",
+ "globset",
+ "serde",
+ "serde_json",
+ "shellexpand",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "act-store"

@@ -1,6 +1,16 @@
-//! `act-policy` — capability policy decision core (PDP) for the ACT toolchain.
+//! Capability policy decision core (PDP) for ACT hosts.
 //!
-//! Placeholder release (`0.0.0`). The capability decision engine — `resolve`
-//! (effective ceiling) and `classify` (per-operation `Allow`/`Deny`/`Ask`) —
-//! lands in a later version. See the design doc
-//! `docs/specs/2026-06-22-act-policy-crate-extraction-design.md`.
+//! Pure, synchronous, wasm-portable: `resolve` computes the effective
+//! ceiling once per instantiation; the matchers classify each operation.
+//! Host-only async consent helpers live behind the `host` feature.
+
+pub mod effective;
+pub mod fs_matcher;
+pub mod grant;
+pub mod net;
+
+#[cfg(feature = "host")]
+pub mod consent;
+
+/// Canonical filesystem-access decision type (re-exported from `fs_matcher`).
+pub use fs_matcher::Decision;

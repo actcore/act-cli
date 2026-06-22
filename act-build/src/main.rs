@@ -31,6 +31,16 @@ enum InitLang {
     Js,
 }
 
+/// Output format for commands that support machine-readable output.
+#[derive(Copy, Clone, Debug, Default, ValueEnum)]
+pub enum OutputFormat {
+    /// Human-readable text (default).
+    #[default]
+    Text,
+    /// A single JSON document on stdout (logs go to stderr).
+    Json,
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Scaffold a new component from a language template
@@ -89,7 +99,9 @@ enum Command {
     Push {
         /// Path to the .wasm component
         wasm: PathBuf,
-        /// OCI reference (e.g. `ghcr.io/actpkg/sqlite:0.1.0`)
+        /// OCI reference (e.g. `ghcr.io/actpkg/sqlite:0.1.0`).
+        /// Falls back to the `ACT_REFERENCE` env var.
+        #[arg(env = "ACT_REFERENCE")]
         reference: String,
         /// Additional tag to apply to the same manifest (repeatable)
         #[arg(long = "also-tag", value_name = "TAG")]
@@ -97,11 +109,13 @@ enum Command {
         /// Additional manifest annotation `key=value` (repeatable)
         #[arg(long = "annotation", value_name = "KEY=VALUE", value_parser = push::parse_annotation)]
         annotations: Vec<(String, String)>,
-        /// Set `org.opencontainers.image.source` annotation
-        #[arg(long)]
+        /// Set `org.opencontainers.image.source` annotation.
+        /// Falls back to the `ACT_SOURCE` env var.
+        #[arg(long, env = "ACT_SOURCE")]
         source: Option<String>,
-        /// Override `org.opencontainers.image.description` annotation
-        #[arg(long)]
+        /// Override `org.opencontainers.image.description` annotation.
+        /// Falls back to the `ACT_DESCRIPTION` env var.
+        #[arg(long, env = "ACT_DESCRIPTION")]
         description: Option<String>,
         /// If the tag already exists with the same layer digest, skip; if it
         /// exists with a different digest, error out.
@@ -115,6 +129,11 @@ enum Command {
         /// Compute everything but don't push or authenticate
         #[arg(long = "dry-run")]
         dry_run: bool,
+        /// Output format. `json` emits a minimal document on stdout
+        /// (`{reference, status, digest, tags}`) so the manifest digest can be
+        /// extracted with e.g. `... --format json | jq -r .digest`.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
     },
 }
 
@@ -124,6 +143,8 @@ fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "act_build=info".into()),
         )
+        // Logs to stderr so `--format json` keeps stdout pure JSON.
+        .with_writer(std::io::stderr)
         .init();
 
     let cli = Cli::parse();
@@ -163,6 +184,7 @@ fn main() -> Result<()> {
             skip_if_identical,
             skip_if_exists,
             dry_run,
+            format,
         } => push::run(
             &wasm,
             &reference,
@@ -174,7 +196,117 @@ fn main() -> Result<()> {
                 dry_run,
                 skip_if_identical,
                 skip_if_exists,
+                format,
             },
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    /// RAII guard that restores an env var on drop. Env mutation is
+    /// process-global, so the env-dependent assertions live in a single
+    /// sequential test to avoid races with cargo's threaded runner.
+    struct EnvGuard {
+        key: String,
+        prev: Option<String>,
+    }
+    impl EnvGuard {
+        fn set(key: &str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            // SAFETY: env is mutated only within this single-threaded test.
+            unsafe { std::env::set_var(key, value) };
+            Self {
+                key: key.into(),
+                prev,
+            }
+        }
+        fn unset(key: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            unsafe { std::env::remove_var(key) };
+            Self {
+                key: key.into(),
+                prev,
+            }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.prev {
+                    Some(v) => std::env::set_var(&self.key, v),
+                    None => std::env::remove_var(&self.key),
+                }
+            }
+        }
+    }
+
+    fn push_fields(cli: Cli) -> (String, Option<String>, Option<String>) {
+        match cli.command {
+            Command::Push {
+                reference,
+                source,
+                description,
+                ..
+            } => (reference, source, description),
+            _ => panic!("expected push command"),
+        }
+    }
+
+    #[test]
+    fn push_args_resolve_from_act_env_with_cli_override() {
+        // Phase 1: env supplies the missing positional reference + source +
+        // description.
+        {
+            let _r = EnvGuard::set("ACT_REFERENCE", "ghcr.io/actpkg/sqlite:0.1.0");
+            let _s = EnvGuard::set("ACT_SOURCE", "https://github.com/actpkg/sqlite");
+            let _d = EnvGuard::set("ACT_DESCRIPTION", "from env");
+
+            let cli = Cli::try_parse_from(["act-build", "push", "comp.wasm"])
+                .expect("reference should be satisfied by ACT_REFERENCE");
+            let (reference, source, description) = push_fields(cli);
+            assert_eq!(reference, "ghcr.io/actpkg/sqlite:0.1.0");
+            assert_eq!(source.as_deref(), Some("https://github.com/actpkg/sqlite"));
+            assert_eq!(description.as_deref(), Some("from env"));
+        }
+
+        // Phase 2: explicit CLI args take precedence over env.
+        {
+            let _r = EnvGuard::set("ACT_REFERENCE", "ghcr.io/env/ref:1");
+            let _s = EnvGuard::set("ACT_SOURCE", "https://github.com/env/src");
+            let _d = EnvGuard::set("ACT_DESCRIPTION", "env desc");
+
+            let cli = Cli::try_parse_from([
+                "act-build",
+                "push",
+                "comp.wasm",
+                "ghcr.io/cli/ref:2",
+                "--source",
+                "https://github.com/cli/src",
+                "--description",
+                "cli desc",
+            ])
+            .expect("parse with explicit args");
+            let (reference, source, description) = push_fields(cli);
+            assert_eq!(reference, "ghcr.io/cli/ref:2");
+            assert_eq!(source.as_deref(), Some("https://github.com/cli/src"));
+            assert_eq!(description.as_deref(), Some("cli desc"));
+        }
+
+        // Phase 3: with neither CLI nor env, the required reference still errors.
+        {
+            let _r = EnvGuard::unset("ACT_REFERENCE");
+            let _s = EnvGuard::unset("ACT_SOURCE");
+            let _d = EnvGuard::unset("ACT_DESCRIPTION");
+
+            let err = Cli::try_parse_from(["act-build", "push", "comp.wasm"]);
+            assert!(
+                err.is_err(),
+                "reference must still be required when neither CLI arg nor env is set"
+            );
+        }
     }
 }

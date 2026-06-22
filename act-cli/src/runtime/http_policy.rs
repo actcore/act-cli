@@ -27,7 +27,7 @@ use http::Uri;
 use wasmtime_wasi::TrappableError;
 
 use crate::config::{HttpConfig, PolicyMode};
-use crate::runtime::consent::{ConsentAsk, ConsentPrompter, ConsentRisk, DecisionCache};
+use crate::runtime::consent::{ConsentAsk, ConsentPrompter, DecisionCache};
 use crate::runtime::network::{self, Decision, NetworkCheck};
 
 type P2ErrorCode = wasmtime_wasi_http::p2::bindings::http::types::ErrorCode;
@@ -68,7 +68,6 @@ impl PolicyHttpHooks {
             cap_id: act_types::constants::CAP_HTTP.to_string(),
             key: format!("{host}:{port}"),
             summary: format!("HTTP {} {}", method.unwrap_or("?"), uri),
-            risk: ConsentRisk::Normal,
         }
     }
 

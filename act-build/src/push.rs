@@ -18,6 +18,31 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
+/// Outcome of a `push` run, rendered as the minimal `--format json` document.
+/// `digest` is the manifest digest — the headline value for
+/// `act-build push … --format json | jq -r .digest`.
+#[derive(Debug, Serialize)]
+pub struct PushReport {
+    /// The (repository-lowercased) OCI reference acted upon.
+    pub reference: String,
+    pub status: PushStatus,
+    /// Manifest digest (`sha256:…`).
+    pub digest: String,
+    /// Additional tags applied to the same manifest.
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PushStatus {
+    /// Manifest + blobs were pushed.
+    Pushed,
+    /// `--dry-run`: nothing was sent.
+    DryRun,
+    /// `--skip-if-exists` / `--skip-if-identical` matched; nothing was sent.
+    Skipped,
+}
+
 use crate::oci_config::{
     WASM_CONFIG_MEDIA_TYPE, WASM_LAYER_MEDIA_TYPE, build_config, sha256_digest,
 };
@@ -39,6 +64,9 @@ pub struct PushOptions {
     /// regardless of content. For non-reproducible builds where layer
     /// digests legitimately differ between runs.
     pub skip_if_exists: bool,
+    /// Output format. `Json` suppresses the human-readable lines and emits a
+    /// single [`PushReport`] document on stdout instead.
+    pub format: crate::OutputFormat,
 }
 
 /// Parse a `key=value` annotation argument.
@@ -109,14 +137,28 @@ fn lowercase_repository(reference: &str) -> String {
 }
 
 pub fn run(wasm_path: &Path, reference: &str, opts: PushOptions) -> Result<()> {
+    let format = opts.format;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .context("building tokio runtime")?;
-    runtime.block_on(run_async(wasm_path, reference, opts))
+    let report = runtime.block_on(run_async(wasm_path, reference, opts))?;
+    if matches!(format, crate::OutputFormat::Json) {
+        // The only thing on stdout in JSON mode (logs are on stderr), so it
+        // stays a single parseable document for `jq`.
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).context("serializing push report to JSON")?
+        );
+    }
+    Ok(())
 }
 
-async fn run_async(wasm_path: &Path, reference: &str, opts: PushOptions) -> Result<()> {
+async fn run_async(wasm_path: &Path, reference: &str, opts: PushOptions) -> Result<PushReport> {
+    // In JSON mode the human-readable lines are suppressed; `run` prints the
+    // returned `PushReport` as the sole stdout document instead.
+    let json = matches!(opts.format, crate::OutputFormat::Json);
+
     // 1. Read WASM bytes.
     let wasm = tokio::fs::read(wasm_path)
         .await
@@ -157,53 +199,12 @@ async fn run_async(wasm_path: &Path, reference: &str, opts: PushOptions) -> Resu
     let layer_digest = sha256_digest(&wasm);
     tracing::debug!(%layer_digest, "computed layer digest");
 
-    // 5a. Skip-if-exists: skip unconditionally when any tag is already published.
-    if opts.skip_if_exists {
-        match probe_existing_layer_digest(&oci_ref).await {
-            Ok(Some(_)) => {
-                println!("{reference} already published, skipping");
-                return Ok(());
-            }
-            Ok(None) | Err(_) => {
-                tracing::debug!("remote tag not found, proceeding with push");
-            }
-        }
-    }
-
-    // 5b. Skip-if-identical: skip when remote layer digest matches local;
-    //     error when remote exists with a different digest.
-    if opts.skip_if_identical {
-        match probe_existing_layer_digest(&oci_ref).await {
-            Ok(Some(remote)) if remote == layer_digest => {
-                println!(
-                    "{} already published with identical content (digest {}), skipping",
-                    reference, layer_digest
-                );
-                return Ok(());
-            }
-            Ok(Some(remote)) => {
-                bail!(
-                    "{} is already published with a different layer digest.\n\
-                     Bump the version — a metadata-only change still requires a version bump.\n  \
-                     local:  {}\n  remote: {}",
-                    reference,
-                    layer_digest,
-                    remote
-                );
-            }
-            Ok(None) => {
-                tracing::debug!("remote tag not found, proceeding with push");
-            }
-            Err(e) => {
-                tracing::debug!(error = %e, "probe failed (likely 404), proceeding with push");
-            }
-        }
-    }
-
-    // 6. Build annotations.
+    // 5. Build annotations + manifest and digest the canonical bytes up front,
+    //    before the skip probes, so `manifest_digest` is reported on every
+    //    outcome (pushed, skipped, dry-run) and `--format json` always carries a
+    //    digest.
     let annotations = build_annotations(&component_info, &opts);
 
-    // 7. Construct OCI ImageLayer + Config + manifest.
     let layer = ImageLayer::new(wasm.clone(), WASM_LAYER_MEDIA_TYPE.to_string(), None);
     let oci_config = Config::new(
         config_json.clone(),
@@ -231,38 +232,102 @@ async fn run_async(wasm_path: &Path, reference: &str, opts: PushOptions) -> Resu
     let manifest_bytes = canonical_manifest_bytes(&manifest)?;
     let manifest_digest = sha256_digest(&manifest_bytes);
 
-    if opts.dry_run {
-        println!("DRY RUN — would push to {reference}");
-        println!(
-            "  manifest: {manifest_digest} ({} bytes)",
-            manifest_bytes.len()
-        );
-        println!(
-            "  layer:    {} ({} bytes, application/wasm)",
-            layer_digest,
-            wasm.len()
-        );
-        println!(
-            "  config:   {} ({} bytes, {})",
-            config_digest,
-            config_json.len(),
-            WASM_CONFIG_MEDIA_TYPE
-        );
-        if !annotations.is_empty() {
-            println!("  annotations:");
-            for (k, v) in &annotations {
-                println!("    {k} = {v}");
+    // 6a. Skip-if-exists: skip unconditionally when any tag is already published.
+    if opts.skip_if_exists {
+        match probe_existing_layer_digest(&oci_ref).await {
+            Ok(Some(_)) => {
+                if !json {
+                    println!("{reference} already published, skipping");
+                }
+                return Ok(PushReport {
+                    reference: normalized,
+                    status: PushStatus::Skipped,
+                    digest: manifest_digest,
+                    tags: opts.also_tags,
+                });
+            }
+            Ok(None) | Err(_) => {
+                tracing::debug!("remote tag not found, proceeding with push");
             }
         }
-        for tag in &opts.also_tags {
-            println!("  + tag: {tag}");
-        }
-        // oras-compatible trailing digest line for `grep "^Digest:"`.
-        println!("Digest: {manifest_digest}");
-        return Ok(());
     }
 
-    // 8. Authenticate.
+    // 6b. Skip-if-identical: skip when remote layer digest matches local;
+    //     error when remote exists with a different digest.
+    if opts.skip_if_identical {
+        match probe_existing_layer_digest(&oci_ref).await {
+            Ok(Some(remote)) if remote == layer_digest => {
+                if !json {
+                    println!(
+                        "{} already published with identical content (digest {}), skipping",
+                        reference, layer_digest
+                    );
+                }
+                return Ok(PushReport {
+                    reference: normalized,
+                    status: PushStatus::Skipped,
+                    digest: manifest_digest,
+                    tags: opts.also_tags,
+                });
+            }
+            Ok(Some(remote)) => {
+                bail!(
+                    "{} is already published with a different layer digest.\n\
+                     Bump the version — a metadata-only change still requires a version bump.\n  \
+                     local:  {}\n  remote: {}",
+                    reference,
+                    layer_digest,
+                    remote
+                );
+            }
+            Ok(None) => {
+                tracing::debug!("remote tag not found, proceeding with push");
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "probe failed (likely 404), proceeding with push");
+            }
+        }
+    }
+
+    if opts.dry_run {
+        if !json {
+            println!("DRY RUN — would push to {reference}");
+            println!(
+                "  manifest: {manifest_digest} ({} bytes)",
+                manifest_bytes.len()
+            );
+            println!(
+                "  layer:    {} ({} bytes, application/wasm)",
+                layer_digest,
+                wasm.len()
+            );
+            println!(
+                "  config:   {} ({} bytes, {})",
+                config_digest,
+                config_json.len(),
+                WASM_CONFIG_MEDIA_TYPE
+            );
+            if !annotations.is_empty() {
+                println!("  annotations:");
+                for (k, v) in &annotations {
+                    println!("    {k} = {v}");
+                }
+            }
+            for tag in &opts.also_tags {
+                println!("  + tag: {tag}");
+            }
+            // oras-compatible trailing digest line for `grep "^Digest:"`.
+            println!("Digest: {manifest_digest}");
+        }
+        return Ok(PushReport {
+            reference: normalized,
+            status: PushStatus::DryRun,
+            digest: manifest_digest,
+            tags: opts.also_tags,
+        });
+    }
+
+    // 7. Authenticate.
     let registry = oci_ref.resolve_registry();
     let auth = crate::oci_auth::resolve(registry).context("resolving registry auth")?;
     let client = oci_client::Client::new(ClientConfig {
@@ -307,11 +372,13 @@ async fn run_async(wasm_path: &Path, reference: &str, opts: PushOptions) -> Resu
         );
     }
 
-    println!("Pushed {reference}");
-    println!("  manifest_url: {manifest_url}");
-    println!("  manifest:     {manifest_digest}");
-    println!("  config:       {config_digest}");
-    println!("  layer:        {layer_digest}");
+    if !json {
+        println!("Pushed {reference}");
+        println!("  manifest_url: {manifest_url}");
+        println!("  manifest:     {manifest_digest}");
+        println!("  config:       {config_digest}");
+        println!("  layer:        {layer_digest}");
+    }
 
     // 9. Apply additional tags by re-pushing the same canonical bytes under each tag.
     for tag in &opts.also_tags {
@@ -320,12 +387,21 @@ async fn run_async(wasm_path: &Path, reference: &str, opts: PushOptions) -> Resu
             .push_manifest_raw(&tag_ref, manifest_bytes.clone(), content_type.clone())
             .await
             .with_context(|| format!("tagging {tag_ref}"))?;
-        println!("Tagged {tag_ref}");
+        if !json {
+            println!("Tagged {tag_ref}");
+        }
     }
 
-    // oras-compatible trailing line for `grep "^Digest:"`.
-    println!("Digest: {manifest_digest}");
-    Ok(())
+    if !json {
+        // oras-compatible trailing line for `grep "^Digest:"`.
+        println!("Digest: {manifest_digest}");
+    }
+    Ok(PushReport {
+        reference: normalized,
+        status: PushStatus::Pushed,
+        digest: manifest_digest,
+        tags: opts.also_tags,
+    })
 }
 
 /// Compose annotations: defaults from `act:component`, overrides from CLI.
@@ -386,6 +462,42 @@ async fn probe_existing_layer_digest(oci_ref: &Reference) -> Result<Option<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn push_report_serializes_minimal_flat_json() {
+        let report = PushReport {
+            reference: "ghcr.io/actpkg/sqlite:0.1.0".into(),
+            status: PushStatus::Pushed,
+            digest: "sha256:abc123".into(),
+            tags: vec!["latest".into()],
+        };
+        let v = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "reference": "ghcr.io/actpkg/sqlite:0.1.0",
+                "status": "pushed",
+                "digest": "sha256:abc123",
+                "tags": ["latest"],
+            })
+        );
+    }
+
+    #[test]
+    fn push_status_renders_kebab_case() {
+        assert_eq!(
+            serde_json::to_value(PushStatus::Pushed).unwrap(),
+            serde_json::json!("pushed")
+        );
+        assert_eq!(
+            serde_json::to_value(PushStatus::DryRun).unwrap(),
+            serde_json::json!("dry-run")
+        );
+        assert_eq!(
+            serde_json::to_value(PushStatus::Skipped).unwrap(),
+            serde_json::json!("skipped")
+        );
+    }
 
     #[test]
     fn parse_annotation_ok() {

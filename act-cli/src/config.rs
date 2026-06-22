@@ -11,223 +11,13 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-// ── Public resolved types (consumed by runtime.rs) ──
-
-/// Policy mode, shared by filesystem and HTTP.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PolicyMode {
-    #[default]
-    Deny,
-    Allowlist,
-    Open,
-    /// Prompt the operator on first access to each key, remember the decision
-    /// for the session, and degrade to deny when no prompt channel exists
-    /// (headless / --mcp / non-TTY). A per-op gate layered on top of the
-    /// ceiling intersection.
-    Ask,
-}
-
-impl PolicyMode {
-    pub fn parse(s: &str) -> Result<Self> {
-        match s {
-            "deny" => Ok(Self::Deny),
-            "allowlist" => Ok(Self::Allowlist),
-            "open" => Ok(Self::Open),
-            "ask" => Ok(Self::Ask),
-            other => anyhow::bail!(
-                "unknown policy mode '{}' (expected deny / allowlist / open / ask)",
-                other
-            ),
-        }
-    }
-}
-
-/// Resolved filesystem policy for a component invocation.
-#[derive(Debug, Clone, Default)]
-pub struct FsConfig {
-    pub mode: PolicyMode,
-    pub allow: Vec<String>,
-    // Consumed by the per-op matcher in Layer 1 Phase C (custom WASI impl).
-    // Kept in the public struct so config + CLI parsing is end-to-end now.
-    #[allow(dead_code)]
-    pub deny: Vec<String>,
-}
-
-impl FsConfig {
-    #[allow(dead_code)]
-    pub fn deny() -> Self {
-        Self {
-            mode: PolicyMode::Deny,
-            ..Default::default()
-        }
-    }
-}
-
-/// Resolved HTTP policy for a component invocation.
-///
-/// `allow` / `deny` rules are consumed by the per-op matcher in Layer 1
-/// Phase C (custom `WasiHttpHooks::send_request`). Kept public so config +
-/// CLI parsing is end-to-end now.
-#[derive(Debug, Clone, Default)]
-pub struct HttpConfig {
-    pub mode: PolicyMode,
-    #[allow(dead_code)]
-    pub allow: Vec<HttpRule>,
-    #[allow(dead_code)]
-    pub deny: Vec<HttpRule>,
-}
-
-/// One allow-or-deny entry in an HTTP policy.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
-pub struct HttpRule {
-    /// Host / port / CIDR fields. Network-level (no HTTP awareness).
-    #[serde(flatten)]
-    pub net: crate::runtime::network::NetworkRule,
-    /// Required URI scheme (`"http"` / `"https"`), if set.
-    #[serde(default)]
-    pub scheme: Option<String>,
-    /// Allowed HTTP methods (case-insensitive), if set.
-    #[serde(default)]
-    pub methods: Option<Vec<String>>,
-}
-
-/// Resolved sockets policy for a component invocation.
-#[derive(Debug, Clone, Default)]
-#[allow(dead_code)] // consumed by sockets_policy + Task 5 wiring
-pub struct SocketsConfig {
-    pub mode: PolicyMode,
-    pub allow: Vec<SocketsRule>,
-    pub deny: Vec<SocketsRule>,
-}
-
-/// One allow-or-deny entry in a sockets policy.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
-pub struct SocketsRule {
-    /// Host / port / CIDR fields. Reuses the network-rule shape.
-    #[serde(flatten)]
-    pub net: crate::runtime::network::NetworkRule,
-    /// Restrict to specific protocols. None = any (default for user
-    /// rules); declarations always carry an explicit list.
-    #[serde(default)]
-    pub protocols: Option<Vec<act_types::SocketProtocol>>,
-}
-
-// ── Uniform grant types ──
-
-/// A grant for one capability id or pattern. Constraints are provider-defined
-/// JSON (the `act:core` constraint shape). Modes: deny/allowlist/open.
-#[derive(Debug, Clone, Default)]
-pub struct CapabilityGrant {
-    pub mode: PolicyMode,
-    pub allow: Vec<serde_json::Value>,
-    pub deny: Vec<serde_json::Value>,
-}
-
-/// Resolved host grant policy: a global default + per-id/pattern entries.
-#[derive(Debug, Clone)]
-pub struct GrantPolicy {
-    pub default: PolicyMode,
-    pub entries: BTreeMap<String, CapabilityGrant>,
-}
-
-impl Default for GrantPolicy {
-    fn default() -> Self {
-        Self {
-            // Ask-by-default: an undeclared `[policy] default` resolves to
-            // `ask`, so interactive runs prompt-on-access and headless runs
-            // degrade to deny. The `PolicyMode` enum `Default` stays `Deny`
-            // (used for empty single-layer configs elsewhere).
-            default: PolicyMode::Ask,
-            entries: BTreeMap::new(),
-        }
-    }
-}
-
-impl GrantPolicy {
-    /// Resolve the effective grant for a concrete capability id.
-    /// Priority: exact entry > longest matching `*`-prefix entry > default.
-    pub fn resolve(&self, id: &str) -> CapabilityGrant {
-        if let Some(g) = self.entries.get(id) {
-            return g.clone();
-        }
-        let mut best: Option<(&str, &CapabilityGrant)> = None;
-        for (k, g) in &self.entries {
-            if let Some(prefix) = k.strip_suffix('*')
-                && id.starts_with(prefix)
-                && best.is_none_or(|(bk, _)| prefix.len() > bk.len() - 1)
-            {
-                best = Some((k, g));
-            }
-        }
-        if let Some((_, g)) = best {
-            return g.clone();
-        }
-        CapabilityGrant {
-            mode: self.default,
-            allow: vec![],
-            deny: vec![],
-        }
-    }
-}
-
-/// Map the `wasi:filesystem` grant to the enforcement-facing `FsConfig`.
-pub fn to_fs_config(gp: &GrantPolicy) -> anyhow::Result<FsConfig> {
-    let g = gp.resolve(act_types::constants::CAP_FILESYSTEM);
-    let allow = parse_fs_constraints(&g.allow)?;
-    let deny = parse_fs_constraints(&g.deny)?;
-    Ok(FsConfig {
-        mode: g.mode,
-        allow,
-        deny,
-    })
-}
-
-fn parse_fs_constraints(cs: &[serde_json::Value]) -> anyhow::Result<Vec<String>> {
-    cs.iter()
-        .map(|c| {
-            let a: act_types::FilesystemAllow =
-                serde_json::from_value(c.clone()).context("invalid wasi:filesystem constraint")?;
-            Ok(a.path)
-        })
-        .collect()
-}
-
-/// Map the `wasi:http` grant to `HttpConfig` (constraints → HttpRule).
-pub fn to_http_config(gp: &GrantPolicy) -> anyhow::Result<HttpConfig> {
-    let g = gp.resolve(act_types::constants::CAP_HTTP);
-    Ok(HttpConfig {
-        mode: g.mode,
-        allow: parse_http_constraints(&g.allow)?,
-        deny: parse_http_constraints(&g.deny)?,
-    })
-}
-
-fn parse_http_constraints(cs: &[serde_json::Value]) -> anyhow::Result<Vec<HttpRule>> {
-    cs.iter()
-        .map(|c| {
-            serde_json::from_value::<HttpRule>(c.clone()).context("invalid wasi:http constraint")
-        })
-        .collect()
-}
-
-/// Map the `wasi:sockets` grant to `SocketsConfig` (constraints → SocketsRule).
-pub fn to_sockets_config(gp: &GrantPolicy) -> anyhow::Result<SocketsConfig> {
-    let g = gp.resolve(act_types::constants::CAP_SOCKETS);
-    Ok(SocketsConfig {
-        mode: g.mode,
-        allow: parse_sockets_constraints(&g.allow)?,
-        deny: parse_sockets_constraints(&g.deny)?,
-    })
-}
-
-fn parse_sockets_constraints(cs: &[serde_json::Value]) -> anyhow::Result<Vec<SocketsRule>> {
-    cs.iter()
-        .map(|c| {
-            serde_json::from_value::<SocketsRule>(c.clone())
-                .context("invalid wasi:sockets constraint")
-        })
-        .collect()
-}
+// ── Re-export policy types from act-policy ──
+#[cfg(test)]
+pub use act_policy::grant::FsAllow;
+pub use act_policy::grant::{
+    CapabilityGrant, FsConfig, GrantPolicy, HttpConfig, HttpRule, PolicyMode, SocketsConfig,
+    SocketsRule, to_fs_config, to_http_config, to_sockets_config,
+};
 
 // ── TOML deserialization types ──
 
@@ -561,7 +351,13 @@ default = "deny"
         };
         let fs = to_fs_config(&gp).unwrap();
         assert_eq!(fs.mode, PolicyMode::Allowlist);
-        assert_eq!(fs.allow, vec!["/data/**".to_string()]);
+        assert_eq!(
+            fs.allow,
+            vec![FsAllow {
+                glob: "/data/**".into(),
+                mode: act_types::FsMode::Rw
+            }]
+        );
     }
 
     #[test]
@@ -622,12 +418,17 @@ allow = [{ path = "/tmp/**", mode = "rw" }]
         assert_eq!(to_http_config(&gp).unwrap().mode, PolicyMode::Open);
         let fs = to_fs_config(&gp).unwrap();
         assert_eq!(fs.mode, PolicyMode::Allowlist);
-        assert_eq!(fs.allow, vec!["/tmp/**".to_string()]);
+        assert_eq!(
+            fs.allow,
+            vec![FsAllow {
+                glob: "/tmp/**".into(),
+                mode: act_types::FsMode::Rw
+            }]
+        );
     }
 
     #[test]
     fn toml_policy_structured() {
-        use serde_json::json;
         let toml_input = r#"
 [policy]
 default = "deny"
@@ -645,7 +446,13 @@ allow = [{ host = "api.openai.com", scheme = "https" }]
         let gp = cfg.policy.as_ref().unwrap().to_grant_policy().unwrap();
         let fs = to_fs_config(&gp).unwrap();
         assert_eq!(fs.mode, PolicyMode::Allowlist);
-        assert_eq!(fs.allow, vec!["/tmp/**"]);
+        assert_eq!(
+            fs.allow,
+            vec![FsAllow {
+                glob: "/tmp/**".into(),
+                mode: act_types::FsMode::Rw
+            }]
+        );
         assert_eq!(fs.deny, vec!["**/.ssh/**"]);
         let http = to_http_config(&gp).unwrap();
         assert_eq!(http.mode, PolicyMode::Allowlist);
@@ -677,7 +484,13 @@ default = "deny"
         let gp = build_grant_policy(&cfg, None, &cli).unwrap();
         let fs = to_fs_config(&gp).unwrap();
         assert_eq!(fs.mode, PolicyMode::Allowlist);
-        assert_eq!(fs.allow, vec!["/tmp/work"]);
+        assert_eq!(
+            fs.allow,
+            vec![FsAllow {
+                glob: "/tmp/work".into(),
+                mode: act_types::FsMode::Rw
+            }]
+        );
     }
 
     #[test]

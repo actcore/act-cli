@@ -13,7 +13,7 @@ use wasmtime_wasi::WasiCtxBuilder;
 use wasmtime_wasi::sockets::SocketAddrUse;
 
 use crate::config::{PolicyMode, SocketsConfig, SocketsRule};
-use crate::runtime::consent::{ConsentAsk, ConsentPrompter, ConsentRisk, DecisionCache};
+use crate::runtime::consent::{ConsentAsk, ConsentPrompter, DecisionCache};
 use crate::runtime::network::{Decision, cidr_contains};
 use act_types::SocketProtocol;
 
@@ -151,7 +151,6 @@ impl SocketsPolicy {
                                 cap_id: act_types::constants::CAP_SOCKETS.to_string(),
                                 key: addr.to_string(),
                                 summary: format!("socket {proto:?} {addr}"),
-                                risk: ConsentRisk::Normal,
                             };
                             tokio::spawn(async move { cache.decide_cached(&*prompter, ask).await })
                                 .await

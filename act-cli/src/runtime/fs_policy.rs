@@ -42,8 +42,8 @@ use wasmtime_wasi::p2::{DynInputStream, DynOutputStream, FsError, FsResult};
 use act_types::{Capabilities, MountType};
 
 use crate::config::PolicyMode;
-use crate::runtime::consent::{ConsentAsk, ConsentPrompter, ConsentRisk, DecisionCache};
-use crate::runtime::fs_matcher::{FsDecision, FsMatcher};
+use crate::runtime::consent::{ConsentAsk, ConsentPrompter, DecisionCache};
+use crate::runtime::fs_matcher::{Decision, FsAccess, FsMatcher};
 
 // ── Mounts → preopens ─────────────────────────────────────────────────────
 
@@ -233,7 +233,7 @@ pub struct PolicyFilesystemCtxView<'a> {
     /// guests can't acquire a `Descriptor::Dir` handle at all.
     pub mode: PolicyMode,
     /// Interactive-consent prompter, consulted when the matcher returns
-    /// `FsDecision::Ask`. Shared across the store.
+    /// `Decision::Ask`. Shared across the store.
     pub prompter: Arc<dyn ConsentPrompter>,
     /// Per-session memory of ask decisions, keyed by `(cap-id, path)`.
     pub cache: Arc<DecisionCache>,
@@ -276,7 +276,6 @@ async fn resolve_ask(
                 cap_id: act_types::constants::CAP_FILESYSTEM.to_string(),
                 key: path.clone(),
                 summary: format!("filesystem access: {path}"),
-                risk: ConsentRisk::Normal,
             },
         )
         .await;
@@ -317,8 +316,9 @@ impl<'a> PolicyFilesystemCtxView<'a> {
         &self,
         parent_fd: &Resource<types::Descriptor>,
         rel: &str,
+        access: FsAccess,
     ) -> impl Future<Output = FsResult<PathBuf>> + Send + 'static {
-        let decision = self.check_path_sync(parent_fd, rel);
+        let decision = self.check_path_sync(parent_fd, rel, access);
         async move {
             match decision? {
                 PathDecision::Allow(canonical) => Ok(canonical),
@@ -337,6 +337,7 @@ impl<'a> PolicyFilesystemCtxView<'a> {
         &self,
         parent_fd: &Resource<types::Descriptor>,
         rel: &str,
+        access: FsAccess,
     ) -> FsResult<PathDecision> {
         let Some(parent) = self.parent_path(parent_fd) else {
             // Parent fd has no tracked path — belongs to an unknown preopen
@@ -345,13 +346,13 @@ impl<'a> PolicyFilesystemCtxView<'a> {
             return Err(ErrorCode::NotPermitted.into());
         };
         let canonical = parent.join(rel).clean();
-        match self.matcher.decide(&canonical) {
-            FsDecision::Allow => Ok(PathDecision::Allow(canonical)),
-            FsDecision::Deny => {
+        match self.matcher.decide(&canonical, access) {
+            Decision::Allow => Ok(PathDecision::Allow(canonical)),
+            Decision::Deny => {
                 tracing::warn!(path = %canonical.display(), "fs policy: blocked");
                 Err(ErrorCode::NotPermitted.into())
             }
-            FsDecision::Ask => Ok(PathDecision::Ask {
+            Decision::Ask => Ok(PathDecision::Ask {
                 canonical,
                 cache: self.cache.clone(),
                 prompter: self.prompter.clone(),
@@ -491,7 +492,7 @@ impl HostDescriptor for PolicyFilesystemCtxView<'_> {
         fd: Resource<types::Descriptor>,
         path: String,
     ) -> FsResult<()> {
-        let _checked = self.check_path(&fd, &path).await?;
+        let _checked = self.check_path(&fd, &path, FsAccess::Write).await?;
         self.inner().create_directory_at(fd, path).await
     }
 
@@ -505,7 +506,7 @@ impl HostDescriptor for PolicyFilesystemCtxView<'_> {
         path_flags: types::PathFlags,
         path: String,
     ) -> FsResult<types::DescriptorStat> {
-        let _checked = self.check_path(&fd, &path).await?;
+        let _checked = self.check_path(&fd, &path, FsAccess::Read).await?;
         self.inner().stat_at(fd, path_flags, path).await
     }
 
@@ -517,7 +518,7 @@ impl HostDescriptor for PolicyFilesystemCtxView<'_> {
         atim: types::NewTimestamp,
         mtim: types::NewTimestamp,
     ) -> FsResult<()> {
-        let _checked = self.check_path(&fd, &path).await?;
+        let _checked = self.check_path(&fd, &path, FsAccess::Write).await?;
         self.inner()
             .set_times_at(fd, path_flags, path, atim, mtim)
             .await
@@ -531,8 +532,10 @@ impl HostDescriptor for PolicyFilesystemCtxView<'_> {
         new_descriptor: Resource<types::Descriptor>,
         new_path: String,
     ) -> FsResult<()> {
-        let _old = self.check_path(&fd, &old_path).await?;
-        let _new = self.check_path(&new_descriptor, &new_path).await?;
+        let _old = self.check_path(&fd, &old_path, FsAccess::Read).await?;
+        let _new = self
+            .check_path(&new_descriptor, &new_path, FsAccess::Write)
+            .await?;
         self.inner()
             .link_at(fd, old_path_flags, old_path, new_descriptor, new_path)
             .await
@@ -546,7 +549,17 @@ impl HostDescriptor for PolicyFilesystemCtxView<'_> {
         oflags: types::OpenFlags,
         flags: types::DescriptorFlags,
     ) -> FsResult<Resource<types::Descriptor>> {
-        let canonical = self.check_path(&fd, &path).await?;
+        let access = if flags.contains(types::DescriptorFlags::WRITE)
+            || flags.contains(types::DescriptorFlags::MUTATE_DIRECTORY)
+            || oflags.contains(types::OpenFlags::CREATE)
+            || oflags.contains(types::OpenFlags::TRUNCATE)
+            || oflags.contains(types::OpenFlags::EXCLUSIVE)
+        {
+            FsAccess::Write
+        } else {
+            FsAccess::Read
+        };
+        let canonical = self.check_path(&fd, &path, access).await?;
         let new_fd = self
             .inner()
             .open_at(fd, path_flags, path, oflags, flags)
@@ -565,7 +578,7 @@ impl HostDescriptor for PolicyFilesystemCtxView<'_> {
         fd: Resource<types::Descriptor>,
         path: String,
     ) -> FsResult<String> {
-        let _checked = self.check_path(&fd, &path).await?;
+        let _checked = self.check_path(&fd, &path, FsAccess::Read).await?;
         self.inner().readlink_at(fd, path).await
     }
 
@@ -574,7 +587,7 @@ impl HostDescriptor for PolicyFilesystemCtxView<'_> {
         fd: Resource<types::Descriptor>,
         path: String,
     ) -> FsResult<()> {
-        let _checked = self.check_path(&fd, &path).await?;
+        let _checked = self.check_path(&fd, &path, FsAccess::Write).await?;
         self.inner().remove_directory_at(fd, path).await
     }
 
@@ -585,8 +598,8 @@ impl HostDescriptor for PolicyFilesystemCtxView<'_> {
         new_fd: Resource<types::Descriptor>,
         new_path: String,
     ) -> FsResult<()> {
-        let _old = self.check_path(&fd, &old_path).await?;
-        let _new = self.check_path(&new_fd, &new_path).await?;
+        let _old = self.check_path(&fd, &old_path, FsAccess::Write).await?;
+        let _new = self.check_path(&new_fd, &new_path, FsAccess::Write).await?;
         self.inner().rename_at(fd, old_path, new_fd, new_path).await
     }
 
@@ -596,7 +609,7 @@ impl HostDescriptor for PolicyFilesystemCtxView<'_> {
         src_path: String,
         dest_path: String,
     ) -> FsResult<()> {
-        let _checked = self.check_path(&fd, &dest_path).await?;
+        let _checked = self.check_path(&fd, &dest_path, FsAccess::Write).await?;
         self.inner().symlink_at(fd, src_path, dest_path).await
     }
 
@@ -605,7 +618,7 @@ impl HostDescriptor for PolicyFilesystemCtxView<'_> {
         fd: Resource<types::Descriptor>,
         path: String,
     ) -> FsResult<()> {
-        let _checked = self.check_path(&fd, &path).await?;
+        let _checked = self.check_path(&fd, &path, FsAccess::Write).await?;
         self.inner().unlink_file_at(fd, path).await
     }
 
@@ -653,7 +666,7 @@ impl HostDescriptor for PolicyFilesystemCtxView<'_> {
         path_flags: types::PathFlags,
         path: String,
     ) -> FsResult<types::MetadataHashValue> {
-        let _checked = self.check_path(&fd, &path).await?;
+        let _checked = self.check_path(&fd, &path, FsAccess::Read).await?;
         self.inner().metadata_hash_at(fd, path_flags, path).await
     }
 }
@@ -854,5 +867,34 @@ mod mount_tests {
         create_mount_dirs(&mounts).unwrap();
         assert!(target.is_dir());
         std::fs::remove_dir_all(&tmp).ok();
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use crate::runtime::fs_matcher::{Decision, FsAccess, FsMatcher};
+    use act_policy::grant::{FsAllow, FsConfig, PolicyMode};
+    use act_types::FsMode;
+    use std::path::Path;
+
+    #[test]
+    fn ro_matcher_blocks_write_allows_read() {
+        let cfg = FsConfig {
+            mode: PolicyMode::Allowlist,
+            allow: vec![FsAllow {
+                glob: "/data/**".into(),
+                mode: FsMode::Ro,
+            }],
+            deny: vec![],
+        };
+        let matcher = FsMatcher::compile(&cfg).unwrap();
+        assert_eq!(
+            matcher.decide(Path::new("/data/x.db"), FsAccess::Read),
+            Decision::Allow
+        );
+        assert_eq!(
+            matcher.decide(Path::new("/data/x.db"), FsAccess::Write),
+            Decision::Deny
+        );
     }
 }
