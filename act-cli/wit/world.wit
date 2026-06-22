@@ -2,4 +2,8 @@ package host:impl;
 
 world act-world {
   export act:tools/tool-provider@0.1.0;
+  // Opt-in: only stateful components export session-provider. The host
+  // binds it via a per-interface `GuestIndices` lookup that is allowed to
+  // fail (returns `None`), so components without it instantiate fine.
+  export act:sessions/session-provider@0.1.0;
 }

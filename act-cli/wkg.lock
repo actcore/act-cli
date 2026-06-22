@@ -3,6 +3,15 @@
 version = 1
 
 [[packages]]
+name = "act:sessions"
+registry = "actcore.dev"
+
+[[packages.versions]]
+requirement = "=0.1.0"
+version = "0.1.0"
+digest = "sha256:a0dc7330a7e0f669400d298b816ec880138eb5e1c1b2ef8744fcea336bae20d6"
+
+[[packages]]
 name = "act:tools"
 registry = "actcore.dev"
 

@@ -5,9 +5,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::sync::{mpsc, oneshot};
 use wasmtime::component::{Component, Linker, ResourceTable, Source, StreamConsumer, StreamResult};
-use wasmtime::{
-    AsContextMut, Config, Engine, Store, StoreContextMut, StoreLimits, StoreLimitsBuilder,
-};
+use wasmtime::{Config, Engine, Store, StoreContextMut, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use wasmtime_wasi_http::WasiHttpCtx;
 use wasmtime_wasi_http::p3::WasiHttpCtxView;
@@ -360,9 +358,20 @@ pub enum SseEvent {
 /// Handle to send requests to the component actor.
 pub type ComponentHandle = mpsc::Sender<ComponentRequest>;
 
-/// Instantiate the component. Returns the ActWorld, an optional
+/// The generated tool-provider guest — the always-present surface of every
+/// ACT component.
+pub use exports::act::tools::tool_provider::Guest as ToolProvider;
+
+/// Instantiate the component. Returns the tool-provider guest, an optional
 /// SessionProvider (present iff the component exports
 /// `act:sessions/session-provider`), and the store.
+///
+/// `act-world` declares both `tool-provider` and `session-provider` as
+/// exports, but the latter is opt-in. Rather than `ActWorldIndices::new`
+/// (which requires *every* declared export and would reject stateless
+/// components), each interface is bound through its own per-interface
+/// `GuestIndices`: tool-provider is mandatory, session-provider is looked up
+/// with `.ok()` so its absence yields `None`.
 ///
 /// Component info is read from custom sections (no instantiation needed
 /// for that).
@@ -380,42 +389,57 @@ pub async fn instantiate_component(
     prompter: std::sync::Arc<dyn crate::runtime::consent::ConsentPrompter>,
     cache: std::sync::Arc<crate::runtime::consent::DecisionCache>,
 ) -> Result<(
-    ActWorld,
+    ToolProvider,
     Option<sessions::SessionProvider>,
     Store<HostState>,
 )> {
+    use exports::act::sessions::session_provider::GuestIndices as SessionGuestIndices;
+    use exports::act::tools::tool_provider::GuestIndices as ToolGuestIndices;
+
     let mut store = create_store(
         engine, preopens, http, fs, sockets, info, max_memory, prompter, cache,
     )
     .await?;
 
-    // Manual instantiation flow (replicates ActWorld::instantiate_async)
-    // so we keep access to the raw `Instance` for session-provider lookup.
     let pre = linker
         .instantiate_pre(component)
         .map_err(|e| anyhow::anyhow!("failed to pre-instantiate component: {e}"))?;
-    let indices =
-        ActWorldIndices::new(&pre).map_err(|e| anyhow::anyhow!("ActWorld indices: {e}"))?;
+    // Resolve export indices before instantiation. tool-provider is required;
+    // session-provider is optional — a missing export makes `new` error, which
+    // we map to `None` (the component is simply stateless).
+    let tool_indices =
+        ToolGuestIndices::new(&pre).map_err(|e| anyhow::anyhow!("tool-provider indices: {e}"))?;
+    let session_indices = SessionGuestIndices::new(&pre).ok();
+
     let instance = pre
         .instantiate_async(&mut store)
         .await
         .map_err(|e| anyhow::anyhow!("failed to instantiate component: {e}"))?;
-    let act_world = indices
+
+    let tool_provider = tool_indices
         .load(&mut store, &instance)
-        .map_err(|e| anyhow::anyhow!("failed to load ActWorld: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("failed to load tool-provider: {e}"))?;
 
-    let session_provider = sessions::SessionProvider::lookup(&instance, store.as_context_mut())?;
+    let session_provider = match session_indices {
+        Some(idx) => {
+            let guest = idx
+                .load(&mut store, &instance)
+                .map_err(|e| anyhow::anyhow!("failed to load session-provider: {e}"))?;
+            Some(sessions::SessionProvider::from_guest(&guest))
+        }
+        None => None,
+    };
 
-    Ok((act_world, session_provider, store))
+    Ok((tool_provider, session_provider, store))
 }
 
-/// Spawn the component actor task. Owns the Store, ActWorld, and the
-/// optional SessionProvider (present iff the component supports
+/// Spawn the component actor task. Owns the Store, the tool-provider guest,
+/// and the optional SessionProvider (present iff the component supports
 /// `act:sessions/session-provider`).
 ///
 /// Returns a handle for sending requests.
 pub fn spawn_component_actor(
-    instance: ActWorld,
+    tool_provider: ToolProvider,
     session_provider: Option<sessions::SessionProvider>,
     mut store: Store<HostState>,
 ) -> ComponentHandle {
@@ -430,7 +454,7 @@ pub fn spawn_component_actor(
         while let Some(request) = rx.recv().await {
             match request {
                 ComponentRequest::ListTools { metadata, reply } => {
-                    let provider = instance.act_tools_tool_provider().clone();
+                    let provider = tool_provider.clone();
                     let result = store
                         .run_concurrent(async |accessor| {
                             provider
@@ -456,7 +480,7 @@ pub fn spawn_component_actor(
                     metadata,
                     reply,
                 } => {
-                    let provider = instance.act_tools_tool_provider().clone();
+                    let provider = tool_provider.clone();
 
                     let collected: std::sync::Arc<
                         std::sync::Mutex<Vec<exports::act::tools::tool_provider::ToolEvent>>,
@@ -526,7 +550,7 @@ pub fn spawn_component_actor(
                     metadata,
                     event_tx,
                 } => {
-                    let provider = instance.act_tools_tool_provider().clone();
+                    let provider = tool_provider.clone();
                     let (done_tx, done_rx) = oneshot::channel::<()>();
 
                     let result = store
