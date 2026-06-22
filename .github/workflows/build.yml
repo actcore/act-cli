@@ -39,10 +39,10 @@ jobs:
         with:
           channel: stable
           targets: ${{ matrix.target }}
-          bins: wit-deps-cli
+          bins: wkg
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - run: wit-deps
+      - run: WKG_CONFIG_FILE=wkg-registry.toml wkg wit fetch --type wit
         working-directory: act-cli
       - run: cargo build --release --target ${{ matrix.target }}
       - name: Rename binaries
@@ -83,11 +83,11 @@ jobs:
         with:
           channel: stable
           targets: ${{ matrix.target }}
-          bins: wit-deps-cli, cargo-zigbuild
+          bins: wkg, cargo-zigbuild
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - uses: mlugg/setup-zig@v2
-      - run: wit-deps
+      - run: WKG_CONFIG_FILE=wkg-registry.toml wkg wit fetch --type wit
         working-directory: act-cli
       - run: cargo zigbuild --release --target ${{ matrix.target }}
       - name: Rename binaries

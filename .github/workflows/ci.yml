@@ -23,10 +23,10 @@ jobs:
         with:
           channel: stable
           components: clippy
-          bins: wit-deps-cli
+          bins: wkg
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - run: wit-deps
+      - run: WKG_CONFIG_FILE=wkg-registry.toml wkg wit fetch --type wit
         working-directory: act-cli
       - run: cargo clippy -- -D warnings
 
@@ -54,10 +54,10 @@ jobs:
       - uses: moonrepo/setup-rust@v1
         with:
           channel: stable
-          bins: wit-deps-cli
+          bins: wkg
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - run: wit-deps
+      - run: WKG_CONFIG_FILE=wkg-registry.toml wkg wit fetch --type wit
         working-directory: act-cli
       - run: cargo test
 

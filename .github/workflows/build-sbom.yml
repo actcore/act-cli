@@ -16,10 +16,10 @@ jobs:
           tool: cargo-cyclonedx
       - uses: taiki-e/cache-cargo-install-action@v3
         with:
-          tool: wit-deps-cli
+          tool: wkg
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - run: wit-deps
+      - run: WKG_CONFIG_FILE=wkg-registry.toml wkg wit fetch --type wit
         working-directory: act-cli
       - name: Generate CycloneDX SBOM
         run: cargo cyclonedx -f json --target all

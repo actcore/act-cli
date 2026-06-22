@@ -32,10 +32,10 @@ jobs:
           python-version: "3.14"
       - uses: moonrepo/setup-rust@v1
         with:
-          bins: wit-deps-cli
+          bins: wkg
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - run: wit-deps
+      - run: WKG_CONFIG_FILE=wkg-registry.toml wkg wit fetch --type wit
         working-directory: act-cli
       - uses: PyO3/maturin-action@v1
         with:
@@ -61,10 +61,10 @@ jobs:
       - uses: actions/checkout@v7
       - uses: moonrepo/setup-rust@v1
         with:
-          bins: wit-deps-cli
+          bins: wkg
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - run: wit-deps
+      - run: WKG_CONFIG_FILE=wkg-registry.toml wkg wit fetch --type wit
         working-directory: act-cli
       - uses: PyO3/maturin-action@v1
         with:
