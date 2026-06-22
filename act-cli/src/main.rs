@@ -414,11 +414,11 @@ fn parse_max_memory(s: &str) -> Result<usize, String> {
 
 /// Select the consent prompter for non-MCP invocations: interactive (y/N
 /// on the terminal) when stdin is a TTY; otherwise headless deny (fail-safe).
-fn tty_or_deny_prompter() -> Arc<dyn runtime::consent::ConsentPrompter> {
+fn tty_or_deny_prompter() -> Arc<dyn act_policy::consent::ConsentPrompter> {
     if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         Arc::new(runtime::consent::TtyPrompter)
     } else {
-        Arc::new(runtime::consent::DenyPrompter)
+        Arc::new(act_policy::consent::DenyPrompter)
     }
 }
 
@@ -488,7 +488,7 @@ struct PreparedComponent {
 async fn prepare_component(
     component: &ComponentRef,
     opts: &CommonOpts,
-    prompter: Arc<dyn runtime::consent::ConsentPrompter>,
+    prompter: Arc<dyn act_policy::consent::ConsentPrompter>,
 ) -> Result<PreparedComponent> {
     let resolved = resolve_opts(opts)?;
 
@@ -518,7 +518,7 @@ async fn prepare_component(
         "Loading component"
     );
 
-    let cache = Arc::new(runtime::consent::DecisionCache::new());
+    let cache = Arc::new(act_policy::consent::DecisionCache::new());
 
     let engine = runtime::create_engine()?;
     let wasm = runtime::load_component(&engine, &component_path)?;
@@ -600,7 +600,7 @@ async fn cmd_run(
         // can approve/deny capability requests.
         let peer_slot = Arc::new(runtime::elicit::PeerSlot::new());
         let channel = Arc::new(runtime::elicit::ElicitationChannel::new(peer_slot.clone()));
-        let prompter: Arc<dyn runtime::consent::ConsentPrompter> =
+        let prompter: Arc<dyn act_policy::consent::ConsentPrompter> =
             Arc::new(runtime::elicit::McpElicitationPrompter::new(channel));
         let pc = prepare_component(&component, &opts, prompter).await?;
         let default_session_id = maybe_open_default_session(&pc, &session_args).await?;
@@ -624,7 +624,7 @@ async fn cmd_run(
         // can approve/deny capability requests interactively.
         let peer_slot = Arc::new(runtime::elicit::PeerSlot::new());
         let channel = Arc::new(runtime::elicit::ElicitationChannel::new(peer_slot.clone()));
-        let prompter: Arc<dyn runtime::consent::ConsentPrompter> =
+        let prompter: Arc<dyn act_policy::consent::ConsentPrompter> =
             Arc::new(runtime::elicit::McpElicitationPrompter::new(channel));
         let pc = prepare_component(&component, &opts, prompter).await?;
         let default_session_id = maybe_open_default_session(&pc, &session_args).await?;
@@ -646,8 +646,8 @@ async fn cmd_run(
         };
 
         // ACT-HTTP: no MCP peer, no TTY; use DenyPrompter (fail-safe).
-        let prompter: Arc<dyn runtime::consent::ConsentPrompter> =
-            Arc::new(runtime::consent::DenyPrompter);
+        let prompter: Arc<dyn act_policy::consent::ConsentPrompter> =
+            Arc::new(act_policy::consent::DenyPrompter);
         let pc = prepare_component(&component, &opts, prompter).await?;
         let default_session_id = maybe_open_default_session(&pc, &session_args).await?;
 

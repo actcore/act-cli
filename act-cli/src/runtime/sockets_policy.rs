@@ -13,8 +13,8 @@ use wasmtime_wasi::WasiCtxBuilder;
 use wasmtime_wasi::sockets::SocketAddrUse;
 
 use crate::config::{PolicyMode, SocketsConfig, SocketsRule};
-use crate::runtime::consent::{ConsentAsk, ConsentPrompter, DecisionCache};
-use crate::runtime::network::{Decision, cidr_contains};
+use act_policy::consent::{ConsentAsk, ConsentPrompter, DecisionCache};
+use act_policy::net::{NetVerdict as Decision, cidr_contains};
 use act_types::SocketProtocol;
 
 /// Resolved policy ready to install on `WasiCtxBuilder::socket_addr_check`.
@@ -251,7 +251,7 @@ fn matches_rule(rule: &CompiledRule, addr: SocketAddr, proto: SocketProtocol) ->
 mod tests {
     use super::*;
     use crate::config::{PolicyMode, SocketsConfig, SocketsRule};
-    use crate::runtime::network::NetworkRule;
+    use act_policy::net::NetworkRule;
 
     fn rule(
         host: Option<&str>,

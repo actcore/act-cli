@@ -32,7 +32,7 @@ use wasmtime_wasi_http::p2::body::HyperIncomingBody;
 use wasmtime_wasi_http::p3::bindings::http::types::ErrorCode as P3ErrorCode;
 
 use crate::config::{HttpConfig, PolicyMode};
-use crate::runtime::network::{self, NetworkRule};
+use act_policy::net::{self as network, NetworkRule};
 
 /// reqwest DNS resolver that filters resolved addresses against both deny
 /// and allow CIDR rules.
@@ -149,24 +149,24 @@ fn build_redirect_policy(cfg: Arc<HttpConfig>) -> redirect::Policy {
         // in HttpRule above this layer. If a rule requires scheme="https"
         // and the redirect downgrades to "http", that rule won't match —
         // which is the right behaviour.
-        let allow_nets: Vec<crate::runtime::network::NetworkRule> =
+        let allow_nets: Vec<act_policy::net::NetworkRule> =
             cfg.allow.iter().map(|r| r.net.clone()).collect();
-        let deny_nets: Vec<crate::runtime::network::NetworkRule> =
+        let deny_nets: Vec<act_policy::net::NetworkRule> =
             cfg.deny.iter().map(|r| r.net.clone()).collect();
-        let decision = crate::runtime::network::decide(
+        let decision = act_policy::net::decide(
             cfg.mode,
             &allow_nets,
             &deny_nets,
-            &crate::runtime::network::NetworkCheck::new(host, port),
+            &act_policy::net::NetworkCheck::new(host, port),
         );
         match decision {
-            crate::runtime::network::Decision::Allow => attempt.follow(),
+            act_policy::net::NetVerdict::Allow => attempt.follow(),
             // `Ask` mode gates each request interactively at `send_request`;
             // the redirect callback is sync and can't prompt, so redirects
             // within an already-consented request are followed (the top-level
             // send was approved). Per-hop ask-prompting is a later phase.
-            crate::runtime::network::Decision::Ask => attempt.follow(),
-            crate::runtime::network::Decision::Deny => {
+            act_policy::net::NetVerdict::Ask => attempt.follow(),
+            act_policy::net::NetVerdict::Deny => {
                 tracing::warn!(%url, "http policy: redirect hop blocked");
                 attempt.error("redirect target blocked by ACT policy")
             }
@@ -697,7 +697,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn redirect_policy_blocks_cross_host_hop() {
         use crate::config::PolicyMode;
-        use crate::runtime::network::{Decision, NetworkCheck, NetworkRule, decide};
+        use act_policy::net::{NetVerdict as Decision, NetworkCheck, NetworkRule, decide};
 
         let allow = vec![NetworkRule {
             host: Some("primary.example".into()),
@@ -725,7 +725,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn dns_resolver_filters_denied_cidr() {
         use crate::config::{HttpConfig, HttpRule, PolicyMode};
-        use crate::runtime::network::NetworkRule;
+        use act_policy::net::NetworkRule;
 
         let cfg = HttpConfig {
             mode: PolicyMode::Allowlist,
@@ -779,7 +779,7 @@ mod tests {
         // mode=Allowlist with only an allow-CIDR rule. Any URI whose
         // resolved IPs land outside that CIDR must fail at DNS level.
         use crate::config::{HttpConfig, HttpRule, PolicyMode};
-        use crate::runtime::network::NetworkRule;
+        use act_policy::net::NetworkRule;
 
         let cfg = HttpConfig {
             mode: PolicyMode::Allowlist,
@@ -824,7 +824,7 @@ mod tests {
         // request to the allowed host should succeed even if its IPs
         // don't fall in the CIDR — the host match approves all IPs.
         use crate::config::{HttpConfig, HttpRule, PolicyMode};
-        use crate::runtime::network::NetworkRule;
+        use act_policy::net::NetworkRule;
 
         let cfg = HttpConfig {
             mode: PolicyMode::Allowlist,

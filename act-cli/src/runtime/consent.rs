@@ -1,7 +1,7 @@
 //! Interactive consent: prompt-on-access for `ask`-mode capabilities,
 //! with a per-session decision cache and fail-safe (no channel = deny).
 
-pub use act_policy::consent::{ConsentAsk, ConsentPrompter, DecisionCache, DenyPrompter};
+use act_policy::consent::{ConsentAsk, ConsentPrompter};
 
 /// Prompts on the controlling terminal. Reads a line from stdin; `y`/`yes`
 /// (case-insensitive) allows, anything else (incl. EOF) denies.

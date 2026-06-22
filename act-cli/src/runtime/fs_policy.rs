@@ -42,8 +42,8 @@ use wasmtime_wasi::p2::{DynInputStream, DynOutputStream, FsError, FsResult};
 use act_types::{Capabilities, MountType};
 
 use crate::config::PolicyMode;
-use crate::runtime::consent::{ConsentAsk, ConsentPrompter, DecisionCache};
-use crate::runtime::fs_matcher::{Decision, FsAccess, FsMatcher};
+use act_policy::consent::{ConsentAsk, ConsentPrompter, DecisionCache};
+use act_policy::fs_matcher::{Decision, FsAccess, FsMatcher};
 
 // ── Mounts → preopens ─────────────────────────────────────────────────────
 
@@ -872,7 +872,7 @@ mod mount_tests {
 
 #[cfg(test)]
 mod policy_tests {
-    use crate::runtime::fs_matcher::{Decision, FsAccess, FsMatcher};
+    use act_policy::fs_matcher::{Decision, FsAccess, FsMatcher};
     use act_policy::grant::{FsAllow, FsConfig, PolicyMode};
     use act_types::FsMode;
     use std::path::Path;

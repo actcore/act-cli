@@ -27,8 +27,8 @@ use http::Uri;
 use wasmtime_wasi::TrappableError;
 
 use crate::config::{HttpConfig, PolicyMode};
-use crate::runtime::consent::{ConsentAsk, ConsentPrompter, DecisionCache};
-use crate::runtime::network::{self, Decision, NetworkCheck};
+use act_policy::consent::{ConsentAsk, ConsentPrompter, DecisionCache};
+use act_policy::net::{self as network, NetVerdict as Decision, NetworkCheck};
 
 type P2ErrorCode = wasmtime_wasi_http::p2::bindings::http::types::ErrorCode;
 type P3ErrorCode = wasmtime_wasi_http::p3::bindings::http::types::ErrorCode;
@@ -73,7 +73,7 @@ impl PolicyHttpHooks {
 
     /// Decide an HTTP request against the config. Scheme / method checks are
     /// HTTP-layer; the host / port / CIDR parts are delegated to
-    /// `runtime::network::decide`.
+    /// `act_policy::net::decide`.
     ///
     /// For name-host URIs (non-IP-literal), when no allow rule matches but
     /// there's at least one allow rule with a `cidr` field, return `Allow`
@@ -296,7 +296,7 @@ impl wasmtime_wasi_http::p3::WasiHttpHooks for PolicyHttpHooks {
 mod tests {
     use super::*;
     use crate::config::{HttpConfig, HttpRule, PolicyMode};
-    use crate::runtime::network::NetworkRule;
+    use act_policy::net::NetworkRule;
 
     fn uri(s: &str) -> Uri {
         s.parse().unwrap()
@@ -309,8 +309,8 @@ mod tests {
         PolicyHttpHooks::new(
             cfg,
             client,
-            std::sync::Arc::new(crate::runtime::consent::DenyPrompter),
-            std::sync::Arc::new(crate::runtime::consent::DecisionCache::new()),
+            std::sync::Arc::new(act_policy::consent::DenyPrompter),
+            std::sync::Arc::new(act_policy::consent::DecisionCache::new()),
         )
     }
 

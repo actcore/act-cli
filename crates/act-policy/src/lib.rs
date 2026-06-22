@@ -8,6 +8,8 @@ pub mod effective;
 pub mod fs_matcher;
 pub mod grant;
 pub mod net;
+pub mod provider;
+pub mod providers;
 
 #[cfg(feature = "host")]
 pub mod consent;

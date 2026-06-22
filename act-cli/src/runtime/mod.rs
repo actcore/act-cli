@@ -11,13 +11,10 @@ use wasmtime_wasi_http::WasiHttpCtx;
 use wasmtime_wasi_http::p3::WasiHttpCtxView;
 
 pub mod consent;
-pub mod effective;
 pub mod elicit;
-pub mod fs_matcher;
 pub mod fs_policy;
 pub mod http_client;
 pub mod http_policy;
-pub mod network;
 pub mod sessions;
 pub mod sockets_policy;
 
@@ -35,13 +32,13 @@ pub struct HostState {
     http_hooks: crate::runtime::http_policy::PolicyHttpHooks,
     #[allow(dead_code)] // retained for Task 10 DNS resolver hook access
     http_client: std::sync::Arc<crate::runtime::http_client::ActHttpClient>,
-    fs_matcher: crate::runtime::fs_matcher::FsMatcher,
+    fs_matcher: act_policy::fs_matcher::FsMatcher,
     fs_mode: crate::config::PolicyMode,
     fd_paths: crate::runtime::fs_policy::FdPathMap,
     /// Interactive-consent prompter + per-session decision cache, shared by
     /// every `ask`-mode decision point (fs / http / sockets).
-    consent_prompter: std::sync::Arc<dyn crate::runtime::consent::ConsentPrompter>,
-    consent_cache: std::sync::Arc<crate::runtime::consent::DecisionCache>,
+    consent_prompter: std::sync::Arc<dyn act_policy::consent::ConsentPrompter>,
+    consent_cache: std::sync::Arc<act_policy::consent::DecisionCache>,
     /// Caps the component's wasm linear memory growth (via `store.limiter`).
     /// Default `StoreLimits` is unlimited.
     limits: StoreLimits,
@@ -166,15 +163,14 @@ pub async fn create_store(
     sockets: &crate::config::SocketsConfig,
     info: &ComponentInfo,
     max_memory: Option<usize>,
-    prompter: std::sync::Arc<dyn crate::runtime::consent::ConsentPrompter>,
-    cache: std::sync::Arc<crate::runtime::consent::DecisionCache>,
+    prompter: std::sync::Arc<dyn act_policy::consent::ConsentPrompter>,
+    cache: std::sync::Arc<act_policy::consent::DecisionCache>,
 ) -> Result<Store<HostState>> {
     // Intersect user policy with the component's declared capabilities.
-    let effective_fs = crate::runtime::effective::effective_fs(fs, &info.std.capabilities).config;
-    let effective_http =
-        crate::runtime::effective::effective_http(http, &info.std.capabilities).config;
+    let effective_fs = act_policy::effective::effective_fs(fs, &info.std.capabilities).config;
+    let effective_http = act_policy::effective::effective_http(http, &info.std.capabilities).config;
     let effective_sockets =
-        crate::runtime::effective::effective_sockets(sockets, &info.std.capabilities).config;
+        act_policy::effective::effective_sockets(sockets, &info.std.capabilities).config;
 
     let socket_policy =
         crate::runtime::sockets_policy::SocketsPolicy::build(effective_sockets).await?;
@@ -203,7 +199,7 @@ pub async fn create_store(
     socket_policy.install(&mut builder, prompter.clone(), cache.clone());
 
     let wasi = builder.build();
-    let matcher = crate::runtime::fs_matcher::FsMatcher::compile(&effective_fs)?;
+    let matcher = act_policy::fs_matcher::FsMatcher::compile(&effective_fs)?;
     let http_client = std::sync::Arc::new(crate::runtime::http_client::ActHttpClient::new(
         effective_http.clone(),
     )?);
@@ -386,8 +382,8 @@ pub async fn instantiate_component(
     sockets: &crate::config::SocketsConfig,
     info: &ComponentInfo,
     max_memory: Option<usize>,
-    prompter: std::sync::Arc<dyn crate::runtime::consent::ConsentPrompter>,
-    cache: std::sync::Arc<crate::runtime::consent::DecisionCache>,
+    prompter: std::sync::Arc<dyn act_policy::consent::ConsentPrompter>,
+    cache: std::sync::Arc<act_policy::consent::DecisionCache>,
 ) -> Result<(
     ToolProvider,
     Option<sessions::SessionProvider>,

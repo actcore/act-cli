@@ -79,7 +79,7 @@ impl ElicitationChannel {
 
 // ── McpElicitationPrompter ─────────────────────────────────────────────────
 
-use crate::runtime::consent::{ConsentAsk, ConsentPrompter};
+use act_policy::consent::{ConsentAsk, ConsentPrompter};
 
 /// Consent prompter that forwards decisions to the connected MCP client via
 /// the elicitation channel. Used by `act run --mcp` so the agent driving the
