@@ -12,8 +12,9 @@ use crate::provider::{CapabilityProvider, CompiledCeiling, ResourceOp};
 
 pub struct FsProvider;
 
+#[async_trait::async_trait]
 impl CapabilityProvider for FsProvider {
-    fn resolve(
+    async fn resolve(
         &self,
         cap_id: &str,
         declared: &[serde_json::Value],
@@ -27,10 +28,13 @@ impl CapabilityProvider for FsProvider {
         let caps = caps_from_declared(cap_id, declared);
         // Intersect via effective_fs.
         let eff = effective_fs(&user, &caps);
+        // Capture the effective mode before consuming `eff`.
+        let effective_mode = eff.config.mode;
         // Compile the matcher from the effective config.
         let matcher = FsMatcher::compile(&eff.config)?;
         Ok(Box::new(FsCeiling {
             matcher,
+            effective_mode,
             is_declared: eff.declared,
         }))
     }
@@ -38,6 +42,7 @@ impl CapabilityProvider for FsProvider {
 
 struct FsCeiling {
     matcher: FsMatcher,
+    effective_mode: crate::grant::PolicyMode,
     is_declared: bool,
 }
 
@@ -53,6 +58,10 @@ impl CompiledCeiling for FsCeiling {
 
     fn declared(&self) -> bool {
         self.is_declared
+    }
+
+    fn effective_mode(&self) -> crate::grant::PolicyMode {
+        self.effective_mode
     }
 }
 
@@ -114,8 +123,8 @@ mod tests {
     use crate::provider::{CapabilityProvider, ResourceOp};
     use serde_json::json;
 
-    #[test]
-    fn fs_provider_enforces_ro_write_deny() {
+    #[tokio::test]
+    async fn fs_provider_enforces_ro_write_deny() {
         let p = FsProvider;
         // declared rw on /data/**, user grants allowlist /data/**
         let declared = vec![json!({"path":"/data/**","mode":"rw"})];
@@ -124,7 +133,10 @@ mod tests {
             allow: vec![json!({"path":"/data/**","mode":"ro"})], // user narrows to ro
             deny: vec![],
         };
-        let c = p.resolve("wasi:filesystem", &declared, &grant).unwrap();
+        let c = p
+            .resolve("wasi:filesystem", &declared, &grant)
+            .await
+            .unwrap();
         let op = |action: &str| ResourceOp {
             cap_id: "wasi:filesystem".into(),
             key: "/data/x".into(),
@@ -135,15 +147,15 @@ mod tests {
         assert_eq!(c.classify(&op("write")), Decision::Deny); // ro grant ⇒ write denied
     }
 
-    #[test]
-    fn fs_provider_undeclared_denies_all() {
+    #[tokio::test]
+    async fn fs_provider_undeclared_denies_all() {
         let p = FsProvider;
         let grant = CapabilityGrant {
             mode: PolicyMode::Open,
             allow: vec![],
             deny: vec![],
         };
-        let c = p.resolve("wasi:filesystem", &[], &grant).unwrap();
+        let c = p.resolve("wasi:filesystem", &[], &grant).await.unwrap();
         let op = ResourceOp {
             cap_id: "wasi:filesystem".into(),
             key: "/data/x".into(),
@@ -155,8 +167,8 @@ mod tests {
         assert!(!c.declared());
     }
 
-    #[test]
-    fn fs_provider_open_grant_allows_declared_path() {
+    #[tokio::test]
+    async fn fs_provider_open_grant_allows_declared_path() {
         let p = FsProvider;
         let declared = vec![json!({"path":"/tmp/**","mode":"rw"})];
         let grant = CapabilityGrant {
@@ -164,7 +176,10 @@ mod tests {
             allow: vec![],
             deny: vec![],
         };
-        let c = p.resolve("wasi:filesystem", &declared, &grant).unwrap();
+        let c = p
+            .resolve("wasi:filesystem", &declared, &grant)
+            .await
+            .unwrap();
         let op = ResourceOp {
             cap_id: "wasi:filesystem".into(),
             key: "/tmp/test.txt".into(),

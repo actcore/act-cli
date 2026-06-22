@@ -160,13 +160,13 @@ fn build_redirect_policy(cfg: Arc<HttpConfig>) -> redirect::Policy {
             &act_policy::net::NetworkCheck::new(host, port),
         );
         match decision {
-            act_policy::net::NetVerdict::Allow => attempt.follow(),
+            act_policy::Decision::Allow => attempt.follow(),
             // `Ask` mode gates each request interactively at `send_request`;
             // the redirect callback is sync and can't prompt, so redirects
             // within an already-consented request are followed (the top-level
             // send was approved). Per-hop ask-prompting is a later phase.
-            act_policy::net::NetVerdict::Ask => attempt.follow(),
-            act_policy::net::NetVerdict::Deny => {
+            act_policy::Decision::Ask => attempt.follow(),
+            act_policy::Decision::Deny => {
                 tracing::warn!(%url, "http policy: redirect hop blocked");
                 attempt.error("redirect target blocked by ACT policy")
             }
@@ -696,8 +696,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn redirect_policy_blocks_cross_host_hop() {
-        use crate::config::PolicyMode;
-        use act_policy::net::{NetVerdict as Decision, NetworkCheck, NetworkRule, decide};
+        use act_policy::Decision;
+        use act_policy::grant::PolicyMode;
+        use act_policy::net::{NetworkCheck, NetworkRule, decide};
 
         let allow = vec![NetworkRule {
             host: Some("primary.example".into()),
@@ -724,7 +725,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn dns_resolver_filters_denied_cidr() {
-        use crate::config::{HttpConfig, HttpRule, PolicyMode};
+        use act_policy::grant::{HttpConfig, HttpRule, PolicyMode};
         use act_policy::net::NetworkRule;
 
         let cfg = HttpConfig {
@@ -778,7 +779,7 @@ mod tests {
     async fn dns_resolver_requires_allow_cidr_match_for_hostnames() {
         // mode=Allowlist with only an allow-CIDR rule. Any URI whose
         // resolved IPs land outside that CIDR must fail at DNS level.
-        use crate::config::{HttpConfig, HttpRule, PolicyMode};
+        use act_policy::grant::{HttpConfig, HttpRule, PolicyMode};
         use act_policy::net::NetworkRule;
 
         let cfg = HttpConfig {
@@ -823,7 +824,7 @@ mod tests {
         // mode=Allowlist with BOTH a host-allow AND an allow-CIDR. A
         // request to the allowed host should succeed even if its IPs
         // don't fall in the CIDR — the host match approves all IPs.
-        use crate::config::{HttpConfig, HttpRule, PolicyMode};
+        use act_policy::grant::{HttpConfig, HttpRule, PolicyMode};
         use act_policy::net::NetworkRule;
 
         let cfg = HttpConfig {

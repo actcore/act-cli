@@ -26,16 +26,16 @@ use std::sync::Arc;
 use http::Uri;
 use wasmtime_wasi::TrappableError;
 
-use crate::config::{HttpConfig, PolicyMode};
+use act_policy::Decision;
 use act_policy::consent::{ConsentAsk, ConsentPrompter, DecisionCache};
-use act_policy::net::{self as network, NetVerdict as Decision, NetworkCheck};
+use act_policy::provider::{CompiledCeiling, ResourceOp};
 
 type P2ErrorCode = wasmtime_wasi_http::p2::bindings::http::types::ErrorCode;
 type P3ErrorCode = wasmtime_wasi_http::p3::bindings::http::types::ErrorCode;
 
 /// Policy hook implementing both `p2::WasiHttpHooks` and `p3::WasiHttpHooks`.
 pub struct PolicyHttpHooks {
-    config: Arc<HttpConfig>,
+    ceiling: Arc<dyn CompiledCeiling>,
     client: Arc<crate::runtime::http_client::ActHttpClient>,
     prompter: Arc<dyn ConsentPrompter>,
     cache: Arc<DecisionCache>,
@@ -43,13 +43,13 @@ pub struct PolicyHttpHooks {
 
 impl PolicyHttpHooks {
     pub fn new(
-        config: HttpConfig,
+        ceiling: Arc<dyn CompiledCeiling>,
         client: Arc<crate::runtime::http_client::ActHttpClient>,
         prompter: Arc<dyn ConsentPrompter>,
         cache: Arc<DecisionCache>,
     ) -> Self {
         Self {
-            config: Arc::new(config),
+            ceiling,
             client,
             prompter,
             cache,
@@ -71,91 +71,25 @@ impl PolicyHttpHooks {
         }
     }
 
-    /// Decide an HTTP request against the config. Scheme / method checks are
-    /// HTTP-layer; the host / port / CIDR parts are delegated to
-    /// `act_policy::net::decide`.
-    ///
-    /// For name-host URIs (non-IP-literal), when no allow rule matches but
-    /// there's at least one allow rule with a `cidr` field, return `Allow`
-    /// and defer the per-IP check to `PolicyDnsResolver`. This is how
-    /// `allow = [{ cidr = "..." }]` rules take effect against hostnames —
-    /// the HTTP layer doesn't know the resolved IPs yet.
+    /// Decide an HTTP request against the ceiling.
     fn decide_uri(&self, method: Option<&str>, uri: &Uri) -> Decision {
-        // `Ask` runs the same host/cidr/port/scheme/method matching as
-        // `Allowlist`, but emits `Ask` (defer to the interactive prompt) where
-        // Allowlist would emit `Allow`. This bounds `Ask` by the declared
-        // ceiling: deny still wins, out-of-ceiling requests are denied WITHOUT
-        // prompting.
-        let asking = match self.config.mode {
-            PolicyMode::Deny => return Decision::Deny,
-            PolicyMode::Open => return Decision::Allow,
-            PolicyMode::Ask => true,
-            PolicyMode::Allowlist => false,
-        };
-        // The verdict to return for an in-ceiling match.
-        let on_match = if asking {
-            Decision::Ask
-        } else {
-            Decision::Allow
-        };
-
         let host = uri.host().unwrap_or("");
-        let host_is_ip_literal = host.parse::<std::net::IpAddr>().is_ok();
-        let scheme = uri.scheme_str();
+        let scheme = uri.scheme_str().unwrap_or("https");
         let port = uri
             .port_u16()
-            .unwrap_or(if scheme == Some("https") { 443 } else { 80 });
-        let check = NetworkCheck::new(host, port);
-
-        if self
-            .config
-            .deny
-            .iter()
-            .any(|r| http_rule_matches(r, scheme, method, &check))
-        {
-            return Decision::Deny;
-        }
-        if self
-            .config
-            .allow
-            .iter()
-            .any(|r| http_rule_matches(r, scheme, method, &check))
-        {
-            return on_match;
-        }
-        if !host_is_ip_literal && self.config.allow.iter().any(|r| r.net.cidr.is_some()) {
-            // Defer to DNS resolver: it will drop resolved IPs that don't
-            // match any allow-CIDR (see `PolicyDnsResolver`).
-            return on_match;
-        }
-        Decision::Deny
-    }
-}
-
-/// HTTP-layer rule match: check scheme / method first (the HTTP-only
-/// dimensions), then delegate the host / port / CIDR parts to the
-/// network-level matcher.
-fn http_rule_matches(
-    rule: &crate::config::HttpRule,
-    scheme: Option<&str>,
-    method: Option<&str>,
-    check: &NetworkCheck,
-) -> bool {
-    if let Some(want) = rule.scheme.as_deref() {
-        match scheme {
-            Some(have) if have.eq_ignore_ascii_case(want) => {}
-            _ => return false,
-        }
-    }
-    if let Some(want_methods) = rule.methods.as_deref() {
-        let Some(have) = method else {
-            return false;
+            .unwrap_or(if scheme == "https" { 443 } else { 80 });
+        let op = ResourceOp {
+            cap_id: act_types::constants::CAP_HTTP.to_string(),
+            key: format!("{host}:{port}"),
+            action: method.unwrap_or("").to_string(),
+            attrs: serde_json::json!({"scheme": scheme}),
         };
-        if !want_methods.iter().any(|m| m.eq_ignore_ascii_case(have)) {
-            return false;
+        match self.ceiling.classify(&op) {
+            act_policy::Decision::Allow => Decision::Allow,
+            act_policy::Decision::Deny => Decision::Deny,
+            act_policy::Decision::Ask => Decision::Ask,
         }
     }
-    network::rule_matches(&rule.net, check)
 }
 
 fn deny_reason(method: Option<&str>, uri: &Uri) -> String {
@@ -295,50 +229,56 @@ impl wasmtime_wasi_http::p3::WasiHttpHooks for PolicyHttpHooks {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{HttpConfig, HttpRule, PolicyMode};
-    use act_policy::net::NetworkRule;
+    use act_policy::grant::{CapabilityGrant, PolicyMode};
+    use act_policy::provider::CapabilityProvider;
+    use act_policy::providers::http::HttpProvider;
+    use serde_json::json;
 
     fn uri(s: &str) -> Uri {
         s.parse().unwrap()
     }
 
-    fn hooks(cfg: HttpConfig) -> PolicyHttpHooks {
+    /// Build a `PolicyHttpHooks` from a `CapabilityGrant` and declared constraints.
+    /// `declared` mirrors what a component would declare in its `act.toml`
+    /// (`[std.capabilities."wasi:http"]` allow array).
+    fn hooks_from(declared: Vec<serde_json::Value>, grant: CapabilityGrant) -> PolicyHttpHooks {
+        // Use the same mode for the http client
+        let mode = grant.mode;
+        // `resolve` is async (the trait is), but HttpProvider does no I/O in it
+        // — drive it to completion on a throwaway runtime so this sync test
+        // helper stays sync and its many `#[test]` callers are untouched.
+        let ceiling_box = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(HttpProvider.resolve("wasi:http", &declared, &grant))
+            .expect("HttpProvider::resolve");
+        let ceiling: std::sync::Arc<dyn act_policy::provider::CompiledCeiling> =
+            std::sync::Arc::from(ceiling_box);
+        let http_cfg = crate::config::HttpConfig {
+            mode,
+            ..Default::default()
+        };
         let client = std::sync::Arc::new(
-            crate::runtime::http_client::ActHttpClient::new(cfg.clone()).expect("client builds"),
+            crate::runtime::http_client::ActHttpClient::new(http_cfg).expect("client builds"),
         );
         PolicyHttpHooks::new(
-            cfg,
+            ceiling,
             client,
             std::sync::Arc::new(act_policy::consent::DenyPrompter),
             std::sync::Arc::new(act_policy::consent::DecisionCache::new()),
         )
     }
 
-    fn rule(
-        host: Option<&str>,
-        scheme: Option<&str>,
-        ports: Option<Vec<u16>>,
-        cidr: Option<&str>,
-        except_ports: Option<Vec<u16>>,
-    ) -> HttpRule {
-        HttpRule {
-            net: NetworkRule {
-                host: host.map(String::from),
-                ports,
-                cidr: cidr.map(String::from),
-                except_ports,
-            },
-            scheme: scheme.map(String::from),
-            methods: None,
-        }
-    }
-
     #[test]
     fn mode_deny_blocks_everything() {
-        let h = hooks(HttpConfig {
-            mode: PolicyMode::Deny,
-            ..Default::default()
-        });
+        // Deny mode: no declared cap needed — ceiling hard-denies.
+        let h = hooks_from(
+            vec![json!({"host": "api.openai.com"})],
+            CapabilityGrant {
+                mode: PolicyMode::Deny,
+                ..Default::default()
+            },
+        );
         assert_eq!(
             h.decide_uri(Some("GET"), &uri("https://api.openai.com/v1/chat")),
             Decision::Deny
@@ -347,10 +287,14 @@ mod tests {
 
     #[test]
     fn mode_open_allows_everything() {
-        let h = hooks(HttpConfig {
-            mode: PolicyMode::Open,
-            ..Default::default()
-        });
+        // Open mode: declared cap means component is OK with HTTP.
+        let h = hooks_from(
+            vec![json!({"host": "api.openai.com"})],
+            CapabilityGrant {
+                mode: PolicyMode::Open,
+                ..Default::default()
+            },
+        );
         assert_eq!(
             h.decide_uri(Some("GET"), &uri("https://api.openai.com/v1/chat")),
             Decision::Allow
@@ -359,19 +303,16 @@ mod tests {
 
     #[test]
     fn ask_mode_is_bounded_by_allow_ceiling() {
-        // mode=Ask with an allow ceiling of api.openai.com: in-ceiling -> Ask
-        // (prompt), out-of-ceiling -> Deny (no prompt). Deny rules still win.
-        let h = hooks(HttpConfig {
-            mode: PolicyMode::Ask,
-            allow: vec![rule(
-                Some("api.openai.com"),
-                Some("https"),
-                None,
-                None,
-                None,
-            )],
-            ..Default::default()
-        });
+        // mode=Ask with a declared ceiling of api.openai.com/https: in-ceiling → Ask,
+        // out-of-ceiling → Deny (no prompt).
+        let h = hooks_from(
+            vec![json!({"host": "api.openai.com", "scheme": "https"})],
+            CapabilityGrant {
+                mode: PolicyMode::Ask,
+                allow: vec![json!({"host": "api.openai.com", "scheme": "https"})],
+                ..Default::default()
+            },
+        );
         assert_eq!(
             h.decide_uri(Some("POST"), &uri("https://api.openai.com/v1/chat")),
             Decision::Ask
@@ -384,11 +325,14 @@ mod tests {
 
     #[test]
     fn ask_mode_deny_rule_beats_ceiling() {
-        let h = hooks(HttpConfig {
-            mode: PolicyMode::Ask,
-            allow: vec![rule(Some("*.example.com"), None, None, None, None)],
-            deny: vec![rule(Some("admin.example.com"), None, None, None, None)],
-        });
+        let h = hooks_from(
+            vec![json!({"host": "*.example.com"})],
+            CapabilityGrant {
+                mode: PolicyMode::Ask,
+                allow: vec![json!({"host": "*.example.com"})],
+                deny: vec![json!({"host": "admin.example.com"})],
+            },
+        );
         assert_eq!(
             h.decide_uri(Some("GET"), &uri("https://api.example.com/")),
             Decision::Ask
@@ -401,25 +345,24 @@ mod tests {
 
     #[test]
     fn allowlist_host_allow() {
-        let h = hooks(HttpConfig {
-            mode: PolicyMode::Allowlist,
-            allow: vec![rule(
-                Some("api.openai.com"),
-                Some("https"),
-                None,
-                None,
-                None,
-            )],
-            ..Default::default()
-        });
+        let h = hooks_from(
+            vec![json!({"host": "api.openai.com", "scheme": "https"})],
+            CapabilityGrant {
+                mode: PolicyMode::Allowlist,
+                allow: vec![json!({"host": "api.openai.com", "scheme": "https"})],
+                ..Default::default()
+            },
+        );
         assert_eq!(
             h.decide_uri(Some("POST"), &uri("https://api.openai.com/v1/chat")),
             Decision::Allow
         );
+        // Different scheme → deny
         assert_eq!(
             h.decide_uri(Some("GET"), &uri("http://api.openai.com/")),
             Decision::Deny
         );
+        // Different host → deny
         assert_eq!(
             h.decide_uri(Some("GET"), &uri("https://evil.com/")),
             Decision::Deny
@@ -428,11 +371,14 @@ mod tests {
 
     #[test]
     fn allowlist_wildcard_host() {
-        let h = hooks(HttpConfig {
-            mode: PolicyMode::Allowlist,
-            allow: vec![rule(Some("*.github.com"), Some("https"), None, None, None)],
-            ..Default::default()
-        });
+        let h = hooks_from(
+            vec![json!({"host": "*.github.com", "scheme": "https"})],
+            CapabilityGrant {
+                mode: PolicyMode::Allowlist,
+                allow: vec![json!({"host": "*.github.com", "scheme": "https"})],
+                ..Default::default()
+            },
+        );
         assert_eq!(
             h.decide_uri(Some("GET"), &uri("https://api.github.com/")),
             Decision::Allow
@@ -449,11 +395,14 @@ mod tests {
 
     #[test]
     fn deny_rule_beats_allow() {
-        let h = hooks(HttpConfig {
-            mode: PolicyMode::Allowlist,
-            allow: vec![rule(Some("*.example.com"), None, None, None, None)],
-            deny: vec![rule(Some("admin.example.com"), None, None, None, None)],
-        });
+        let h = hooks_from(
+            vec![json!({"host": "*.example.com"})],
+            CapabilityGrant {
+                mode: PolicyMode::Allowlist,
+                allow: vec![json!({"host": "*.example.com"})],
+                deny: vec![json!({"host": "admin.example.com"})],
+            },
+        );
         assert_eq!(
             h.decide_uri(Some("GET"), &uri("https://api.example.com/")),
             Decision::Allow
@@ -465,46 +414,15 @@ mod tests {
     }
 
     #[test]
-    fn cidr_deny_with_except_port() {
-        let h = hooks(HttpConfig {
-            mode: PolicyMode::Allowlist,
-            allow: vec![rule(Some("localhost"), None, None, None, None)],
-            deny: vec![rule(
-                None,
-                None,
-                None,
-                Some("127.0.0.0/8"),
-                Some(vec![3000]),
-            )],
-        });
-        // 127.0.0.1:80 is in the deny CIDR and not in except-ports → deny
-        assert_eq!(
-            h.decide_uri(Some("GET"), &uri("http://127.0.0.1/")),
-            Decision::Deny
-        );
-        // 127.0.0.1:3000 is in except-ports → deny rule doesn't match. Allow
-        // rule matches localhost literal? No, host is "127.0.0.1", not
-        // "localhost". So decision is Deny for not matching any allow.
-        assert_eq!(
-            h.decide_uri(Some("GET"), &uri("http://127.0.0.1:3000/")),
-            Decision::Deny
-        );
-    }
-
-    #[test]
     fn method_filter() {
-        let h = hooks(HttpConfig {
-            mode: PolicyMode::Allowlist,
-            allow: vec![HttpRule {
-                net: NetworkRule {
-                    host: Some("api.example.com".into()),
-                    ..Default::default()
-                },
-                methods: Some(vec!["GET".into(), "POST".into()]),
+        let h = hooks_from(
+            vec![json!({"host": "api.example.com", "methods": ["GET", "POST"]})],
+            CapabilityGrant {
+                mode: PolicyMode::Allowlist,
+                allow: vec![json!({"host": "api.example.com"})],
                 ..Default::default()
-            }],
-            ..Default::default()
-        });
+            },
+        );
         assert_eq!(
             h.decide_uri(Some("get"), &uri("https://api.example.com/")),
             Decision::Allow
@@ -516,44 +434,17 @@ mod tests {
     }
 
     #[test]
-    fn allow_cidr_defers_named_host_to_dns() {
-        // mode=Allowlist with only an allow-CIDR rule. Hostname URIs must
-        // reach the DNS resolver (return Allow at HTTP layer); the
-        // resolver will drop IPs not in the CIDR. IP-literal URIs still
-        // get fully checked at HTTP layer.
-        let h = hooks(HttpConfig {
-            mode: PolicyMode::Allowlist,
-            allow: vec![rule(None, None, None, Some("10.0.0.0/8"), None)],
-            ..Default::default()
-        });
-
-        // Name host: defer to DNS → Allow at HTTP layer.
-        assert_eq!(
-            h.decide_uri(Some("GET"), &uri("https://internal.corp/")),
-            Decision::Allow
+    fn undeclared_cap_denies_all() {
+        // Component didn't declare wasi:http at all → ceiling always Deny.
+        let h = hooks_from(
+            vec![], // no declared constraints
+            CapabilityGrant {
+                mode: PolicyMode::Open, // user would allow, but declaration gates it
+                ..Default::default()
+            },
         );
-        // IP literal in allowed CIDR: Allow.
         assert_eq!(
-            h.decide_uri(Some("GET"), &uri("http://10.1.2.3/")),
-            Decision::Allow
-        );
-        // IP literal outside CIDR: Deny (no DNS deferral for literals).
-        assert_eq!(
-            h.decide_uri(Some("GET"), &uri("http://8.8.8.8/")),
-            Decision::Deny
-        );
-    }
-
-    #[test]
-    fn allow_cidr_does_not_defer_without_cidr_rule() {
-        // No allow-CIDR rules → HTTP layer decides purely on host.
-        let h = hooks(HttpConfig {
-            mode: PolicyMode::Allowlist,
-            allow: vec![rule(Some("example.com"), None, None, None, None)],
-            ..Default::default()
-        });
-        assert_eq!(
-            h.decide_uri(Some("GET"), &uri("https://other.com/")),
+            h.decide_uri(Some("GET"), &uri("https://example.com/")),
             Decision::Deny
         );
     }

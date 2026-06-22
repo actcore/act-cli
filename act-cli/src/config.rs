@@ -15,8 +15,7 @@ use std::path::{Path, PathBuf};
 #[cfg(test)]
 pub use act_policy::grant::FsAllow;
 pub use act_policy::grant::{
-    CapabilityGrant, FsConfig, GrantPolicy, HttpConfig, HttpRule, PolicyMode, SocketsConfig,
-    SocketsRule, to_fs_config, to_http_config, to_sockets_config,
+    CapabilityGrant, GrantPolicy, HttpConfig, PolicyMode, SocketsConfig, SocketsRule,
 };
 
 // ── TOML deserialization types ──
@@ -260,6 +259,7 @@ pub fn resolve_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use act_policy::grant::{to_fs_config, to_http_config, to_sockets_config};
 
     #[test]
     fn policy_mode_parse() {

@@ -19,9 +19,13 @@ pub struct ResourceOp {
     pub attrs: serde_json::Value,
 }
 
-/// A capability class's decision logic. Object-safe; held as `dyn` in the registry.
+/// A capability class's decision logic. Object-safe; held as `dyn` in the
+/// registry. `resolve` is async so a provider can do startup work that needs
+/// I/O (e.g. the sockets provider resolves hostname rules via DNS, pinning the
+/// IPs once). `classify` stays sync — it runs on the hot path.
+#[async_trait::async_trait]
 pub trait CapabilityProvider: Send + Sync {
-    fn resolve(
+    async fn resolve(
         &self,
         cap_id: &str,
         declared: &[serde_json::Value],
@@ -33,6 +37,11 @@ pub trait CapabilityProvider: Send + Sync {
 pub trait CompiledCeiling: Send + Sync {
     fn classify(&self, op: &ResourceOp) -> Decision;
     fn declared(&self) -> bool;
+    /// Effective policy mode for this ceiling. Used by hosts that need to
+    /// know the mode for non-classify decisions (e.g. p3 preopens kill-switch).
+    fn effective_mode(&self) -> crate::grant::PolicyMode {
+        crate::grant::PolicyMode::Deny
+    }
     /// Test/diagnostic tag; production impls keep the default.
     fn tag(&self) -> &str {
         ""
@@ -97,8 +106,9 @@ mod tests {
     use std::sync::Arc;
 
     struct Tagged(&'static str);
+    #[async_trait::async_trait]
     impl CapabilityProvider for Tagged {
-        fn resolve(
+        async fn resolve(
             &self,
             _id: &str,
             _declared: &[serde_json::Value],
@@ -120,16 +130,23 @@ mod tests {
         }
     }
 
-    #[test]
-    fn lookup_prefers_exact_then_longest_prefix_then_generic() {
+    #[tokio::test]
+    async fn lookup_prefers_exact_then_longest_prefix_then_generic() {
         let mut r = ProviderRegistry::new(Arc::new(Tagged("generic")));
         r.register("wasi:http", Arc::new(Tagged("http")));
         r.register("db:*", Arc::new(Tagged("db-wild")));
         r.register("db:drop-*", Arc::new(Tagged("db-drop")));
-        let ceil = |id: &str| r.lookup(id).resolve(id, &[], &Default::default()).unwrap();
-        assert_eq!(ceil("wasi:http").tag(), "http"); // exact
-        assert_eq!(ceil("db:truncate").tag(), "db-wild"); // *-prefix
-        assert_eq!(ceil("db:drop-database").tag(), "db-drop"); // longest *-prefix
-        assert_eq!(ceil("email:send").tag(), "generic"); // fallback
+        async fn tag(r: &ProviderRegistry, id: &str) -> String {
+            r.lookup(id)
+                .resolve(id, &[], &Default::default())
+                .await
+                .unwrap()
+                .tag()
+                .to_string()
+        }
+        assert_eq!(tag(&r, "wasi:http").await, "http"); // exact
+        assert_eq!(tag(&r, "db:truncate").await, "db-wild"); // *-prefix
+        assert_eq!(tag(&r, "db:drop-database").await, "db-drop"); // longest *-prefix
+        assert_eq!(tag(&r, "email:send").await, "generic"); // fallback
     }
 }

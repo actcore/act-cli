@@ -18,14 +18,17 @@ shellexpand = "3"
 thiserror = "2"
 cidr = "0.3"
 tokio = { workspace = true, features = ["net"], optional = true }
-async-trait = { version = "0.1", optional = true }
+# Regular (not host-gated): the provider trait's `resolve` is async and the
+# providers live in the wasm-clean core, so async-trait must compile for wasm
+# too. The generated futures capture only `Send` data, so the default `Send`
+# bound holds on both native and wasm.
+async-trait = "0.1"
 
 [features]
 default = ["host"]
-# Host-only async prompting helpers (ConsentPrompter, DecisionCache) and
-# tokio-backed DNS resolver used by net.rs.
-# Disabled for the wasm32 build, where the future's Send bound doesn't hold.
-host = ["tokio", "async-trait"]
+# Host-only consent prompting (ConsentPrompter/DecisionCache) and the
+# tokio-backed DNS resolution used by net.rs + the sockets provider's resolve.
+host = ["tokio"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

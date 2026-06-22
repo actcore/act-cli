@@ -4,6 +4,7 @@
 //! ceiling once per instantiation; the matchers classify each operation.
 //! Host-only async consent helpers live behind the `host` feature.
 
+pub mod decision;
 pub mod effective;
 pub mod fs_matcher;
 pub mod grant;
@@ -14,5 +15,5 @@ pub mod providers;
 #[cfg(feature = "host")]
 pub mod consent;
 
-/// Canonical filesystem-access decision type (re-exported from `fs_matcher`).
-pub use fs_matcher::Decision;
+/// The common policy decision type, returned by every provider's `classify`.
+pub use decision::Decision;

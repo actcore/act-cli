@@ -12,8 +12,9 @@ use crate::provider::{CapabilityProvider, CompiledCeiling, ResourceOp};
 
 pub struct SocketsProvider;
 
+#[async_trait::async_trait]
 impl CapabilityProvider for SocketsProvider {
-    fn resolve(
+    async fn resolve(
         &self,
         cap_id: &str,
         declared: &[serde_json::Value],
@@ -25,12 +26,67 @@ impl CapabilityProvider for SocketsProvider {
         // Empty declared → don't insert key → effective_sockets treats as undeclared.
         let caps = caps_from_declared(cap_id, declared);
         let eff = effective_sockets(&user, &caps);
+        let is_declared = eff.declared;
+
+        // `classify` sees the *resolved* connecting IP (wasi resolves the
+        // hostname before `socket_addr_check`), so a rule naming a hostname must
+        // be pinned to its IP(s) here, once, at startup. Host-only: there is no
+        // DNS on wasm, and browsers have no raw sockets. Both the effective
+        // allow/deny rules and the declaration rules (used for the protocol
+        // ceiling check) are pinned.
+        #[cfg(feature = "host")]
+        let (config, decl_rules) = {
+            let mut config = eff.config;
+            config.allow = pin_hostnames(config.allow).await;
+            config.deny = pin_hostnames(config.deny).await;
+            (config, pin_hostnames(decl_rules).await)
+        };
+        #[cfg(not(feature = "host"))]
+        let (config, decl_rules) = (eff.config, decl_rules);
+
         Ok(Box::new(SocketsCeiling {
-            config: eff.config,
+            config,
             decl_rules,
-            is_declared: eff.declared,
+            is_declared,
         }))
     }
+}
+
+/// Resolve any hostname-bearing rule to its IP(s) at startup, emitting a
+/// synthetic `/32` (or `/128`) CIDR rule per resolved address (carrying the
+/// original ports/protocols) so the sync `classify` can match the connecting
+/// IP. The original rule is kept too (covers IP-literal and CIDR rules, and the
+/// `*` wildcard). Pinning once also closes the DNS-rebinding window.
+#[cfg(feature = "host")]
+async fn pin_hostnames(rules: Vec<SocketsRule>) -> Vec<SocketsRule> {
+    use std::net::IpAddr;
+    let mut out = Vec::new();
+    for rule in rules {
+        if let Some(host) = rule.net.host.as_deref()
+            && host != "*"
+            && host.parse::<IpAddr>().is_err()
+        {
+            match tokio::net::lookup_host((host, 0u16)).await {
+                Ok(addrs) => {
+                    for addr in addrs {
+                        let mut synth = rule.clone();
+                        synth.net.host = None;
+                        synth.net.cidr = Some(match addr.ip() {
+                            IpAddr::V4(v4) => format!("{v4}/32"),
+                            IpAddr::V6(v6) => format!("{v6}/128"),
+                        });
+                        out.push(synth);
+                    }
+                }
+                Err(_) => tracing::warn!(
+                    host = %host,
+                    "wasi:sockets rule host did not resolve; rule has no effect"
+                ),
+            }
+        }
+        out.push(rule);
+    }
+    out
 }
 
 struct SocketsCeiling {
@@ -104,6 +160,10 @@ impl CompiledCeiling for SocketsCeiling {
 
     fn declared(&self) -> bool {
         self.is_declared
+    }
+
+    fn effective_mode(&self) -> crate::grant::PolicyMode {
+        self.config.mode
     }
 }
 
@@ -198,24 +258,25 @@ mod tests {
     use crate::provider::{CapabilityProvider, ResourceOp};
     use serde_json::json;
 
-    #[test]
-    fn sockets_provider_matches_host_port_protocol() {
+    // IP-literal rule (no DNS) → exercises host/port/protocol matching.
+    #[tokio::test]
+    async fn sockets_provider_matches_host_port_protocol() {
         let p = SocketsProvider;
         let declared = vec![json!({
-            "host": "vnc.example.com",
+            "host": "198.51.100.7",
             "ports": [5900],
             "protocols": ["tcp"]
         })];
         let grant = CapabilityGrant {
             mode: PolicyMode::Allowlist,
-            allow: vec![json!({"host": "vnc.example.com", "ports": [5900]})],
+            allow: vec![json!({"host": "198.51.100.7", "ports": [5900]})],
             deny: vec![],
         };
-        let c = p.resolve("wasi:sockets", &declared, &grant).unwrap();
+        let c = p.resolve("wasi:sockets", &declared, &grant).await.unwrap();
         // Allowed: correct host, port, TCP protocol.
         let ok_op = ResourceOp {
             cap_id: "wasi:sockets".into(),
-            key: "vnc.example.com:5900".into(),
+            key: "198.51.100.7:5900".into(),
             action: "".into(),
             attrs: json!({"protocol": "tcp"}),
         };
@@ -223,22 +284,46 @@ mod tests {
         // Denied: wrong protocol.
         let bad_proto_op = ResourceOp {
             cap_id: "wasi:sockets".into(),
-            key: "vnc.example.com:5900".into(),
+            key: "198.51.100.7:5900".into(),
             action: "".into(),
             attrs: json!({"protocol": "udp"}),
         };
         assert_eq!(c.classify(&bad_proto_op), Decision::Deny);
     }
 
-    #[test]
-    fn sockets_provider_undeclared_denies_all() {
+    // A rule names a hostname; the guest connects to the RESOLVED ip (wasi
+    // resolves before `socket_addr_check`). The provider must pin the hostname
+    // at resolve so `classify` (which sees the ip) still matches. `localhost`
+    // resolves hermetically via the hosts file.
+    #[cfg(feature = "host")]
+    #[tokio::test]
+    async fn sockets_provider_pins_hostname_to_resolved_ip() {
+        let p = SocketsProvider;
+        let declared = vec![json!({"host":"localhost","ports":[5900],"protocols":["tcp"]})];
+        let grant = CapabilityGrant {
+            mode: PolicyMode::Allowlist,
+            allow: vec![json!({"host":"localhost","ports":[5900]})],
+            deny: vec![],
+        };
+        let c = p.resolve("wasi:sockets", &declared, &grant).await.unwrap();
+        let op = ResourceOp {
+            cap_id: "wasi:sockets".into(),
+            key: "127.0.0.1:5900".into(),
+            action: "".into(),
+            attrs: json!({"protocol": "tcp"}),
+        };
+        assert_eq!(c.classify(&op), Decision::Allow);
+    }
+
+    #[tokio::test]
+    async fn sockets_provider_undeclared_denies_all() {
         let p = SocketsProvider;
         let grant = CapabilityGrant {
             mode: PolicyMode::Open,
             allow: vec![],
             deny: vec![],
         };
-        let c = p.resolve("wasi:sockets", &[], &grant).unwrap();
+        let c = p.resolve("wasi:sockets", &[], &grant).await.unwrap();
         let op = ResourceOp {
             cap_id: "wasi:sockets".into(),
             key: "host.example.com:5900".into(),

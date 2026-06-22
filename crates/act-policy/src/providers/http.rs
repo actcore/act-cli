@@ -12,8 +12,9 @@ use crate::provider::{CapabilityProvider, CompiledCeiling, ResourceOp};
 
 pub struct HttpProvider;
 
+#[async_trait::async_trait]
 impl CapabilityProvider for HttpProvider {
-    fn resolve(
+    async fn resolve(
         &self,
         cap_id: &str,
         declared: &[serde_json::Value],
@@ -101,6 +102,10 @@ impl CompiledCeiling for HttpCeiling {
 
     fn declared(&self) -> bool {
         self.is_declared
+    }
+
+    fn effective_mode(&self) -> crate::grant::PolicyMode {
+        self.config.mode
     }
 }
 
@@ -242,8 +247,8 @@ mod tests {
     use crate::provider::{CapabilityProvider, ResourceOp};
     use serde_json::json;
 
-    #[test]
-    fn http_provider_matches_host_and_method() {
+    #[tokio::test]
+    async fn http_provider_matches_host_and_method() {
         let p = HttpProvider;
         let declared = vec![json!({"host":"api.example.com","methods":["GET"]})];
         let grant = CapabilityGrant {
@@ -251,7 +256,7 @@ mod tests {
             allow: vec![json!({"host":"api.example.com"})],
             deny: vec![],
         };
-        let c = p.resolve("wasi:http", &declared, &grant).unwrap();
+        let c = p.resolve("wasi:http", &declared, &grant).await.unwrap();
         let op = |m: &str| ResourceOp {
             cap_id: "wasi:http".into(),
             key: "api.example.com:443".into(),
@@ -262,15 +267,15 @@ mod tests {
         assert_eq!(c.classify(&op("POST")), Decision::Deny); // method not declared
     }
 
-    #[test]
-    fn http_provider_undeclared_denies_all() {
+    #[tokio::test]
+    async fn http_provider_undeclared_denies_all() {
         let p = HttpProvider;
         let grant = CapabilityGrant {
             mode: PolicyMode::Open,
             allow: vec![],
             deny: vec![],
         };
-        let c = p.resolve("wasi:http", &[], &grant).unwrap();
+        let c = p.resolve("wasi:http", &[], &grant).await.unwrap();
         let op = ResourceOp {
             cap_id: "wasi:http".into(),
             key: "api.example.com:443".into(),
@@ -281,8 +286,8 @@ mod tests {
         assert!(!c.declared());
     }
 
-    #[test]
-    fn http_provider_ask_mode_in_ceiling() {
+    #[tokio::test]
+    async fn http_provider_ask_mode_in_ceiling() {
         let p = HttpProvider;
         let declared = vec![json!({"host":"api.example.com"})];
         let grant = CapabilityGrant {
@@ -290,7 +295,7 @@ mod tests {
             allow: vec![],
             deny: vec![],
         };
-        let c = p.resolve("wasi:http", &declared, &grant).unwrap();
+        let c = p.resolve("wasi:http", &declared, &grant).await.unwrap();
         // In-ceiling with Ask mode → Ask
         let in_op = ResourceOp {
             cap_id: "wasi:http".into(),

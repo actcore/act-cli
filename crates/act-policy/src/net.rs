@@ -19,6 +19,7 @@ use std::net::SocketAddr;
 
 use serde::Deserialize;
 
+use crate::Decision;
 use crate::grant::PolicyMode;
 
 /// Network-dimension rule: host pattern or CIDR, plus optional port
@@ -72,17 +73,6 @@ pub fn host_matches(pattern: &str, host: &str) -> bool {
 }
 
 // ── Rule checker ─────────────────────────────────────────────────────────
-
-/// Outcome of checking a set of network rules against a target.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NetVerdict {
-    Allow,
-    Deny,
-    /// `Ask` mode: defer to interactive consent. The sync decider never
-    /// prompts; the async caller (e.g. `PolicyHttpHooks::send_request`)
-    /// resolves this through the `DecisionCache` / `ConsentPrompter`.
-    Ask,
-}
 
 /// A network operation the rule checker inspects. Fields a raw socket
 /// path won't populate (scheme, method) are left `None`; fields an HTTP
@@ -178,24 +168,24 @@ pub fn decide(
     allow: &[NetworkRule],
     deny: &[NetworkRule],
     check: &NetworkCheck,
-) -> NetVerdict {
+) -> Decision {
     // `Ask` is bounded by the declared ceiling: it runs the same deny/allow
     // matching as `Allowlist`, but emits `Ask` (defer to the interactive
     // prompt) where Allowlist emits `Allow`. Deny still wins, and a target
     // matching no allow rule is denied WITHOUT prompting.
     let on_match = match mode {
-        PolicyMode::Deny => return NetVerdict::Deny,
-        PolicyMode::Open => return NetVerdict::Allow,
-        PolicyMode::Ask => NetVerdict::Ask,
-        PolicyMode::Allowlist => NetVerdict::Allow,
+        PolicyMode::Deny => return Decision::Deny,
+        PolicyMode::Open => return Decision::Allow,
+        PolicyMode::Ask => Decision::Ask,
+        PolicyMode::Allowlist => Decision::Allow,
     };
     if deny.iter().any(|r| rule_matches(r, check)) {
-        return NetVerdict::Deny;
+        return Decision::Deny;
     }
     if allow.iter().any(|r| rule_matches(r, check)) {
         on_match
     } else {
-        NetVerdict::Deny
+        Decision::Deny
     }
 }
 
@@ -365,11 +355,11 @@ mod tests {
         let bad = NetworkCheck::new("admin.example.com", 443);
         assert_eq!(
             decide(PolicyMode::Allowlist, &allow, &deny, &good),
-            NetVerdict::Allow
+            Decision::Allow
         );
         assert_eq!(
             decide(PolicyMode::Allowlist, &allow, &deny, &bad),
-            NetVerdict::Deny
+            Decision::Deny
         );
     }
 
@@ -384,15 +374,15 @@ mod tests {
         let denied = NetworkCheck::new("admin.example.com", 443);
         assert_eq!(
             decide(PolicyMode::Ask, &allow, &deny, &in_ceiling),
-            NetVerdict::Ask
+            Decision::Ask
         );
         assert_eq!(
             decide(PolicyMode::Ask, &allow, &deny, &out_of_ceiling),
-            NetVerdict::Deny
+            Decision::Deny
         );
         assert_eq!(
             decide(PolicyMode::Ask, &allow, &deny, &denied),
-            NetVerdict::Deny
+            Decision::Deny
         );
     }
 
@@ -403,11 +393,11 @@ mod tests {
         let check = NetworkCheck::new("example.com", 443);
         assert_eq!(
             decide(PolicyMode::Open, &allow, &deny, &check),
-            NetVerdict::Allow
+            Decision::Allow
         );
         assert_eq!(
             decide(PolicyMode::Deny, &allow, &deny, &check),
-            NetVerdict::Deny
+            Decision::Deny
         );
     }
 

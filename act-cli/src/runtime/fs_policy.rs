@@ -42,8 +42,10 @@ use wasmtime_wasi::p2::{DynInputStream, DynOutputStream, FsError, FsResult};
 use act_types::{Capabilities, MountType};
 
 use crate::config::PolicyMode;
+use act_policy::Decision;
 use act_policy::consent::{ConsentAsk, ConsentPrompter, DecisionCache};
-use act_policy::fs_matcher::{Decision, FsAccess, FsMatcher};
+use act_policy::fs_matcher::FsAccess;
+use act_policy::provider::{CompiledCeiling, ResourceOp};
 
 // ── Mounts → preopens ─────────────────────────────────────────────────────
 
@@ -225,14 +227,14 @@ impl HasData for PolicyFilesystem {
 pub struct PolicyFilesystemCtxView<'a> {
     pub ctx: &'a mut WasiFilesystemCtx,
     pub table: &'a mut ResourceTable,
-    pub matcher: &'a FsMatcher,
+    pub ceiling: &'a Arc<dyn CompiledCeiling>,
     pub fd_paths: &'a mut FdPathMap,
     /// Configured mode; drives the p3 preopens kill-switch. p3 path-taking
     /// ops can't be gated (upstream `Dir::open_at` is `pub(crate)`), so when
     /// mode is anything but `Open` we return zero preopens from p3 and p3
     /// guests can't acquire a `Descriptor::Dir` handle at all.
     pub mode: PolicyMode,
-    /// Interactive-consent prompter, consulted when the matcher returns
+    /// Interactive-consent prompter, consulted when the ceiling returns
     /// `Decision::Ask`. Shared across the store.
     pub prompter: Arc<dyn ConsentPrompter>,
     /// Per-session memory of ask decisions, keyed by `(cap-id, path)`.
@@ -346,7 +348,17 @@ impl<'a> PolicyFilesystemCtxView<'a> {
             return Err(ErrorCode::NotPermitted.into());
         };
         let canonical = parent.join(rel).clean();
-        match self.matcher.decide(&canonical, access) {
+        let op = ResourceOp {
+            cap_id: act_types::constants::CAP_FILESYSTEM.to_string(),
+            key: canonical.display().to_string(),
+            action: if access == FsAccess::Write {
+                "write".to_string()
+            } else {
+                "read".to_string()
+            },
+            attrs: serde_json::Value::Null,
+        };
+        match self.ceiling.classify(&op) {
             Decision::Allow => Ok(PathDecision::Allow(canonical)),
             Decision::Deny => {
                 tracing::warn!(path = %canonical.display(), "fs policy: blocked");
@@ -872,7 +884,8 @@ mod mount_tests {
 
 #[cfg(test)]
 mod policy_tests {
-    use act_policy::fs_matcher::{Decision, FsAccess, FsMatcher};
+    use act_policy::Decision;
+    use act_policy::fs_matcher::{FsAccess, FsMatcher};
     use act_policy::grant::{FsAllow, FsConfig, PolicyMode};
     use act_types::FsMode;
     use std::path::Path;

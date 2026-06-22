@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::sync::{mpsc, oneshot};
 use wasmtime::component::{Component, Linker, ResourceTable, Source, StreamConsumer, StreamResult};
@@ -29,16 +30,16 @@ pub struct HostState {
     table: ResourceTable,
     http_p2: WasiHttpCtx,
     http_p3: WasiHttpCtx,
-    http_hooks: crate::runtime::http_policy::PolicyHttpHooks,
+    http_hooks: http_policy::PolicyHttpHooks,
     #[allow(dead_code)] // retained for Task 10 DNS resolver hook access
-    http_client: std::sync::Arc<crate::runtime::http_client::ActHttpClient>,
-    fs_matcher: act_policy::fs_matcher::FsMatcher,
-    fs_mode: crate::config::PolicyMode,
-    fd_paths: crate::runtime::fs_policy::FdPathMap,
+    http_client: Arc<http_client::ActHttpClient>,
+    fs_ceiling: Arc<dyn act_policy::provider::CompiledCeiling>,
+    fs_effective_mode: crate::config::PolicyMode,
+    fd_paths: fs_policy::FdPathMap,
     /// Interactive-consent prompter + per-session decision cache, shared by
     /// every `ask`-mode decision point (fs / http / sockets).
-    consent_prompter: std::sync::Arc<dyn act_policy::consent::ConsentPrompter>,
-    consent_cache: std::sync::Arc<act_policy::consent::DecisionCache>,
+    consent_prompter: Arc<dyn act_policy::consent::ConsentPrompter>,
+    consent_cache: Arc<act_policy::consent::DecisionCache>,
     /// Caps the component's wasm linear memory growth (via `store.limiter`).
     /// Default `StoreLimits` is unlimited.
     limits: StoreLimits,
@@ -46,13 +47,13 @@ pub struct HostState {
 
 impl HostState {
     /// Build a policy-aware filesystem view.
-    fn policy_fs_view(&mut self) -> crate::runtime::fs_policy::PolicyFilesystemCtxView<'_> {
-        crate::runtime::fs_policy::PolicyFilesystemCtxView {
+    fn policy_fs_view(&mut self) -> fs_policy::PolicyFilesystemCtxView<'_> {
+        fs_policy::PolicyFilesystemCtxView {
             ctx: self.wasi.filesystem(),
             table: &mut self.table,
-            matcher: &self.fs_matcher,
+            ceiling: &self.fs_ceiling,
             fd_paths: &mut self.fd_paths,
-            mode: self.fs_mode,
+            mode: self.fs_effective_mode,
             prompter: self.consent_prompter.clone(),
             cache: self.consent_cache.clone(),
         }
@@ -116,12 +117,12 @@ pub fn create_linker(engine: &Engine) -> Result<Linker<HostState>> {
     linker.allow_shadowing(true);
     wasmtime_wasi::p2::bindings::filesystem::types::add_to_linker::<
         HostState,
-        crate::runtime::fs_policy::PolicyFilesystem,
+        fs_policy::PolicyFilesystem,
     >(&mut linker, |t| t.policy_fs_view())
     .map_err(|e| anyhow::anyhow!("failed to add policy wasi:filesystem/types: {e}"))?;
     wasmtime_wasi::p2::bindings::filesystem::preopens::add_to_linker::<
         HostState,
-        crate::runtime::fs_policy::PolicyFilesystem,
+        fs_policy::PolicyFilesystem,
     >(&mut linker, |t| t.policy_fs_view())
     .map_err(|e| anyhow::anyhow!("failed to add policy wasi:filesystem/preopens: {e}"))?;
     linker.allow_shadowing(false);
@@ -136,7 +137,7 @@ pub fn create_linker(engine: &Engine) -> Result<Linker<HostState>> {
     linker.allow_shadowing(true);
     wasmtime_wasi::p3::bindings::filesystem::preopens::add_to_linker::<
         HostState,
-        crate::runtime::fs_policy::PolicyFilesystem,
+        fs_policy::PolicyFilesystem,
     >(&mut linker, |t| t.policy_fs_view())
     .map_err(|e| anyhow::anyhow!("failed to add policy wasi:filesystem/preopens (p3): {e}"))?;
     linker.allow_shadowing(false);
@@ -150,30 +151,74 @@ pub fn create_linker(engine: &Engine) -> Result<Linker<HostState>> {
 
 /// Create a new store with WASI context, preopening directories from resolved mounts.
 ///
-/// `info` is used to compute the effective policy: user's `fs`/`http` configs are
-/// intersected with the component's declared capabilities before building the store.
-/// Undeclared capability classes and empty allow arrays hard-deny regardless of the
-/// user's grant.
+/// `grant_policy` is intersected with the component's declared capabilities via
+/// `ProviderRegistry::with_builtins()`. Undeclared capability classes are always
+/// denied regardless of the grant.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_store(
     engine: &Engine,
-    preopens: &[crate::runtime::fs_policy::Preopen],
-    http: &crate::config::HttpConfig,
-    fs: &crate::config::FsConfig,
-    sockets: &crate::config::SocketsConfig,
+    preopens: &[fs_policy::Preopen],
+    grant_policy: &act_policy::grant::GrantPolicy,
     info: &ComponentInfo,
     max_memory: Option<usize>,
-    prompter: std::sync::Arc<dyn act_policy::consent::ConsentPrompter>,
-    cache: std::sync::Arc<act_policy::consent::DecisionCache>,
+    prompter: Arc<dyn act_policy::consent::ConsentPrompter>,
+    cache: Arc<act_policy::consent::DecisionCache>,
 ) -> Result<Store<HostState>> {
-    // Intersect user policy with the component's declared capabilities.
-    let effective_fs = act_policy::effective::effective_fs(fs, &info.std.capabilities).config;
-    let effective_http = act_policy::effective::effective_http(http, &info.std.capabilities).config;
-    let effective_sockets =
-        act_policy::effective::effective_sockets(sockets, &info.std.capabilities).config;
+    use act_policy::grant::PolicyMode;
+    use act_policy::provider::{CompiledCeiling, ProviderRegistry, ResourceOp};
 
-    let socket_policy =
-        crate::runtime::sockets_policy::SocketsPolicy::build(effective_sockets).await?;
+    let registry = ProviderRegistry::with_builtins();
+
+    // Helper: extract declared constraints for a capability id.
+    let get_declared = |cap_id: &str| -> Vec<serde_json::Value> {
+        info.std
+            .capabilities
+            .get(cap_id)
+            .map(|req| req.constraints.clone())
+            .unwrap_or_default()
+    };
+
+    let fs_grant = grant_policy.resolve(act_types::constants::CAP_FILESYSTEM);
+    let http_grant = grant_policy.resolve(act_types::constants::CAP_HTTP);
+    let sockets_grant = grant_policy.resolve(act_types::constants::CAP_SOCKETS);
+
+    let fs_ceiling: Arc<dyn CompiledCeiling> = Arc::from(
+        registry
+            .lookup(act_types::constants::CAP_FILESYSTEM)
+            .resolve(
+                act_types::constants::CAP_FILESYSTEM,
+                &get_declared(act_types::constants::CAP_FILESYSTEM),
+                &fs_grant,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("fs policy: {e}"))?,
+    );
+    let fs_effective_mode = fs_ceiling.effective_mode();
+
+    let http_ceiling: Arc<dyn CompiledCeiling> = Arc::from(
+        registry
+            .lookup(act_types::constants::CAP_HTTP)
+            .resolve(
+                act_types::constants::CAP_HTTP,
+                &get_declared(act_types::constants::CAP_HTTP),
+                &http_grant,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("http policy: {e}"))?,
+    );
+
+    let sockets_ceiling: Arc<dyn CompiledCeiling> = Arc::from(
+        registry
+            .lookup(act_types::constants::CAP_SOCKETS)
+            .resolve(
+                act_types::constants::CAP_SOCKETS,
+                &get_declared(act_types::constants::CAP_SOCKETS),
+                &sockets_grant,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("sockets policy: {e}"))?,
+    );
+    let sockets_effective_mode = sockets_ceiling.effective_mode();
 
     let mut builder = WasiCtxBuilder::new();
     let mut preopen_pairs = Vec::with_capacity(preopens.len());
@@ -196,28 +241,78 @@ pub async fn create_store(
         preopen_pairs.push((mount.guest.clone(), mount.host.clone()));
     }
 
-    socket_policy.install(&mut builder, prompter.clone(), cache.clone());
+    // Install sockets enforcement via ceiling.classify.
+    {
+        let sockets_ceiling_clone = sockets_ceiling.clone();
+        let prompter_clone = prompter.clone();
+        let cache_clone = cache.clone();
+        builder
+            .socket_addr_check(move |addr, reason| {
+                let sockets_ceiling = sockets_ceiling_clone.clone();
+                let prompter = prompter_clone.clone();
+                let cache = cache_clone.clone();
+                Box::pin(async move {
+                    use wasmtime_wasi::sockets::SocketAddrUse;
+                    let proto = match reason {
+                        SocketAddrUse::TcpBind | SocketAddrUse::TcpConnect => "tcp",
+                        _ => "udp",
+                    };
+                    let op = ResourceOp {
+                        cap_id: act_types::constants::CAP_SOCKETS.to_string(),
+                        key: format!("{}:{}", addr.ip(), addr.port()),
+                        action: String::new(),
+                        attrs: serde_json::json!({"protocol": proto}),
+                    };
+                    match sockets_ceiling.classify(&op) {
+                        act_policy::Decision::Allow => true,
+                        act_policy::Decision::Deny => false,
+                        act_policy::Decision::Ask => {
+                            use act_policy::consent::ConsentAsk;
+                            let ask = ConsentAsk {
+                                cap_id: act_types::constants::CAP_SOCKETS.to_string(),
+                                key: addr.to_string(),
+                                summary: format!("socket {proto} {addr}"),
+                            };
+                            tokio::spawn(async move { cache.decide_cached(&*prompter, ask).await })
+                                .await
+                                .unwrap_or(false)
+                        }
+                    }
+                })
+            })
+            .allow_tcp(true)
+            .allow_udp(true)
+            .allow_ip_name_lookup(sockets_effective_mode != PolicyMode::Deny);
+    }
 
     let wasi = builder.build();
-    let matcher = act_policy::fs_matcher::FsMatcher::compile(&effective_fs)?;
-    let http_client = std::sync::Arc::new(crate::runtime::http_client::ActHttpClient::new(
-        effective_http.clone(),
-    )?);
+
+    // The HTTP client's DNS resolver filters resolved IPs against the allow/deny
+    // CIDR rules — which the opaque `CompiledCeiling` does not expose — so build
+    // it from the full effective HttpConfig (declaration ∩ grant), not just the
+    // mode. (The hook uses the ceiling; this PEP path needs the raw rules.)
+    let http_effective = act_policy::effective::effective_http(
+        &act_policy::grant::to_http_config(grant_policy)?,
+        &info.std.capabilities,
+    )
+    .config;
+    let http_client = Arc::new(http_client::ActHttpClient::new(http_effective)?);
+
     let state = HostState {
         wasi,
         table: ResourceTable::new(),
         http_p2: WasiHttpCtx::new(),
         http_p3: WasiHttpCtx::new(),
-        http_hooks: crate::runtime::http_policy::PolicyHttpHooks::new(
-            effective_http.clone(),
+        http_hooks: http_policy::PolicyHttpHooks::new(
+            http_ceiling,
             http_client.clone(),
             prompter.clone(),
             cache.clone(),
         ),
         http_client,
-        fs_matcher: matcher,
-        fs_mode: effective_fs.mode,
-        fd_paths: crate::runtime::fs_policy::FdPathMap {
+        fs_ceiling,
+        fs_effective_mode,
+        fd_paths: fs_policy::FdPathMap {
             preopens: preopen_pairs,
             by_rep: Default::default(),
         },
@@ -376,14 +471,12 @@ pub async fn instantiate_component(
     engine: &Engine,
     component: &Component,
     linker: &Linker<HostState>,
-    preopens: &[crate::runtime::fs_policy::Preopen],
-    http: &crate::config::HttpConfig,
-    fs: &crate::config::FsConfig,
-    sockets: &crate::config::SocketsConfig,
+    preopens: &[fs_policy::Preopen],
+    grant_policy: &act_policy::grant::GrantPolicy,
     info: &ComponentInfo,
     max_memory: Option<usize>,
-    prompter: std::sync::Arc<dyn act_policy::consent::ConsentPrompter>,
-    cache: std::sync::Arc<act_policy::consent::DecisionCache>,
+    prompter: Arc<dyn act_policy::consent::ConsentPrompter>,
+    cache: Arc<act_policy::consent::DecisionCache>,
 ) -> Result<(
     ToolProvider,
     Option<sessions::SessionProvider>,
@@ -393,7 +486,13 @@ pub async fn instantiate_component(
     use exports::act::tools::tool_provider::GuestIndices as ToolGuestIndices;
 
     let mut store = create_store(
-        engine, preopens, http, fs, sockets, info, max_memory, prompter, cache,
+        engine,
+        preopens,
+        grant_policy,
+        info,
+        max_memory,
+        prompter,
+        cache,
     )
     .await?;
 
@@ -478,9 +577,9 @@ pub fn spawn_component_actor(
                 } => {
                     let provider = tool_provider.clone();
 
-                    let collected: std::sync::Arc<
+                    let collected: Arc<
                         std::sync::Mutex<Vec<exports::act::tools::tool_provider::ToolEvent>>,
-                    > = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+                    > = Arc::new(std::sync::Mutex::new(Vec::new()));
                     let collected2 = collected.clone();
                     let (done_tx, done_rx) = oneshot::channel::<()>();
 
@@ -726,7 +825,7 @@ where
 
 /// A StreamConsumer that collects all items into a Vec and signals completion.
 struct CollectingConsumer {
-    collected: std::sync::Arc<std::sync::Mutex<Vec<exports::act::tools::tool_provider::ToolEvent>>>,
+    collected: Arc<std::sync::Mutex<Vec<exports::act::tools::tool_provider::ToolEvent>>>,
     done_tx: Option<oneshot::Sender<()>>,
 }
 

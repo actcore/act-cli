@@ -34,18 +34,8 @@ use std::path::{Path, PathBuf};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
+use crate::Decision;
 use crate::grant::{FsConfig, PolicyError, PolicyMode};
-
-/// Result of a policy decision for one filesystem operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Decision {
-    Allow,
-    Deny,
-    /// `Ask` mode: defer to interactive consent. The sync matcher never
-    /// prompts; the async caller (`fs_policy::check_path`) resolves this
-    /// through the `DecisionCache` / `ConsentPrompter`.
-    Ask,
-}
 
 /// The access type being requested on a filesystem path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

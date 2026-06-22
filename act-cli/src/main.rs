@@ -425,9 +425,11 @@ fn tty_or_deny_prompter() -> Arc<dyn act_policy::consent::ConsentPrompter> {
 struct ResolvedOpts {
     #[allow(dead_code)]
     config_file: config::ConfigFile,
-    fs: config::FsConfig,
-    http: config::HttpConfig,
-    sockets: config::SocketsConfig,
+    /// Resolved grant policy (uniform grants for all capability classes).
+    grant_policy: config::GrantPolicy,
+    /// Filesystem mode extracted from the grant policy — used for `resolve_mounts`
+    /// before the provider registry computes the final ceiling.
+    fs_mode: config::PolicyMode,
     metadata: Option<serde_json::Value>,
     max_memory: Option<usize>,
 }
@@ -444,9 +446,10 @@ fn resolve_opts(opts: &CommonOpts) -> Result<ResolvedOpts> {
         deny_ids: opts.deny.clone(),
     };
     let grant_policy = config::build_grant_policy(&config_file, profile, &cli_grants)?;
-    let fs = config::to_fs_config(&grant_policy)?;
-    let http = config::to_http_config(&grant_policy)?;
-    let sockets = config::to_sockets_config(&grant_policy)?;
+    // Extract fs mode for resolve_mounts (needed before instantiation).
+    let fs_mode = grant_policy
+        .resolve(act_types::constants::CAP_FILESYSTEM)
+        .mode;
     let cli_metadata = parse_cli_metadata(
         &opts.metadata,
         opts.metadata_json.as_deref(),
@@ -460,9 +463,8 @@ fn resolve_opts(opts: &CommonOpts) -> Result<ResolvedOpts> {
     };
     Ok(ResolvedOpts {
         config_file,
-        fs,
-        http,
-        sockets,
+        grant_policy,
+        fs_mode,
         metadata,
         max_memory: opts.max_memory,
     })
@@ -496,12 +498,11 @@ async fn prepare_component(
     let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
     let info = runtime::read_component_info(&wasm_bytes)?;
 
-    let fs = resolved.fs;
-    let http = resolved.http;
-    let sockets = resolved.sockets;
+    let grant_policy = resolved.grant_policy;
+    let fs_mode = resolved.fs_mode;
     let max_memory = resolved.max_memory;
 
-    let mounts = runtime::fs_policy::resolve_mounts(&info.std.capabilities, fs.mode);
+    let mounts = runtime::fs_policy::resolve_mounts(&info.std.capabilities, fs_mode);
     runtime::fs_policy::create_mount_dirs(&mounts).context("creating mount directories")?;
     let preopens = runtime::fs_policy::derive_preopens(&mounts);
 
@@ -524,7 +525,14 @@ async fn prepare_component(
     let wasm = runtime::load_component(&engine, &component_path)?;
     let linker = runtime::create_linker(&engine)?;
     let (instance, session_provider, store) = runtime::instantiate_component(
-        &engine, &wasm, &linker, &preopens, &http, &fs, &sockets, &info, max_memory, prompter,
+        &engine,
+        &wasm,
+        &linker,
+        &preopens,
+        &grant_policy,
+        &info,
+        max_memory,
+        prompter,
         cache,
     )
     .await?;

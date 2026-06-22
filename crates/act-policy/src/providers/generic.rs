@@ -18,8 +18,9 @@ use crate::provider::{CapabilityProvider, CompiledCeiling, ResourceOp};
 
 pub struct GenericProvider;
 
+#[async_trait::async_trait]
 impl CapabilityProvider for GenericProvider {
-    fn resolve(
+    async fn resolve(
         &self,
         _cap_id: &str,
         declared: &[serde_json::Value],
@@ -161,8 +162,8 @@ mod tests {
     use crate::grant::{CapabilityGrant, PolicyMode};
     use crate::provider::{CapabilityProvider, ResourceOp};
 
-    #[test]
-    fn generic_provider_globs_args() {
+    #[tokio::test]
+    async fn generic_provider_globs_args() {
         let p = GenericProvider;
         let declared = vec![serde_json::json!({"database":"staging_*"})];
         let grant = CapabilityGrant {
@@ -170,7 +171,7 @@ mod tests {
             allow: vec![serde_json::json!({"database":"staging_*"})],
             deny: vec![],
         };
-        let c = p.resolve("db:truncate", &declared, &grant).unwrap();
+        let c = p.resolve("db:truncate", &declared, &grant).await.unwrap();
         let op = |db: &str| ResourceOp {
             cap_id: "db:truncate".into(),
             key: db.into(),
@@ -181,8 +182,8 @@ mod tests {
         assert_eq!(c.classify(&op("prod_users")), Decision::Deny); // no glob match
     }
 
-    #[test]
-    fn generic_provider_permits_undeclared() {
+    #[tokio::test]
+    async fn generic_provider_permits_undeclared() {
         let p = GenericProvider;
         let op = ResourceOp {
             cap_id: "db:truncate".into(),
@@ -198,7 +199,10 @@ mod tests {
             deny: vec![],
         };
         assert_eq!(
-            p.resolve("db:truncate", &[], &open).unwrap().classify(&op),
+            p.resolve("db:truncate", &[], &open)
+                .await
+                .unwrap()
+                .classify(&op),
             Decision::Allow
         );
 
@@ -209,7 +213,10 @@ mod tests {
             deny: vec![],
         };
         assert_eq!(
-            p.resolve("db:truncate", &[], &deny).unwrap().classify(&op),
+            p.resolve("db:truncate", &[], &deny)
+                .await
+                .unwrap()
+                .classify(&op),
             Decision::Deny
         );
 
@@ -221,37 +228,42 @@ mod tests {
             deny: vec![],
         };
         assert_eq!(
-            p.resolve("db:truncate", &[], &ask).unwrap().classify(&op),
+            p.resolve("db:truncate", &[], &ask)
+                .await
+                .unwrap()
+                .classify(&op),
             Decision::Ask
         );
     }
 
-    #[test]
-    fn with_builtins_routes_classes() {
+    #[tokio::test]
+    async fn with_builtins_routes_classes() {
         use crate::provider::ProviderRegistry;
         let r = ProviderRegistry::with_builtins();
         // db:* has no typed provider → generic; wasi:filesystem → fs provider.
         assert!(
             r.lookup("db:truncate")
                 .resolve("db:truncate", &[], &Default::default())
+                .await
                 .is_ok()
         );
         assert!(
             r.lookup("wasi:filesystem")
                 .resolve("wasi:filesystem", &[], &Default::default())
+                .await
                 .is_ok()
         );
     }
 
-    #[test]
-    fn generic_deny_wins_over_allow() {
+    #[tokio::test]
+    async fn generic_deny_wins_over_allow() {
         let p = GenericProvider;
         let grant = CapabilityGrant {
             mode: PolicyMode::Allowlist,
             allow: vec![serde_json::json!({"table": "orders"})],
             deny: vec![serde_json::json!({"table": "orders"})],
         };
-        let c = p.resolve("db:read", &[], &grant).unwrap();
+        let c = p.resolve("db:read", &[], &grant).await.unwrap();
         let op = ResourceOp {
             cap_id: "db:read".into(),
             key: "orders".into(),

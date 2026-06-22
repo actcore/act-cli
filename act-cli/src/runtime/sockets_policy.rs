@@ -13,8 +13,9 @@ use wasmtime_wasi::WasiCtxBuilder;
 use wasmtime_wasi::sockets::SocketAddrUse;
 
 use crate::config::{PolicyMode, SocketsConfig, SocketsRule};
+use act_policy::Decision;
 use act_policy::consent::{ConsentAsk, ConsentPrompter, DecisionCache};
-use act_policy::net::{NetVerdict as Decision, cidr_contains};
+use act_policy::net::cidr_contains;
 use act_types::SocketProtocol;
 
 /// Resolved policy ready to install on `WasiCtxBuilder::socket_addr_check`.
