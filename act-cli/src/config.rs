@@ -14,9 +14,7 @@ use std::path::{Path, PathBuf};
 // ── Re-export policy types from act-policy ──
 #[cfg(test)]
 pub use act_policy::grant::FsAllow;
-pub use act_policy::grant::{
-    CapabilityGrant, GrantPolicy, HttpConfig, PolicyMode, SocketsConfig, SocketsRule,
-};
+pub use act_policy::grant::{CapabilityGrant, GrantPolicy, HttpConfig, PolicyMode};
 
 // ── TOML deserialization types ──
 

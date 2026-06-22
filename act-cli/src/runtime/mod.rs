@@ -17,7 +17,6 @@ pub mod fs_policy;
 pub mod http_client;
 pub mod http_policy;
 pub mod sessions;
-pub mod sockets_policy;
 
 // Generated bindings from WIT — fully auto-generated, no manual patching.
 #[allow(unused_mut, unused_variables, dead_code)]
