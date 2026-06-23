@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-06-23
+
+### Added
+
+- **New `act-policy` crate** — the capability decision core (PDP) extracted into
+  a standalone, wasm-portable library: a pluggable `CapabilityProvider`
+  framework with built-in `wasi:filesystem` / `wasi:http` / `wasi:sockets`
+  providers plus a generic glob provider for semantic capability classes (e.g.
+  `db:*`). `act-cli` now makes all of its capability decisions through it.
+
+### Changed
+
+- **Filesystem read-only access is now enforced.** A component that declares a
+  path as `ro` can no longer write to it — previously the `ro`/`rw` mode was
+  declared but not enforced. Components declaring `rw` are unaffected.
+- Upgraded wasmtime to 46 and wired the final WASI 0.3.0 interfaces.
+- WIT dependencies are now fetched with `wkg` instead of `wit-deps`.
+
 ## [0.9.0] - 2026-06-22
 
 This release reworks the capability/sandbox surface into one uniform grant model
