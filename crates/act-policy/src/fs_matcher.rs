@@ -196,6 +196,19 @@ fn compile_set(label: &str, patterns: &[String]) -> Result<GlobSet, PolicyError>
             })?;
             b.add(glob);
         }
+        // Conversely, a subtree pattern `/foo/bar/**` should also match the
+        // directory itself (`/foo/bar`): creating an entry in a directory
+        // requires access to that directory. Applied per-set, so a read-only
+        // `/foo/bar/**` adds `/foo/bar` only to the read set.
+        if let Some(dir) = expanded.strip_suffix("/**")
+            && !dir.is_empty()
+        {
+            let glob = Glob::new(dir).map_err(|e| PolicyError::Glob {
+                pat: dir.to_string(),
+                source: e,
+            })?;
+            b.add(glob);
+        }
     }
     b.build().map_err(|e| PolicyError::Glob {
         pat: label.to_string(),
@@ -213,7 +226,11 @@ fn compile_set(label: &str, patterns: &[String]) -> Result<GlobSet, PolicyError>
 /// this normalisation only catches strays introduced by path joining.
 fn expand_pattern(pattern: &str) -> String {
     let expanded = shellexpand::tilde(pattern).into_owned();
-    let absolute = if Path::new(&expanded).is_absolute() {
+    // A pattern beginning with `**` is a match-anywhere wildcard (e.g. the
+    // whole-filesystem ceiling `**`); it must NOT be anchored to the cwd, or it
+    // would only match paths under the cwd. Absolute patterns are kept as-is;
+    // other relative patterns resolve against the cwd.
+    let absolute = if expanded.starts_with("**") || Path::new(&expanded).is_absolute() {
         expanded
     } else {
         match std::env::current_dir() {
@@ -586,6 +603,68 @@ mod tests {
             !deny_cache
                 .decide_cached(&DenyPrompter, mk_ask("/data/ok"))
                 .await
+        );
+    }
+
+    #[test]
+    fn subtree_glob_matches_dir_itself() {
+        // `/tmp/work/**` (rw) must also allow writing the directory itself —
+        // creating an entry in a dir requires write access to that dir (e.g.
+        // `create_dir_all(parent)` before writing a file).
+        let m = FsMatcher::compile(&cfg(PolicyMode::Allowlist, &["/tmp/work/**"], &[])).unwrap();
+        assert_eq!(
+            m.decide(&PathBuf::from("/tmp/work"), FsAccess::Write),
+            Decision::Allow
+        );
+        assert_eq!(
+            m.decide(&PathBuf::from("/tmp/work/a.txt"), FsAccess::Write),
+            Decision::Allow
+        );
+        assert_eq!(
+            m.decide(&PathBuf::from("/tmp/other"), FsAccess::Write),
+            Decision::Deny
+        );
+    }
+
+    #[test]
+    fn double_star_matches_absolute_paths() {
+        // The whole-filesystem wildcard `**` must match absolute paths, not be
+        // anchored to the cwd.
+        let m = FsMatcher::compile(&cfg(PolicyMode::Allowlist, &["**"], &[])).unwrap();
+        assert_eq!(
+            m.decide(&PathBuf::from("/tmp/anywhere/x"), FsAccess::Write),
+            Decision::Allow
+        );
+        assert_eq!(
+            m.decide(&PathBuf::from("/etc/passwd"), FsAccess::Read),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn ro_subtree_dir_readable_not_writable() {
+        // A read-only subtree grant adds the dir itself to the read set only:
+        // the dir is readable (traversal) but not writable.
+        let cfg = FsConfig {
+            mode: PolicyMode::Allowlist,
+            allow: vec![FsAllow {
+                glob: "/tmp/work/**".into(),
+                mode: act_types::FsMode::Ro,
+            }],
+            deny: vec![],
+        };
+        let m = FsMatcher::compile(&cfg).unwrap();
+        assert_eq!(
+            m.decide(&PathBuf::from("/tmp/work"), FsAccess::Read),
+            Decision::Allow
+        );
+        assert_eq!(
+            m.decide(&PathBuf::from("/tmp/work"), FsAccess::Write),
+            Decision::Deny
+        );
+        assert_eq!(
+            m.decide(&PathBuf::from("/tmp/work/a.txt"), FsAccess::Write),
+            Decision::Deny
         );
     }
 }
