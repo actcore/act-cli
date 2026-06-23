@@ -84,11 +84,7 @@ impl PolicyHttpHooks {
             action: method.unwrap_or("").to_string(),
             attrs: serde_json::json!({"scheme": scheme}),
         };
-        match self.ceiling.classify(&op) {
-            act_policy::Decision::Allow => Decision::Allow,
-            act_policy::Decision::Deny => Decision::Deny,
-            act_policy::Decision::Ask => Decision::Ask,
-        }
+        self.ceiling.classify(&op)
     }
 }
 
@@ -252,20 +248,19 @@ mod tests {
             .unwrap()
             .block_on(HttpProvider.resolve("wasi:http", &declared, &grant))
             .expect("HttpProvider::resolve");
-        let ceiling: std::sync::Arc<dyn act_policy::provider::CompiledCeiling> =
-            std::sync::Arc::from(ceiling_box);
+        let ceiling: Arc<dyn act_policy::provider::CompiledCeiling> = Arc::from(ceiling_box);
         let http_cfg = crate::config::HttpConfig {
             mode,
             ..Default::default()
         };
-        let client = std::sync::Arc::new(
+        let client = Arc::new(
             crate::runtime::http_client::ActHttpClient::new(http_cfg).expect("client builds"),
         );
         PolicyHttpHooks::new(
             ceiling,
             client,
-            std::sync::Arc::new(act_policy::consent::DenyPrompter),
-            std::sync::Arc::new(act_policy::consent::DecisionCache::new()),
+            Arc::new(act_policy::consent::DenyPrompter),
+            Arc::new(act_policy::consent::DecisionCache::new()),
         )
     }
 
