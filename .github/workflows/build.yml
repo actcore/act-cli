@@ -37,7 +37,6 @@ jobs:
       - uses: actions/checkout@v7
       - uses: moonrepo/setup-rust@v1
         with:
-          channel: stable
           targets: ${{ matrix.target }}
           bins: wkg
         env:
@@ -81,7 +80,6 @@ jobs:
       - uses: actions/checkout@v7
       - uses: moonrepo/setup-rust@v1
         with:
-          channel: stable
           targets: ${{ matrix.target }}
           bins: wkg, cargo-zigbuild
         env:

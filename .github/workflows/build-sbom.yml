@@ -10,13 +10,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/cache-cargo-install-action@v3
+      - uses: moonrepo/setup-rust@v1
         with:
-          tool: cargo-cyclonedx
-      - uses: taiki-e/cache-cargo-install-action@v3
-        with:
-          tool: wkg
+          bins: cargo-cyclonedx, wkg
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - run: WKG_CONFIG_FILE=wkg-registry.toml wkg wit fetch --type wit

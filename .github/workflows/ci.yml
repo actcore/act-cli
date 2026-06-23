@@ -21,7 +21,6 @@ jobs:
       - uses: actions/checkout@v7
       - uses: moonrepo/setup-rust@v1
         with:
-          channel: stable
           components: clippy
           bins: wkg
         env:
@@ -38,7 +37,6 @@ jobs:
       - uses: actions/checkout@v7
       - uses: moonrepo/setup-rust@v1
         with:
-          channel: stable
           components: rustfmt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -53,7 +51,6 @@ jobs:
       - uses: actions/checkout@v7
       - uses: moonrepo/setup-rust@v1
         with:
-          channel: stable
           bins: wkg
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
