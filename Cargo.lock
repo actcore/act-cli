@@ -31,7 +31,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "walkdir",
- "wasm-encoder 0.250.0",
+ "wasm-encoder 0.252.0",
  "wasmparser 0.250.0",
 ]
 
@@ -3991,16 +3991,6 @@ dependencies = [
  "wasm-encoder 0.251.0",
  "wasmparser 0.251.0",
  "wat",
-]
-
-[[package]]
-name = "wasm-encoder"
-version = "0.250.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2271adb766023046af314460f1fae02cc34ea16d736d93404d3b65be44270923"
-dependencies = [
- "leb128fmt",
- "wasmparser 0.250.0",
 ]
 
 [[package]]
