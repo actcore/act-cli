@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "act-build"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "act-types",
  "anyhow",
@@ -37,7 +37,7 @@ dependencies = [
 
 [[package]]
 name = "act-cli"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "act-policy",
  "act-store",
@@ -88,7 +88,7 @@ dependencies = [
 
 [[package]]
 name = "act-policy"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "act-types",
  "async-trait",
@@ -104,7 +104,7 @@ dependencies = [
 
 [[package]]
 name = "act-store"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "chrono",
  "dirs",
@@ -125,7 +125,9 @@ dependencies = [
 
 [[package]]
 name = "act-types"
-version = "0.12.0"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7301ef8d8af471d68204b57d195e1d0e4f593917c4f0267ffb67baa35086f273"
 dependencies = [
  "base64",
  "ciborium",
