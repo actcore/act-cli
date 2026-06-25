@@ -366,15 +366,11 @@ pub fn read_component_info(component_bytes: &[u8]) -> Result<ComponentInfo> {
 
 // ── Conversion helpers ──
 
-impl From<&exports::act::tools::tool_provider::LocalizedString>
-    for act_types::types::LocalizedString
-{
-    fn from(ls: &exports::act::tools::tool_provider::LocalizedString) -> Self {
+impl From<&act::core::types::LocalizedString> for act_types::types::LocalizedString {
+    fn from(ls: &act::core::types::LocalizedString) -> Self {
         match ls {
-            exports::act::tools::tool_provider::LocalizedString::Plain(s) => Self::Plain(s.clone()),
-            exports::act::tools::tool_provider::LocalizedString::Localized(pairs) => {
-                Self::from(pairs.clone())
-            }
+            act::core::types::LocalizedString::Plain(s) => Self::Plain(s.clone()),
+            act::core::types::LocalizedString::Localized(pairs) => Self::from(pairs.clone()),
         }
     }
 }
@@ -384,7 +380,7 @@ impl From<&exports::act::tools::tool_provider::LocalizedString>
 /// Errors from component calls.
 pub enum ComponentError {
     /// Structured tool error from the component (has kind, message, metadata).
-    Tool(exports::act::tools::tool_provider::Error),
+    Tool(act::core::types::Error),
     /// Infrastructure error (wasmtime, actor channel, etc.).
     Internal(anyhow::Error),
 }
@@ -395,9 +391,7 @@ pub use act_types::Metadata;
 pub enum ComponentRequest {
     ListTools {
         metadata: Metadata,
-        reply: oneshot::Sender<
-            Result<exports::act::tools::tool_provider::ListToolsResponse, ComponentError>,
-        >,
+        reply: oneshot::Sender<Result<act::tools::types::ListToolsResponse, ComponentError>>,
     },
     CallTool {
         name: String,
@@ -435,12 +429,12 @@ pub enum ComponentRequest {
 
 /// Collected result from call-tool (stream already consumed).
 pub struct CallToolResult {
-    pub events: Vec<exports::act::tools::tool_provider::ToolEvent>,
+    pub events: Vec<act::tools::types::ToolEvent>,
 }
 
 /// Events sent through the SSE channel. Wraps stream events plus a terminal Done signal.
 pub enum SseEvent {
-    Stream(exports::act::tools::tool_provider::ToolEvent),
+    Stream(act::tools::types::ToolEvent),
     Done,
     Error(ComponentError),
 }
@@ -576,9 +570,8 @@ pub fn spawn_component_actor(
                 } => {
                     let provider = tool_provider.clone();
 
-                    let collected: Arc<
-                        std::sync::Mutex<Vec<exports::act::tools::tool_provider::ToolEvent>>,
-                    > = Arc::new(std::sync::Mutex::new(Vec::new()));
+                    let collected: Arc<std::sync::Mutex<Vec<act::tools::types::ToolEvent>>> =
+                        Arc::new(std::sync::Mutex::new(Vec::new()));
                     let collected2 = collected.clone();
                     let (done_tx, done_rx) = oneshot::channel::<()>();
 
@@ -798,15 +791,11 @@ pub fn spawn_component_actor(
 /// Helper for unwrapping `result<R, error>` returns from session-provider
 /// typed-func calls.
 fn session_call_to_response<R, F>(
-    raw: wasmtime::Result<
-        wasmtime::Result<(Result<R, exports::act::tools::tool_provider::Error>,)>,
-    >,
+    raw: wasmtime::Result<wasmtime::Result<(Result<R, act::core::types::Error>,)>>,
     extract: F,
 ) -> Result<R, ComponentError>
 where
-    F: FnOnce(
-        (Result<R, exports::act::tools::tool_provider::Error>,),
-    ) -> Result<R, exports::act::tools::tool_provider::Error>,
+    F: FnOnce((Result<R, act::core::types::Error>,)) -> Result<R, act::core::types::Error>,
 {
     match raw {
         Ok(Ok(tuple)) => match extract(tuple) {
@@ -824,12 +813,12 @@ where
 
 /// A StreamConsumer that collects all items into a Vec and signals completion.
 struct CollectingConsumer {
-    collected: Arc<std::sync::Mutex<Vec<exports::act::tools::tool_provider::ToolEvent>>>,
+    collected: Arc<std::sync::Mutex<Vec<act::tools::types::ToolEvent>>>,
     done_tx: Option<oneshot::Sender<()>>,
 }
 
 impl StreamConsumer<HostState> for CollectingConsumer {
-    type Item = exports::act::tools::tool_provider::ToolEvent;
+    type Item = act::tools::types::ToolEvent;
 
     fn poll_consume(
         mut self: Pin<&mut Self>,
@@ -866,7 +855,7 @@ struct ForwardingConsumer {
 }
 
 impl StreamConsumer<HostState> for ForwardingConsumer {
-    type Item = exports::act::tools::tool_provider::ToolEvent;
+    type Item = act::tools::types::ToolEvent;
 
     fn poll_consume(
         mut self: Pin<&mut Self>,

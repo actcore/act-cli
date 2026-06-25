@@ -4,7 +4,7 @@
 //! - [`to_text`] — markdown-like human-readable output
 //! - [`to_json`] — machine-readable JSON output
 
-use crate::runtime::exports::act::tools::tool_provider::ListToolsResponse;
+use crate::runtime::act::tools::types::ListToolsResponse;
 use act_types::{
     constants::{
         META_ANTI_USAGE_HINTS, META_DESTRUCTIVE, META_IDEMPOTENT, META_READ_ONLY, META_STREAMING,
@@ -23,7 +23,7 @@ use std::fmt::Write as _;
 pub struct InfoData<'a> {
     pub info: &'a ComponentInfo,
     /// Tool list from `list-tools`, if requested.
-    pub tools: Option<Vec<crate::runtime::exports::act::tools::tool_provider::ToolDefinition>>,
+    pub tools: Option<Vec<crate::runtime::act::tools::types::ToolDefinition>>,
 }
 
 // ── JSON output ───────────────────────────────────────────────────────────────
@@ -171,9 +171,7 @@ pub fn to_tools_toon(resp: &ListToolsResponse) -> anyhow::Result<String> {
     to_toon(&build_raw_tools(resp))
 }
 
-fn tool_to_json(
-    td: &crate::runtime::exports::act::tools::tool_provider::ToolDefinition,
-) -> ToolJson {
+fn tool_to_json(td: &crate::runtime::act::tools::types::ToolDefinition) -> ToolJson {
     let meta = Metadata::from(td.metadata.clone());
     let desc = LocalizedString::from(&td.description);
 
@@ -314,10 +312,7 @@ pub fn to_text(data: &InfoData<'_>) -> String {
     out
 }
 
-fn tool_to_text(
-    td: &crate::runtime::exports::act::tools::tool_provider::ToolDefinition,
-    p: &Palette,
-) -> String {
+fn tool_to_text(td: &crate::runtime::act::tools::types::ToolDefinition, p: &Palette) -> String {
     let mut out = String::new();
     let meta = Metadata::from(td.metadata.clone());
     let desc = LocalizedString::from(&td.description);

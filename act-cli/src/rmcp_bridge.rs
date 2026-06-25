@@ -41,7 +41,7 @@ pub struct ActRmcpBridge {
     pub peer_slot: Arc<crate::runtime::elicit::PeerSlot>,
 }
 
-fn map_content_part(part: &runtime::exports::act::tools::tool_provider::ContentPart) -> Content {
+fn map_content_part(part: &runtime::act::tools::types::ContentPart) -> Content {
     let mime = part.mime_type.as_deref().unwrap_or("");
 
     // UTF-8 text-like payloads surface as MCP text content verbatim. This
@@ -94,7 +94,7 @@ fn component_error_to_mcp(err: runtime::ComponentError) -> ErrorData {
 // ── list_tools helpers ──────────────────────────────────────────────────────
 
 fn convert_tool_definitions(
-    defs: &[runtime::exports::act::tools::tool_provider::ToolDefinition],
+    defs: &[runtime::act::tools::types::ToolDefinition],
     inject_arg_meta: bool,
 ) -> Vec<Tool> {
     defs.iter()
@@ -179,10 +179,10 @@ fn fold_events_to_result(result: runtime::CallToolResult) -> rmcp::model::CallTo
 
     for event in &result.events {
         match event {
-            runtime::exports::act::tools::tool_provider::ToolEvent::Content(part) => {
+            runtime::act::tools::types::ToolEvent::Content(part) => {
                 content.push(map_content_part(part));
             }
-            runtime::exports::act::tools::tool_provider::ToolEvent::Error(err) => {
+            runtime::act::tools::types::ToolEvent::Error(err) => {
                 is_error = true;
                 let message = act_types::types::LocalizedString::from(&err.message)
                     .any_text()
@@ -677,10 +677,12 @@ impl rmcp::ServerHandler for ActRmcpBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::exports::act::tools::tool_provider as runtime_types;
-    use crate::runtime::exports::act::tools::tool_provider::{
-        ContentPart, Error, LocalizedString, ToolDefinition,
-    };
+    // act:tools@0.2.0 split the data model out of the provider interface into
+    // `act:tools/types`; `error` / `localized-string` resolve through `act:core`.
+    use crate::runtime::act::core::types as runtime_core;
+    use crate::runtime::act::core::types::{Error, LocalizedString};
+    use crate::runtime::act::tools::types as runtime_types;
+    use crate::runtime::act::tools::types::{ContentPart, ToolDefinition};
     use rmcp::model::{Content, ErrorCode, RawContent};
 
     fn part(mime: Option<&str>, data: &[u8]) -> ContentPart {
@@ -1035,9 +1037,9 @@ mod tests {
                 mime_type: Some("text/plain".into()),
                 metadata: vec![],
             }),
-            runtime_types::ToolEvent::Error(runtime_types::Error {
+            runtime_types::ToolEvent::Error(runtime_core::Error {
                 kind: act_types::constants::ERR_INTERNAL.to_string(),
-                message: runtime_types::LocalizedString::Plain("boom mid-stream".into()),
+                message: runtime_core::LocalizedString::Plain("boom mid-stream".into()),
                 metadata: vec![],
             }),
         ];

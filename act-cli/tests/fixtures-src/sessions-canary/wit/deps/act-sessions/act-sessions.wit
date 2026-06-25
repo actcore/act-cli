@@ -12,10 +12,17 @@
 /// `act:sessions` is opt-in. Stateless components do not export it.
 /// The package depends on `act:core` for the cross-cutting types
 /// (`metadata`, `error`).
-package act:sessions@0.1.0;
+///
+/// The data model lives in its own `types` interface (the `session`
+/// record), function-free and async-free, so other packages — notably
+/// sync-shim adapters shipped from a separate shim repository — can
+/// `use act:sessions/types.{session}` without pulling in the async
+/// `session-provider` signatures.
+package act:sessions@0.2.0;
 
-interface session-provider {
-  use act:core/types@0.4.0.{metadata, error};
+/// Session data model — function-free, async-free, safe to `use` anywhere.
+interface types {
+  use act:core/types@0.4.0.{metadata};
 
   /// Component-side state container.
   ///
@@ -33,6 +40,11 @@ interface session-provider {
     /// are registered in `ACT-CONSTANTS.md`.
     metadata: metadata,
   }
+}
+
+interface session-provider {
+  use act:core/types@0.4.0.{metadata, error};
+  use types.{session};
 
   /// Returns a JSON Schema (type "object") for valid `args` to
   /// `open-session`.

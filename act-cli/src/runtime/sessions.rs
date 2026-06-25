@@ -13,11 +13,15 @@
 
 use wasmtime::component::TypedFunc;
 
-use super::exports::act::sessions::session_provider::{self, Error, Guest, Metadata};
+use super::exports::act::sessions::session_provider::Guest;
+// `act:sessions@0.2.0` moved the `session` record into `act:sessions/types`;
+// `error` / `metadata` resolve through `act:core/types`. Only the `Guest`
+// (and its typed-func accessors) still live in `session_provider`.
+use super::act::core::types::{Error, Metadata};
 
-/// `act:sessions/session-provider.session` — re-exported from the generated
-/// bindings so callers keep referring to `sessions::Session`.
-pub use session_provider::Session;
+/// `act:sessions/types.session` — re-exported from the generated bindings so
+/// callers keep referring to `sessions::Session`.
+pub use super::act::sessions::types::Session;
 
 // ── Typed function aliases (matching the WIT signatures) ───────────────────
 

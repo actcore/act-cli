@@ -751,7 +751,7 @@ async fn cmd_call(
 
     for event in &result.events {
         match event {
-            runtime::exports::act::tools::tool_provider::ToolEvent::Content(part) => {
+            runtime::act::tools::types::ToolEvent::Content(part) => {
                 let mime = part.mime_type.as_deref().unwrap_or("application/cbor");
                 if mime.starts_with("text/")
                     || mime == "application/json"
@@ -778,7 +778,7 @@ async fn cmd_call(
                     std::io::stdout().write_all(&part.data)?;
                 }
             }
-            runtime::exports::act::tools::tool_provider::ToolEvent::Error(err) => {
+            runtime::act::tools::types::ToolEvent::Error(err) => {
                 let ls = act_types::types::LocalizedString::from(&err.message);
                 anyhow::bail!("{}: {}", err.kind, ls.any_text());
             }

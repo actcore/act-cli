@@ -22,6 +22,14 @@ use std::collections::HashMap;
 use exports::act::sessions::session_provider as session_exports;
 use exports::act::tools::tool_provider as tool_exports;
 
+// Data types moved to dedicated `types` interfaces in act:tools@0.2.0 /
+// act:sessions@0.2.0; `localized-string` lives in act:core. The
+// `Guest` traits and the `stream<>`-bearing `tool-result` stay in their
+// provider interfaces (`tool_exports` / `session_exports`).
+use act::core::types as core_types;
+use act::sessions::types as session_types;
+use act::tools::types as tool_types;
+
 // ── State ──────────────────────────────────────────────────────────────────
 
 thread_local! {
@@ -61,10 +69,10 @@ fn extract_session_id(metadata: &[(String, Vec<u8>)]) -> Option<String> {
     None
 }
 
-fn make_error(kind: &str, message: &str) -> tool_exports::Error {
-    tool_exports::Error {
+fn make_error(kind: &str, message: &str) -> tool_types::Error {
+    tool_types::Error {
         kind: kind.to_string(),
-        message: tool_exports::LocalizedString::Plain(message.to_string()),
+        message: core_types::LocalizedString::Plain(message.to_string()),
         metadata: vec![],
     }
 }
@@ -80,10 +88,10 @@ export!(SessionsCanary);
 impl tool_exports::Guest for SessionsCanary {
     async fn list_tools(
         _metadata: Vec<(String, Vec<u8>)>,
-    ) -> Result<tool_exports::ListToolsResponse, tool_exports::Error> {
-        let read_tool = tool_exports::ToolDefinition {
+    ) -> Result<tool_types::ListToolsResponse, tool_types::Error> {
+        let read_tool = tool_types::ToolDefinition {
             name: "read".to_string(),
-            description: tool_exports::LocalizedString::Plain(
+            description: core_types::LocalizedString::Plain(
                 "Read the current counter value for this session.".to_string(),
             ),
             parameters_schema: r#"{"type":"object","properties":{},"additionalProperties":false}"#
@@ -93,16 +101,16 @@ impl tool_exports::Guest for SessionsCanary {
                 ("std:idempotent".to_string(), to_cbor(&serde_json::json!(true))),
             ],
         };
-        let increment_tool = tool_exports::ToolDefinition {
+        let increment_tool = tool_types::ToolDefinition {
             name: "increment".to_string(),
-            description: tool_exports::LocalizedString::Plain(
+            description: core_types::LocalizedString::Plain(
                 "Increment the counter by `by` (default 1) and return the new value.".to_string(),
             ),
             parameters_schema: r#"{"type":"object","properties":{"by":{"type":"integer","default":1}},"additionalProperties":false}"#
                 .to_string(),
             metadata: vec![],
         };
-        Ok(tool_exports::ListToolsResponse {
+        Ok(tool_types::ListToolsResponse {
             metadata: vec![],
             tools: vec![read_tool, increment_tool],
         })
@@ -116,7 +124,7 @@ impl tool_exports::Guest for SessionsCanary {
         let session_id = match extract_session_id(&metadata) {
             Some(id) => id,
             None => {
-                return tool_exports::ToolResult::Immediate(vec![tool_exports::ToolEvent::Error(
+                return tool_exports::ToolResult::Immediate(vec![tool_types::ToolEvent::Error(
                     make_error(
                         "std:invalid-args",
                         "Missing required metadata key std:session-id",
@@ -128,7 +136,7 @@ impl tool_exports::Guest for SessionsCanary {
         let event = match name.as_str() {
             "read" => SESSIONS.with(|s| match s.borrow().get(&session_id) {
                 Some(&value) => content_event(&serde_json::json!({ "value": value })),
-                None => tool_exports::ToolEvent::Error(make_error(
+                None => tool_types::ToolEvent::Error(make_error(
                     "std:session-not-found",
                     &format!("Unknown session-id: {session_id}"),
                 )),
@@ -143,14 +151,14 @@ impl tool_exports::Guest for SessionsCanary {
                             *counter += by;
                             content_event(&serde_json::json!({ "value": *counter }))
                         }
-                        None => tool_exports::ToolEvent::Error(make_error(
+                        None => tool_types::ToolEvent::Error(make_error(
                             "std:session-not-found",
                             &format!("Unknown session-id: {session_id}"),
                         )),
                     }
                 })
             }
-            other => tool_exports::ToolEvent::Error(make_error(
+            other => tool_types::ToolEvent::Error(make_error(
                 "std:not-found",
                 &format!("Unknown tool: {other}"),
             )),
@@ -160,8 +168,8 @@ impl tool_exports::Guest for SessionsCanary {
     }
 }
 
-fn content_event(value: &serde_json::Value) -> tool_exports::ToolEvent {
-    tool_exports::ToolEvent::Content(tool_exports::ContentPart {
+fn content_event(value: &serde_json::Value) -> tool_types::ToolEvent {
+    tool_types::ToolEvent::Content(tool_types::ContentPart {
         data: to_cbor(value),
         mime_type: Some("application/cbor".to_string()),
         metadata: vec![],
@@ -192,7 +200,7 @@ impl session_exports::Guest for SessionsCanary {
     async fn open_session(
         args: Vec<(String, Vec<u8>)>,
         _metadata: Vec<(String, Vec<u8>)>,
-    ) -> Result<session_exports::Session, session_exports::Error> {
+    ) -> Result<session_types::Session, session_exports::Error> {
         let mut start: u64 = 0;
         for (key, value) in &args {
             if key == "start"
@@ -206,7 +214,7 @@ impl session_exports::Guest for SessionsCanary {
         let id = alloc_session_id();
         SESSIONS.with(|s| s.borrow_mut().insert(id.clone(), start));
 
-        Ok(session_exports::Session {
+        Ok(session_types::Session {
             id,
             metadata: vec![],
         })

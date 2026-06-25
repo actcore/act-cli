@@ -6,17 +6,33 @@
 /// other capability interfaces (`event-provider`, `resource-provider`,
 /// …) or in isolation; capability packages are independent and opt-in.
 ///
-/// This package defines the tool data model and the `tool-provider`
-/// interface (list-tools, call-tool). It depends on `act:core` for the
-/// cross-cutting types (`cbor`, `metadata`, `error`, `localized-string`).
+/// This package defines the tool data model (interface `types`) and the
+/// `tool-provider` interface (list-tools, call-tool). It depends on
+/// `act:core` for the cross-cutting types (`cbor`, `metadata`, `error`,
+/// `localized-string`).
+///
+/// The data model lives in its own `types` interface — deliberately free of
+/// functions and of the `stream<>`-bearing `tool-result` — so that other
+/// packages (notably sync-shim adapters that bridge constrained-language
+/// guests to the async `tool-provider`, shipped from a separate shim
+/// repository) can `use act:tools/types.{…}` without pulling in the async
+/// signatures or `stream<tool-event>`. Generators whose stream/async-export
+/// codegen is immature can then target a sync interface that references these
+/// types directly, with no duplication.
 ///
 /// Component-level metadata (name, version, description, capabilities)
 /// is stored in the `act:component` WASM custom section (CBOR-encoded)
 /// — not as an exported function.
-package act:tools@0.1.0;
+package act:tools@0.2.0;
 
-interface tool-provider {
-  use act:core/types@0.4.0.{cbor, localized-string, metadata, error};
+/// Tool data model — the records and variants exchanged by tool dispatch.
+///
+/// Contains NO functions and NO async/stream types, so it is safe to `use`
+/// from any interface (sync or async) and from any language toolchain. The
+/// `stream<>`-bearing `tool-result` is intentionally NOT here — it lives in
+/// `tool-provider`, because only the async provider produces it.
+interface types {
+  use act:core/types@0.4.0.{localized-string, metadata, error};
 
   /// Full definition of a tool, returned by list-tools.
   record tool-definition {
@@ -52,6 +68,20 @@ interface tool-provider {
     error(error),
   }
 
+  /// Response from list-tools.
+  record list-tools-response {
+    metadata: metadata,
+    tools: list<tool-definition>,
+  }
+}
+
+interface tool-provider {
+  use act:core/types@0.4.0.{cbor, metadata, error};
+  // Only the types referenced directly here are `use`d; `tool-definition` and
+  // `content-part` arrive transitively (inside `list-tools-response` and
+  // `tool-event` respectively) and need no explicit alias.
+  use types.{tool-event, list-tools-response};
+
   /// The result of a tool call.
   ///
   /// Two shapes exist to accommodate different guest capabilities; they are
@@ -67,15 +97,12 @@ interface tool-provider {
   ///   Natural for incremental producers and I/O-bound bridges.
   ///
   /// Intermediaries (bridges, adapters) MAY freely convert between variants.
+  /// This is the only type in `act:tools` that carries a `stream<>`; it lives
+  /// here rather than in `types` precisely so the data model stays
+  /// sync/stream-free and broadly `use`-able.
   variant tool-result {
     immediate(list<tool-event>),
     streaming(stream<tool-event>),
-  }
-
-  /// Response from list-tools.
-  record list-tools-response {
-    metadata: metadata,
-    tools: list<tool-definition>,
   }
 
   /// Returns the list of tools available for the given metadata.

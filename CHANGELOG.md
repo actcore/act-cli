@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-06-26
+
+### Changed
+
+- **Migrated the host to `act:tools@0.2.0` / `act:sessions@0.2.0`** (`act:core`
+  unchanged at `0.4.0`). Both packages split their function-free data model into
+  a dedicated `types` interface: `tool-definition`, `content-part`, `tool-event`
+  and `list-tools-response` now live in `act:tools/types`, and the `session`
+  record in `act:sessions/types`, while `tool-result` (the only `stream<>`-bearing
+  type) and the async provider functions stay in their provider interfaces. This
+  lets sync-shim adapters `use` the data types without pulling in the async
+  signatures. The 0.1.0 surface is dropped entirely — there is no dual-version
+  support. Components must export the `@0.2.0` interfaces to load.
+- `act-build init` templates (Rust, Python, JS) now scaffold against
+  `act:tools/tool-provider@0.2.0`.
+
+### Added
+
+- `wasi:sockets` capability grants may now omit `ports` to allow any port
+  (previously a non-empty port list was required).
+
 ## [0.10.0] - 2026-06-23
 
 ### Added

@@ -1,5 +1,5 @@
 package component:impl;
 
 world component-world {
-  export act:tools/tool-provider@0.1.0;
+  export act:tools/tool-provider@0.2.0;
 }

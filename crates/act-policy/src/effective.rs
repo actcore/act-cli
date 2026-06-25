@@ -232,7 +232,7 @@ fn sockets_rule_from_declaration(d: &act_types::SocketsAllow) -> SocketsRule {
         net: NetworkRule {
             host: d.host.clone(),
             cidr: d.cidr.clone(),
-            ports: Some(d.ports.clone()),
+            ports: d.ports.clone(),
             except_ports: None,
         },
         protocols: Some(d.protocols.clone()),
@@ -810,7 +810,7 @@ mod tests {
         let caps = caps_sockets(vec![act_types::SocketsAllow {
             host: Some("vnc.example.com".into()),
             cidr: None,
-            ports: vec![5900],
+            ports: Some(vec![5900]),
             protocols: vec![act_types::SocketProtocol::Tcp],
         }]);
         let user = SocketsConfig {
@@ -834,7 +834,7 @@ mod tests {
         let caps = caps_sockets(vec![act_types::SocketsAllow {
             host: Some("vnc.example.com".into()),
             cidr: None,
-            ports: vec![5900],
+            ports: Some(vec![5900]),
             protocols: vec![act_types::SocketProtocol::Tcp],
         }]);
         let user = SocketsConfig {
@@ -855,7 +855,7 @@ mod tests {
         let caps = caps_sockets(vec![act_types::SocketsAllow {
             host: Some("vnc.example.com".into()),
             cidr: None,
-            ports: vec![5900],
+            ports: Some(vec![5900]),
             protocols: vec![act_types::SocketProtocol::Tcp],
         }]);
         let user = SocketsConfig {
@@ -876,7 +876,7 @@ mod tests {
         let caps = caps_sockets(vec![act_types::SocketsAllow {
             host: Some("vnc.example.com".into()),
             cidr: None,
-            ports: vec![5900],
+            ports: Some(vec![5900]),
             protocols: vec![act_types::SocketProtocol::Tcp],
         }]);
         let user = SocketsConfig {
