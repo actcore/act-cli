@@ -35,8 +35,10 @@ jobs:
           bins: wkg
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - run: WKG_CONFIG_FILE=wkg-registry.toml wkg wit fetch --type wit
+      - run: wkg wit fetch --type wit
         working-directory: act-cli
+        env:
+          WKG_CONFIG_FILE: wkg-registry.toml
       - uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
@@ -64,8 +66,10 @@ jobs:
           bins: wkg
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - run: WKG_CONFIG_FILE=wkg-registry.toml wkg wit fetch --type wit
+      - run: wkg wit fetch --type wit
         working-directory: act-cli
+        env:
+          WKG_CONFIG_FILE: wkg-registry.toml
       - uses: PyO3/maturin-action@v1
         with:
           command: sdist

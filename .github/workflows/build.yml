@@ -41,8 +41,10 @@ jobs:
           bins: wkg
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - run: WKG_CONFIG_FILE=wkg-registry.toml wkg wit fetch --type wit
+      - run: wkg wit fetch --type wit
         working-directory: act-cli
+        env:
+          WKG_CONFIG_FILE: wkg-registry.toml
       - run: cargo build --release --target ${{ matrix.target }}
       - name: Rename binaries
         shell: bash
@@ -85,8 +87,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - uses: mlugg/setup-zig@v2
-      - run: WKG_CONFIG_FILE=wkg-registry.toml wkg wit fetch --type wit
+      - run: wkg wit fetch --type wit
         working-directory: act-cli
+        env:
+          WKG_CONFIG_FILE: wkg-registry.toml
       - run: cargo zigbuild --release --target ${{ matrix.target }}
       - name: Rename binaries
         run: |

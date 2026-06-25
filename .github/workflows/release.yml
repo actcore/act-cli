@@ -131,8 +131,10 @@ jobs:
           bins: wkg
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - run: WKG_CONFIG_FILE=wkg-registry.toml wkg wit fetch --type wit
+      - run: wkg wit fetch --type wit
         working-directory: act-cli
+        env:
+          WKG_CONFIG_FILE: wkg-registry.toml
       - name: Authenticate with crates.io
         id: auth
         uses: rust-lang/crates-io-auth-action@v1

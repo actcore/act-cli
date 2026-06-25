@@ -5,15 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.11.1] - 2026-06-26
+## [0.10.0] - 2026-06-26
 
-### Fixed
+### Added
 
-- Build against the published `act-types` 0.13.0 (which carries the optional
-  `wasi:sockets` ports change) instead of a local `[patch.crates-io]` path
-  override, so the host builds cleanly from a standalone checkout / CI.
-
-## [0.11.0] - 2026-06-26
+- **New `act-policy` crate** — the capability decision core (PDP) extracted into
+  a standalone, wasm-portable library: a pluggable `CapabilityProvider`
+  framework with built-in `wasi:filesystem` / `wasi:http` / `wasi:sockets`
+  providers plus a generic glob provider for semantic capability classes (e.g.
+  `db:*`). `act-cli` now makes all of its capability decisions through it.
+- `wasi:sockets` capability grants may now omit `ports` to allow any port
+  (previously a non-empty port list was required).
 
 ### Changed
 
@@ -28,24 +30,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   support. Components must export the `@0.2.0` interfaces to load.
 - `act-build init` templates (Rust, Python, JS) now scaffold against
   `act:tools/tool-provider@0.2.0`.
-
-### Added
-
-- `wasi:sockets` capability grants may now omit `ports` to allow any port
-  (previously a non-empty port list was required).
-
-## [0.10.0] - 2026-06-23
-
-### Added
-
-- **New `act-policy` crate** — the capability decision core (PDP) extracted into
-  a standalone, wasm-portable library: a pluggable `CapabilityProvider`
-  framework with built-in `wasi:filesystem` / `wasi:http` / `wasi:sockets`
-  providers plus a generic glob provider for semantic capability classes (e.g.
-  `db:*`). `act-cli` now makes all of its capability decisions through it.
-
-### Changed
-
 - **Filesystem read-only access is now enforced.** A component that declares a
   path as `ro` can no longer write to it — previously the `ro`/`rw` mode was
   declared but not enforced. Components declaring `rw` are unaffected.

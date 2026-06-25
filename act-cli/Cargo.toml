@@ -61,8 +61,8 @@ cidr = "0.3"
 globset.workspace = true
 path-clean = "1"
 owo-colors = { version = "4.3.0", features = ["supports-colors"] }
-act-store = { version = "0.11.0", path = "../crates/act-store" }
-act-policy = { version = "0.11.0", path = "../crates/act-policy" }
+act-store = { version = "0.10.0", path = "../crates/act-store" }
+act-policy = { version = "0.10.0", path = "../crates/act-policy" }
 async-trait = "0.1"
 bytesize = "2.3.1"
 
