@@ -1,0 +1,18 @@
+package act:core@0.4.0;
+
+interface types {
+  variant localized-string {
+    plain(string),
+    localized(list<tuple<string, string>>),
+  }
+
+  type cbor = list<u8>;
+
+  type metadata = list<tuple<string, cbor>>;
+
+  record error {
+    kind: string,
+    message: localized-string,
+    metadata: metadata,
+  }
+}

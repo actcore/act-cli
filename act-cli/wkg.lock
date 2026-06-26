@@ -7,15 +7,15 @@ name = "act:sessions"
 registry = "actcore.dev"
 
 [[packages.versions]]
-requirement = "=0.1.0"
-version = "0.1.0"
-digest = "sha256:a0dc7330a7e0f669400d298b816ec880138eb5e1c1b2ef8744fcea336bae20d6"
+requirement = "=0.2.0"
+version = "0.2.0"
+digest = "sha256:431ad435af62b732043a8bea1deaad2c4aa021c628dfa683ae09315b3c3c7884"
 
 [[packages]]
 name = "act:tools"
 registry = "actcore.dev"
 
 [[packages.versions]]
-requirement = "=0.1.0"
-version = "0.1.0"
-digest = "sha256:e10152e2563ef6759da98e3230a249c5c88b2a9877a6730a2590f2d48d94e9dd"
+requirement = "=0.2.0"
+version = "0.2.0"
+digest = "sha256:c5ea8a362f19acbf09db07b866cae2e650725ce3977d72f18ed1f78de702ba04"
