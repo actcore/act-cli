@@ -93,6 +93,10 @@ pub fn create_engine() -> Result<Engine> {
     let mut config = Config::new();
     config.wasm_component_model(true);
     config.wasm_component_model_async(true);
+    // Enable wasm exception-handling so components carrying C++-exception
+    // extensions run (e.g. numpy 2.x's pocketfft throws). Additive: components
+    // without the exceptions proposal are unaffected.
+    config.wasm_exceptions(true);
     let engine = Engine::new(&config)
         .map_err(|e| anyhow::anyhow!("failed to create wasmtime engine: {e}"))?;
     Ok(engine)
