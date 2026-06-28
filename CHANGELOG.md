@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1] - 2026-06-29
+
+### Added
+
+- **Experimental WebAssembly GC support** — the runtime now enables the
+  function-references and GC proposals, so GC-backed guest languages
+  (Kotlin/Wasm, and future JVM/Dart targets) can load. Experimental spike;
+  additive for existing components.
+- **WebAssembly exception-handling support** — components carrying
+  C++-exception extensions (e.g. numpy 2.x's pocketfft) now run. Additive:
+  components without the exceptions proposal are unaffected.
+
+### Fixed
+
+- Fresh checkouts and git worktrees now build without manually copying WIT
+  dependencies — `act-cli`'s `wit/deps` are vendored into the repo.
+
 ## [0.10.0] - 2026-06-26
 
 ### Added

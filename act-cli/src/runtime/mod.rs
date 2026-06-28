@@ -97,6 +97,9 @@ pub fn create_engine() -> Result<Engine> {
     // extensions run (e.g. numpy 2.x's pocketfft throws). Additive: components
     // without the exceptions proposal are unaffected.
     config.wasm_exceptions(true);
+    // SPIKE: enable WasmGC so GC-backed guests (Kotlin/Wasm, future JVM/Dart) run.
+    config.wasm_function_references(true);
+    config.wasm_gc(true);
     let engine = Engine::new(&config)
         .map_err(|e| anyhow::anyhow!("failed to create wasmtime engine: {e}"))?;
     Ok(engine)
