@@ -16,7 +16,6 @@ fn now_rfc3339() -> String {
 
 /// A reqwest client that requests + transparently decompresses gzip/br/zstd and
 /// reuses one HTTP/2 connection (ALPN-negotiated over TLS).
-#[allow(dead_code)]
 pub(crate) fn compression_client() -> Result<reqwest::Client, StoreError> {
     reqwest::Client::builder()
         .gzip(true)
@@ -29,7 +28,6 @@ pub(crate) fn compression_client() -> Result<reqwest::Client, StoreError> {
 
 /// GET a single blob with the right `Accept`, transparent decompression, and a
 /// digest check over the decompressed bytes.
-#[allow(dead_code)]
 pub(crate) async fn fetch_blob(
     http: &reqwest::Client,
     blob_url: &str,
@@ -178,7 +176,7 @@ pub async fn fetch_oci(store: &Store, reference: &str) -> Result<Stored, StoreEr
     use oci_client::client::{ClientConfig, ClientProtocol};
     use oci_client::manifest::{IMAGE_MANIFEST_MEDIA_TYPE, OCI_IMAGE_MEDIA_TYPE};
     use oci_client::secrets::RegistryAuth;
-    use oci_client::{Client, Reference};
+    use oci_client::{Client, Reference, RegistryOperation};
 
     let oci_ref: Reference = reference
         .strip_prefix("oci://")
@@ -209,19 +207,37 @@ pub async fn fetch_oci(store: &Store, reference: &str) -> Result<Stored, StoreEr
     let manifest: OciImageManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|e| StoreError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
 
-    // Pre-fetch all blobs (config + layers) into a map keyed by hex digest.
-    // pull_blob in oci-client 0.17 writes to T: AsyncWrite; use Vec<u8> as sink.
-    let mut fetched: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
+    // Acquire the registry token once; reuse it for every blob GET.
+    // NOTE: oci-client 0.17 `auth` returns `Result<Option<String>>` directly.
+    let token: Option<String> = client
+        .auth(&oci_ref, &auth, RegistryOperation::Pull)
+        .await
+        .map_err(|e| StoreError::Io(std::io::Error::other(e)))?
+        .map(|t| t.to_string());
+
+    let http = compression_client()?;
+    let registry = oci_ref.registry().to_string();
+    let repository = oci_ref.repository().to_string();
+
     let mut descriptors = vec![manifest.config.clone()];
     descriptors.extend(manifest.layers.iter().cloned());
-    for desc in &descriptors {
-        let mut buf: Vec<u8> = Vec::new();
-        client
-            .pull_blob(&oci_ref, desc, &mut buf)
-            .await
-            .map_err(|e| StoreError::Io(std::io::Error::other(e)))?;
-        fetched.insert(strip(&desc.digest), buf);
-    }
+
+    // Fetch config + every layer concurrently over one HTTP/2 connection.
+    let jobs = descriptors.iter().map(|desc| {
+        let http = http.clone(); // cheap Arc clone; clones share the connection pool (h2 multiplexing preserved)
+        let url = blob_url(&registry, &repository, &desc.digest);
+        let accept = desc.media_type.clone();
+        let digest = desc.digest.clone();
+        let token = token.clone();
+        async move {
+            let bytes = fetch_blob(&http, &url, &accept, &digest, token.as_deref()).await?;
+            Ok::<(String, Vec<u8>), StoreError>((strip(&digest), bytes))
+        }
+    });
+    let fetched: std::collections::HashMap<String, Vec<u8>> = futures::future::try_join_all(jobs)
+        .await?
+        .into_iter()
+        .collect();
 
     let stored = assemble_oci(store, reference, &manifest_bytes, &manifest_digest, |hex| {
         fetched
@@ -243,6 +259,11 @@ pub async fn fetch_oci(store: &Store, reference: &str) -> Result<Stored, StoreEr
 
 fn strip(digest: &str) -> String {
     digest.rsplit(':').next().unwrap_or(digest).to_string()
+}
+
+/// The blob download URL for a digest in `repo`'s registry/repository.
+fn blob_url(registry: &str, repository: &str, digest: &str) -> String {
+    format!("https://{registry}/v2/{repository}/blobs/{digest}")
 }
 
 /// Max depth for transitive referrer collection (referrer-of-a-referrer).
