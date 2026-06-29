@@ -799,4 +799,56 @@ mod tests {
             other => panic!("expected Updated, got {other:?}"),
         }
     }
+
+    #[tokio::test]
+    #[ignore = "network: pulls a real blob from actpkg.dev and checks compression"]
+    async fn fetch_blob_live_actpkg_compresses() {
+        // Resolve the random component's layer digest via the manifest, then fetch it.
+        use oci_client::client::{Client, ClientConfig, ClientProtocol};
+        use oci_client::manifest::{
+            IMAGE_MANIFEST_MEDIA_TYPE, OCI_IMAGE_MEDIA_TYPE, OciImageManifest,
+        };
+        use oci_client::secrets::RegistryAuth;
+        use oci_client::{Reference, RegistryOperation};
+
+        let oci_ref: Reference = "actpkg.dev/library/random:latest".parse().unwrap();
+        let client = Client::new(ClientConfig {
+            protocol: ClientProtocol::Https,
+            ..Default::default()
+        });
+        let (raw, _d) = client
+            .pull_manifest_raw(
+                &oci_ref,
+                &RegistryAuth::Anonymous,
+                &[OCI_IMAGE_MEDIA_TYPE, IMAGE_MANIFEST_MEDIA_TYPE],
+            )
+            .await
+            .unwrap();
+        let manifest: OciImageManifest = serde_json::from_slice(&raw).unwrap();
+        let layer = &manifest.layers[0];
+        let token = client
+            .auth(&oci_ref, &RegistryAuth::Anonymous, RegistryOperation::Pull)
+            .await
+            .unwrap()
+            .map(|t| t.to_string());
+
+        let http = super::compression_client().unwrap();
+        let url = super::blob_url("actpkg.dev", "library/random", &layer.digest);
+        // Succeeds only if the digest verifies over decompressed bytes.
+        let bytes = super::fetch_blob(
+            &http,
+            &url,
+            &layer.media_type,
+            &layer.digest,
+            token.as_deref(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(bytes.len() as i64, layer.size);
+        eprintln!(
+            "pulled+verified {} bytes (Accept={})",
+            bytes.len(),
+            layer.media_type
+        );
+    }
 }
