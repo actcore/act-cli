@@ -238,6 +238,8 @@ pub async fn fetch_oci(store: &Store, reference: &str) -> Result<Stored, StoreEr
             Ok::<(String, Vec<u8>), StoreError>((strip(&digest), bytes))
         }
     });
+    // Concurrency is intentionally unbounded — components are ~1 config + 1 layer over a single
+    // h2 connection (server-capped MAX_CONCURRENT_STREAMS); revisit with buffer_unordered(N) if many-layer artifacts appear.
     let fetched: std::collections::HashMap<String, Vec<u8>> = futures::future::try_join_all(jobs)
         .await?
         .into_iter()
@@ -266,6 +268,8 @@ fn strip(digest: &str) -> String {
 }
 
 /// The blob download URL for a digest in `repo`'s registry/repository.
+/// Assumes `https` and a verbatim registry host (e.g. ghcr.io, actpkg.dev) — does NOT
+/// handle docker.io's `registry-1` normalization or plaintext `http` registries.
 fn blob_url(registry: &str, repository: &str, digest: &str) -> String {
     format!("https://{registry}/v2/{repository}/blobs/{digest}")
 }
@@ -744,6 +748,14 @@ mod tests {
         );
     }
 
+    #[test]
+    fn blob_url_builds_distribution_url() {
+        assert_eq!(
+            super::blob_url("actpkg.dev", "library/random", "sha256:abc123"),
+            "https://actpkg.dev/v2/library/random/blobs/sha256:abc123"
+        );
+    }
+
     #[tokio::test]
     #[ignore = "network: pulls a real component from ghcr.io"]
     async fn fetch_oci_live() {
@@ -844,11 +856,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(bytes.len() as i64, layer.size);
         eprintln!(
             "pulled+verified {} bytes (Accept={})",
             bytes.len(),
             layer.media_type
         );
+        assert_eq!(bytes.len() as i64, layer.size);
     }
 }
