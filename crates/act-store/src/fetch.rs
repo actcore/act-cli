@@ -14,6 +14,57 @@ fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
+/// A reqwest client that requests + transparently decompresses gzip/br/zstd and
+/// reuses one HTTP/2 connection (ALPN-negotiated over TLS).
+#[allow(dead_code)]
+pub(crate) fn compression_client() -> Result<reqwest::Client, StoreError> {
+    reqwest::Client::builder()
+        .gzip(true)
+        .brotli(true)
+        .zstd(true)
+        .http2_adaptive_window(true)
+        .build()
+        .map_err(|e| StoreError::Io(std::io::Error::other(e)))
+}
+
+/// GET a single blob with the right `Accept`, transparent decompression, and a
+/// digest check over the decompressed bytes.
+#[allow(dead_code)]
+pub(crate) async fn fetch_blob(
+    http: &reqwest::Client,
+    blob_url: &str,
+    accept: &str,
+    digest: &str,
+    token: Option<&str>,
+) -> Result<Vec<u8>, StoreError> {
+    let mut req = http.get(blob_url).header(reqwest::header::ACCEPT, accept);
+    if let Some(t) = token {
+        req = req.header(reqwest::header::AUTHORIZATION, format!("Bearer {t}"));
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| StoreError::Io(std::io::Error::other(e)))?;
+    if !resp.status().is_success() {
+        return Err(StoreError::Io(std::io::Error::other(format!(
+            "HTTP {} fetching {blob_url}",
+            resp.status()
+        ))));
+    }
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| StoreError::Io(std::io::Error::other(e)))?
+        .to_vec();
+    let got = crate::layout::sha256_hex(&bytes);
+    if got != strip(digest) {
+        return Err(StoreError::Digest(format!(
+            "{digest} != sha256:{got} (from {blob_url})"
+        )));
+    }
+    Ok(bytes)
+}
+
 /// Install a component from a local file path as a pinned `local` snapshot
 /// (synthesized manifest). Records the source ref as `file://<absolute path>`.
 pub fn install_local(store: &Store, path: &Path) -> Result<Stored, StoreError> {
@@ -408,7 +459,89 @@ fn source_ref(p: &Provenance) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::StoreError;
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn fetch_blob_decompresses_gzip_and_verifies_digest() {
+        use flate2::{Compression, write::GzEncoder};
+        use std::io::Write;
+        use wiremock::matchers::{header, header_exists, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let original = b"\0asm\x01\0\0\0hello-wasm-body".to_vec();
+        let hex = crate::layout::sha256_hex(&original);
+        let digest = format!("sha256:{hex}");
+
+        let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(&original).unwrap();
+        let gz = enc.finish().unwrap();
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/lib/x/blobs/{digest}")))
+            .and(header("accept", "application/wasm"))
+            .and(header_exists("accept-encoding"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-encoding", "gzip")
+                    .set_body_bytes(gz),
+            )
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v2/lib/x/blobs/{digest}", server.uri());
+        let http = super::compression_client().unwrap();
+        let got = super::fetch_blob(&http, &url, "application/wasm", &digest, None)
+            .await
+            .unwrap();
+        assert_eq!(got, original); // decompressed back to the original bytes
+    }
+
+    #[tokio::test]
+    async fn fetch_blob_rejects_digest_mismatch() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v2/lib/x/blobs/sha256:deadbeef"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_bytes(b"not-the-expected-bytes".to_vec()),
+            )
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v2/lib/x/blobs/sha256:deadbeef", server.uri());
+        let http = super::compression_client().unwrap();
+        let err = super::fetch_blob(&http, &url, "application/wasm", "sha256:deadbeef", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Digest(_)));
+    }
+
+    #[tokio::test]
+    async fn fetch_blob_sends_bearer_when_token_present() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let body = b"abc".to_vec();
+        let digest = format!("sha256:{}", crate::layout::sha256_hex(&body));
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/lib/x/blobs/{digest}")))
+            .and(header("authorization", "Bearer tok123"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v2/lib/x/blobs/{digest}", server.uri());
+        let http = super::compression_client().unwrap();
+        let got = super::fetch_blob(&http, &url, "application/wasm", &digest, Some("tok123"))
+            .await
+            .unwrap();
+        assert_eq!(got, body);
+    }
 
     #[test]
     fn install_local_then_resolve() {
