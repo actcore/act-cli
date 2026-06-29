@@ -13,7 +13,7 @@ readme = "README.md"
 [workspace.dependencies]
 act-types = "0.13"
 wasmparser = "0.250.0"
-reqwest = { version = "0.13.3", default-features = false, features = ["rustls", "stream", "http2"] }
+reqwest = { version = "0.13.3", default-features = false, features = ["rustls", "stream", "http2", "gzip", "brotli", "zstd"] }
 # Shared across two or more workspace members.
 anyhow = "1.0.102"
 base64 = "0.22.1"
