@@ -110,7 +110,11 @@ pub fn store_http_bytes(
 
 /// Download a `.wasm` from `url` and store it. Network wrapper.
 pub async fn fetch_http(store: &Store, url: &str) -> Result<Stored, StoreError> {
-    let resp = reqwest::get(url)
+    let http = compression_client()?;
+    let resp = http
+        .get(url)
+        .header(reqwest::header::ACCEPT, "application/wasm")
+        .send()
         .await
         .map_err(|e| StoreError::Io(std::io::Error::other(e)))?;
     if !resp.status().is_success() {
@@ -699,6 +703,45 @@ mod tests {
             .list_referrers_by_digest(&stored.manifest_digest)
             .unwrap();
         eprintln!("referrers collected for time:0.2.0: {}", refs.len());
+    }
+
+    #[tokio::test]
+    async fn fetch_http_sends_accept_and_decompresses() {
+        use flate2::{Compression, write::GzEncoder};
+        use std::io::Write;
+        use wiremock::matchers::{header, header_exists, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let original = b"\0asm\x01\0\0\0http-path".to_vec();
+        let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(&original).unwrap();
+        let gz = enc.finish().unwrap();
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/x.wasm"))
+            .and(header("accept", "application/wasm"))
+            .and(header_exists("accept-encoding"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-encoding", "gzip")
+                    .set_body_bytes(gz),
+            )
+            .mount(&server)
+            .await;
+
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let url = format!("{}/x.wasm", server.uri());
+        let stored = super::fetch_http(&store, &url).await.unwrap();
+        assert_eq!(
+            stored.provenance.digest,
+            format!("sha256:{}", crate::layout::sha256_hex(&original))
+        );
+        assert_eq!(
+            std::fs::read(store.resolve(&url).unwrap().unwrap()).unwrap(),
+            original
+        );
     }
 
     #[tokio::test]
