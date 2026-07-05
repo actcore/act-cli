@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use rmcp::{
     ServiceExt,
-    model::{CallToolRequestParams, RawContent},
+    model::{CallToolRequestParams, ContentBlock},
     transport::{ConfigureCommandExt, TokioChildProcess},
 };
 
@@ -77,8 +77,8 @@ async fn session_of_1_hides_virtual_tools_and_uses_default_session() {
     let text = result
         .content
         .iter()
-        .find_map(|c| match &c.raw {
-            RawContent::Text(t) => Some(t.text.clone()),
+        .find_map(|c| match c {
+            ContentBlock::Text(t) => Some(t.text.clone()),
             _ => None,
         })
         .unwrap_or_default();
@@ -129,8 +129,8 @@ async fn session_of_1_overrides_client_supplied_session_id() {
     let text = result
         .content
         .iter()
-        .find_map(|c| match &c.raw {
-            RawContent::Text(t) => Some(t.text.clone()),
+        .find_map(|c| match c {
+            ContentBlock::Text(t) => Some(t.text.clone()),
             _ => None,
         })
         .unwrap_or_default();

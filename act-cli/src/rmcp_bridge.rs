@@ -4,7 +4,7 @@ use act_types::constants::{
     ERR_CAPABILITY_DENIED, ERR_INVALID_ARGS, ERR_NOT_FOUND, META_SESSION_OP,
 };
 use rmcp::ErrorData;
-use rmcp::model::{Content, ErrorCode, Tool};
+use rmcp::model::{ContentBlock, ErrorCode, Tool};
 use serde_json::Value;
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -41,7 +41,7 @@ pub struct ActRmcpBridge {
     pub peer_slot: Arc<crate::runtime::elicit::PeerSlot>,
 }
 
-fn map_content_part(part: &runtime::act::tools::types::ContentPart) -> Content {
+fn map_content_part(part: &runtime::act::tools::types::ContentPart) -> ContentBlock {
     let mime = part.mime_type.as_deref().unwrap_or("");
 
     // UTF-8 text-like payloads surface as MCP text content verbatim. This
@@ -50,13 +50,13 @@ fn map_content_part(part: &runtime::act::tools::types::ContentPart) -> Content {
     // below. Matches the ACT-HTTP transport, which also treats JSON as text.
     if mime.starts_with("text/") || mime == "application/json" || mime.ends_with("+json") {
         let text = String::from_utf8_lossy(&part.data).into_owned();
-        return Content::text(text);
+        return ContentBlock::text(text);
     }
 
     if mime.starts_with("image/") {
         use base64::Engine as _;
         let data_b64 = base64::engine::general_purpose::STANDARD.encode(&part.data);
-        return Content::image(data_b64, mime.to_string());
+        return ContentBlock::image(data_b64, mime.to_string());
     }
 
     // Non-text / non-image: try CBOR → JSON text, then base64 fallback.
@@ -68,7 +68,7 @@ fn map_content_part(part: &runtime::act::tools::types::ContentPart) -> Content {
             base64::engine::general_purpose::STANDARD.encode(&part.data)
         }
     };
-    Content::text(text)
+    ContentBlock::text(text)
 }
 
 fn component_error_to_mcp(err: runtime::ComponentError) -> ErrorData {
@@ -187,7 +187,7 @@ fn fold_events_to_result(result: runtime::CallToolResult) -> rmcp::model::CallTo
                 let message = act_types::types::LocalizedString::from(&err.message)
                     .any_text()
                     .to_string();
-                content.push(rmcp::model::Content::text(message));
+                content.push(rmcp::model::ContentBlock::text(message));
             }
         }
     }
@@ -508,9 +508,9 @@ impl ActRmcpBridge {
         });
         let json_text = serde_json::to_string(&payload).unwrap_or_default();
 
-        Ok(rmcp::model::CallToolResult::success(vec![Content::text(
-            json_text,
-        )]))
+        Ok(rmcp::model::CallToolResult::success(vec![
+            ContentBlock::text(json_text),
+        ]))
     }
 
     async fn virtual_close_session(
@@ -683,7 +683,7 @@ mod tests {
     use crate::runtime::act::core::types::{Error, LocalizedString};
     use crate::runtime::act::tools::types as runtime_types;
     use crate::runtime::act::tools::types::{ContentPart, ToolDefinition};
-    use rmcp::model::{Content, ErrorCode, RawContent};
+    use rmcp::model::{ContentBlock, ErrorCode};
 
     fn part(mime: Option<&str>, data: &[u8]) -> ContentPart {
         ContentPart {
@@ -693,9 +693,9 @@ mod tests {
         }
     }
 
-    fn content_text(c: &Content) -> Option<&str> {
-        match &c.raw {
-            RawContent::Text(t) => Some(&t.text),
+    fn content_text(c: &ContentBlock) -> Option<&str> {
+        match c {
+            ContentBlock::Text(t) => Some(&t.text),
             _ => None,
         }
     }
@@ -709,8 +709,8 @@ mod tests {
     #[test]
     fn map_content_image_png() {
         let c = map_content_part(&part(Some("image/png"), &[0x89, 0x50, 0x4E, 0x47]));
-        match &c.raw {
-            RawContent::Image(img) => {
+        match &c {
+            ContentBlock::Image(img) => {
                 assert_eq!(img.mime_type, "image/png");
                 use base64::Engine as _;
                 let decoded = base64::engine::general_purpose::STANDARD
@@ -1046,8 +1046,8 @@ mod tests {
         let result = fold_events_to_result(ActCallToolResult { events });
         assert_eq!(result.is_error, Some(true));
         assert_eq!(result.content.len(), 2);
-        match &result.content[1].raw {
-            RawContent::Text(t) => assert!(t.text.contains("boom mid-stream")),
+        match &result.content[1] {
+            ContentBlock::Text(t) => assert!(t.text.contains("boom mid-stream")),
             _ => panic!("expected text content for error"),
         }
     }
