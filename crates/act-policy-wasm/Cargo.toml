@@ -1,0 +1,21 @@
+[package]
+name = "act-policy-wasm"
+version.workspace = true
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "wasm-bindgen wrapper exposing the act-policy PDP to the browser runtime"
+repository = "https://github.com/actcore/act-cli"
+keywords = ["act", "capability", "policy", "wasm", "security"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+act-policy = { path = "../act-policy", default-features = false }
+wasm-bindgen = "0.2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures = "0.3"
+
+[dev-dependencies]
+serde_json = { workspace = true }

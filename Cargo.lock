@@ -103,6 +103,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "act-policy-wasm"
+version = "0.10.1"
+dependencies = [
+ "act-policy",
+ "futures",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "act-store"
 version = "0.10.1"
 dependencies = [
