@@ -14,6 +14,55 @@ fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
+/// A reqwest client that requests + transparently decompresses gzip/br/zstd and
+/// reuses one HTTP/2 connection (ALPN-negotiated over TLS).
+pub(crate) fn compression_client() -> Result<reqwest::Client, StoreError> {
+    reqwest::Client::builder()
+        .gzip(true)
+        .brotli(true)
+        .zstd(true)
+        .http2_adaptive_window(true)
+        .build()
+        .map_err(|e| StoreError::Io(std::io::Error::other(e)))
+}
+
+/// GET a single blob with the right `Accept`, transparent decompression, and a
+/// digest check over the decompressed bytes.
+pub(crate) async fn fetch_blob(
+    http: &reqwest::Client,
+    blob_url: &str,
+    accept: &str,
+    digest: &str,
+    token: Option<&str>,
+) -> Result<Vec<u8>, StoreError> {
+    let mut req = http.get(blob_url).header(reqwest::header::ACCEPT, accept);
+    if let Some(t) = token {
+        req = req.header(reqwest::header::AUTHORIZATION, format!("Bearer {t}"));
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| StoreError::Io(std::io::Error::other(e)))?;
+    if !resp.status().is_success() {
+        return Err(StoreError::Io(std::io::Error::other(format!(
+            "HTTP {} fetching {blob_url}",
+            resp.status()
+        ))));
+    }
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| StoreError::Io(std::io::Error::other(e)))?
+        .to_vec();
+    let got = crate::layout::sha256_hex(&bytes);
+    if got != strip(digest) {
+        return Err(StoreError::Digest(format!(
+            "{digest} != sha256:{got} (from {blob_url})"
+        )));
+    }
+    Ok(bytes)
+}
+
 /// Install a component from a local file path as a pinned `local` snapshot
 /// (synthesized manifest). Records the source ref as `file://<absolute path>`.
 pub fn install_local(store: &Store, path: &Path) -> Result<Stored, StoreError> {
@@ -61,7 +110,11 @@ pub fn store_http_bytes(
 
 /// Download a `.wasm` from `url` and store it. Network wrapper.
 pub async fn fetch_http(store: &Store, url: &str) -> Result<Stored, StoreError> {
-    let resp = reqwest::get(url)
+    let http = compression_client()?;
+    let resp = http
+        .get(url)
+        .header(reqwest::header::ACCEPT, "application/wasm")
+        .send()
         .await
         .map_err(|e| StoreError::Io(std::io::Error::other(e)))?;
     if !resp.status().is_success() {
@@ -127,7 +180,7 @@ pub async fn fetch_oci(store: &Store, reference: &str) -> Result<Stored, StoreEr
     use oci_client::client::{ClientConfig, ClientProtocol};
     use oci_client::manifest::{IMAGE_MANIFEST_MEDIA_TYPE, OCI_IMAGE_MEDIA_TYPE};
     use oci_client::secrets::RegistryAuth;
-    use oci_client::{Client, Reference};
+    use oci_client::{Client, Reference, RegistryOperation};
 
     let oci_ref: Reference = reference
         .strip_prefix("oci://")
@@ -158,19 +211,39 @@ pub async fn fetch_oci(store: &Store, reference: &str) -> Result<Stored, StoreEr
     let manifest: OciImageManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|e| StoreError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
 
-    // Pre-fetch all blobs (config + layers) into a map keyed by hex digest.
-    // pull_blob in oci-client 0.17 writes to T: AsyncWrite; use Vec<u8> as sink.
-    let mut fetched: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
+    // Acquire the registry token once; reuse it for every blob GET.
+    // NOTE: oci-client 0.17 `auth` returns `Result<Option<String>>` directly.
+    let token: Option<String> = client
+        .auth(&oci_ref, &auth, RegistryOperation::Pull)
+        .await
+        .map_err(|e| StoreError::Io(std::io::Error::other(e)))?
+        .map(|t| t.to_string());
+
+    let http = compression_client()?;
+    let registry = oci_ref.registry().to_string();
+    let repository = oci_ref.repository().to_string();
+
     let mut descriptors = vec![manifest.config.clone()];
     descriptors.extend(manifest.layers.iter().cloned());
-    for desc in &descriptors {
-        let mut buf: Vec<u8> = Vec::new();
-        client
-            .pull_blob(&oci_ref, desc, &mut buf)
-            .await
-            .map_err(|e| StoreError::Io(std::io::Error::other(e)))?;
-        fetched.insert(strip(&desc.digest), buf);
-    }
+
+    // Fetch config + every layer concurrently over one HTTP/2 connection.
+    let jobs = descriptors.iter().map(|desc| {
+        let http = http.clone(); // cheap Arc clone; clones share the connection pool (h2 multiplexing preserved)
+        let url = blob_url(&registry, &repository, &desc.digest);
+        let accept = desc.media_type.clone();
+        let digest = desc.digest.clone();
+        let token = token.clone();
+        async move {
+            let bytes = fetch_blob(&http, &url, &accept, &digest, token.as_deref()).await?;
+            Ok::<(String, Vec<u8>), StoreError>((strip(&digest), bytes))
+        }
+    });
+    // Concurrency is intentionally unbounded — components are ~1 config + 1 layer over a single
+    // h2 connection (server-capped MAX_CONCURRENT_STREAMS); revisit with buffer_unordered(N) if many-layer artifacts appear.
+    let fetched: std::collections::HashMap<String, Vec<u8>> = futures::future::try_join_all(jobs)
+        .await?
+        .into_iter()
+        .collect();
 
     let stored = assemble_oci(store, reference, &manifest_bytes, &manifest_digest, |hex| {
         fetched
@@ -192,6 +265,13 @@ pub async fn fetch_oci(store: &Store, reference: &str) -> Result<Stored, StoreEr
 
 fn strip(digest: &str) -> String {
     digest.rsplit(':').next().unwrap_or(digest).to_string()
+}
+
+/// The blob download URL for a digest in `repo`'s registry/repository.
+/// Assumes `https` and a verbatim registry host (e.g. ghcr.io, actpkg.dev) — does NOT
+/// handle docker.io's `registry-1` normalization or plaintext `http` registries.
+fn blob_url(registry: &str, repository: &str, digest: &str) -> String {
+    format!("https://{registry}/v2/{repository}/blobs/{digest}")
 }
 
 /// Max depth for transitive referrer collection (referrer-of-a-referrer).
@@ -408,7 +488,89 @@ fn source_ref(p: &Provenance) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::StoreError;
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn fetch_blob_decompresses_gzip_and_verifies_digest() {
+        use flate2::{Compression, write::GzEncoder};
+        use std::io::Write;
+        use wiremock::matchers::{header, header_exists, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let original = b"\0asm\x01\0\0\0hello-wasm-body".to_vec();
+        let hex = crate::layout::sha256_hex(&original);
+        let digest = format!("sha256:{hex}");
+
+        let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(&original).unwrap();
+        let gz = enc.finish().unwrap();
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/lib/x/blobs/{digest}")))
+            .and(header("accept", "application/wasm"))
+            .and(header_exists("accept-encoding"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-encoding", "gzip")
+                    .set_body_bytes(gz),
+            )
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v2/lib/x/blobs/{digest}", server.uri());
+        let http = super::compression_client().unwrap();
+        let got = super::fetch_blob(&http, &url, "application/wasm", &digest, None)
+            .await
+            .unwrap();
+        assert_eq!(got, original); // decompressed back to the original bytes
+    }
+
+    #[tokio::test]
+    async fn fetch_blob_rejects_digest_mismatch() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v2/lib/x/blobs/sha256:deadbeef"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_bytes(b"not-the-expected-bytes".to_vec()),
+            )
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v2/lib/x/blobs/sha256:deadbeef", server.uri());
+        let http = super::compression_client().unwrap();
+        let err = super::fetch_blob(&http, &url, "application/wasm", "sha256:deadbeef", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Digest(_)));
+    }
+
+    #[tokio::test]
+    async fn fetch_blob_sends_bearer_when_token_present() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let body = b"abc".to_vec();
+        let digest = format!("sha256:{}", crate::layout::sha256_hex(&body));
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/lib/x/blobs/{digest}")))
+            .and(header("authorization", "Bearer tok123"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v2/lib/x/blobs/{digest}", server.uri());
+        let http = super::compression_client().unwrap();
+        let got = super::fetch_blob(&http, &url, "application/wasm", &digest, Some("tok123"))
+            .await
+            .unwrap();
+        assert_eq!(got, body);
+    }
 
     #[test]
     fn install_local_then_resolve() {
@@ -548,6 +710,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fetch_http_sends_accept_and_decompresses() {
+        use flate2::{Compression, write::GzEncoder};
+        use std::io::Write;
+        use wiremock::matchers::{header, header_exists, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let original = b"\0asm\x01\0\0\0http-path".to_vec();
+        let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(&original).unwrap();
+        let gz = enc.finish().unwrap();
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/x.wasm"))
+            .and(header("accept", "application/wasm"))
+            .and(header_exists("accept-encoding"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-encoding", "gzip")
+                    .set_body_bytes(gz),
+            )
+            .mount(&server)
+            .await;
+
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let url = format!("{}/x.wasm", server.uri());
+        let stored = super::fetch_http(&store, &url).await.unwrap();
+        assert_eq!(
+            stored.provenance.digest,
+            format!("sha256:{}", crate::layout::sha256_hex(&original))
+        );
+        assert_eq!(
+            std::fs::read(store.resolve(&url).unwrap().unwrap()).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn blob_url_builds_distribution_url() {
+        assert_eq!(
+            super::blob_url("actpkg.dev", "library/random", "sha256:abc123"),
+            "https://actpkg.dev/v2/library/random/blobs/sha256:abc123"
+        );
+    }
+
+    #[tokio::test]
     #[ignore = "network: pulls a real component from ghcr.io"]
     async fn fetch_oci_live() {
         let dir = TempDir::new().unwrap();
@@ -601,5 +810,57 @@ mod tests {
             super::UpdateOutcome::Updated { from, to } => assert_ne!(from, to),
             other => panic!("expected Updated, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "network: pulls a real blob from actpkg.dev and checks compression"]
+    async fn fetch_blob_live_actpkg_compresses() {
+        // Resolve the random component's layer digest via the manifest, then fetch it.
+        use oci_client::client::{Client, ClientConfig, ClientProtocol};
+        use oci_client::manifest::{
+            IMAGE_MANIFEST_MEDIA_TYPE, OCI_IMAGE_MEDIA_TYPE, OciImageManifest,
+        };
+        use oci_client::secrets::RegistryAuth;
+        use oci_client::{Reference, RegistryOperation};
+
+        let oci_ref: Reference = "actpkg.dev/library/random:latest".parse().unwrap();
+        let client = Client::new(ClientConfig {
+            protocol: ClientProtocol::Https,
+            ..Default::default()
+        });
+        let (raw, _d) = client
+            .pull_manifest_raw(
+                &oci_ref,
+                &RegistryAuth::Anonymous,
+                &[OCI_IMAGE_MEDIA_TYPE, IMAGE_MANIFEST_MEDIA_TYPE],
+            )
+            .await
+            .unwrap();
+        let manifest: OciImageManifest = serde_json::from_slice(&raw).unwrap();
+        let layer = &manifest.layers[0];
+        let token = client
+            .auth(&oci_ref, &RegistryAuth::Anonymous, RegistryOperation::Pull)
+            .await
+            .unwrap()
+            .map(|t| t.to_string());
+
+        let http = super::compression_client().unwrap();
+        let url = super::blob_url("actpkg.dev", "library/random", &layer.digest);
+        // Succeeds only if the digest verifies over decompressed bytes.
+        let bytes = super::fetch_blob(
+            &http,
+            &url,
+            &layer.media_type,
+            &layer.digest,
+            token.as_deref(),
+        )
+        .await
+        .unwrap();
+        eprintln!(
+            "pulled+verified {} bytes (Accept={})",
+            bytes.len(),
+            layer.media_type
+        );
+        assert_eq!(bytes.len() as i64, layer.size);
     }
 }
