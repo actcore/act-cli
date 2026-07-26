@@ -25,3 +25,25 @@ cargo run --manifest-path ../../../../act-build/Cargo.toml --release -- \
 cp target/wasm32-wasip2/release/sessions_canary.wasm \
     ../../fixtures/sessions-canary.wasm
 ```
+
+## ask-canary
+
+Consent canary. Exports `act:tools/tool-provider` only, declares `wasi:http`,
+and its single tool `fetch` makes one outbound request — so with no grant the
+host resolves `wasi:http` to `ask` and every call trips the consent gate.
+Used by `tests/ask_mcp_elicitation.rs`, which points it at a dead port so a
+refused consent (`HttpRequestDenied`, blocked before the request leaves) is
+distinguishable from an approved one (`ConnectionRefused`, blocked at the
+transport) without standing up a server.
+
+### Rebuild
+
+```bash
+cd tests/fixtures-src/ask-canary
+cargo build --target wasm32-wasip2 --release
+# Pack metadata into the wasm:
+cargo run --manifest-path ../../../../act-build/Cargo.toml --release -- \
+    pack target/wasm32-wasip2/release/ask_canary.wasm
+# Copy into the fixtures dir:
+cp target/wasm32-wasip2/release/ask_canary.wasm ../../fixtures/ask-canary.wasm
+```

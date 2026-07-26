@@ -405,6 +405,11 @@ pub enum ComponentRequest {
         arguments: Vec<u8>,
         metadata: Vec<(String, Vec<u8>)>,
         reply: oneshot::Sender<Result<CallToolResult, ComponentError>>,
+        /// Where a capability gate firing during this call sends its consent
+        /// question. `None` for transports that prompt locally (TTY) or do not
+        /// prompt at all. See `runtime::elicit` for why the ask travels back to
+        /// the caller instead of the gate reaching for the peer itself.
+        consent: Option<elicit::ConsentSink>,
     },
     CallToolStreaming {
         name: String,
@@ -424,6 +429,10 @@ pub enum ComponentRequest {
         args: Vec<(String, Vec<u8>)>,
         metadata: Vec<(String, Vec<u8>)>,
         reply: oneshot::Sender<Result<sessions::Session, ComponentError>>,
+        /// Same routing as `CallTool::consent`. Bridges do their network I/O
+        /// while opening a session, so this is where their capability gate
+        /// usually fires.
+        consent: Option<elicit::ConsentSink>,
     },
     /// Errors with `std:not-found` if the component does not export
     /// `session-provider`. The reply carries `()` so callers can wait for
@@ -537,6 +546,7 @@ pub fn spawn_component_actor(
     tool_provider: ToolProvider,
     session_provider: Option<sessions::SessionProvider>,
     mut store: Store<HostState>,
+    current_consent: Arc<elicit::CurrentConsentSink>,
 ) -> ComponentHandle {
     let (tx, mut rx) = mpsc::channel::<ComponentRequest>(32);
 
@@ -574,7 +584,13 @@ pub fn spawn_component_actor(
                     arguments,
                     metadata,
                     reply,
+                    consent,
                 } => {
+                    // Point the consent slot at this call for the duration of
+                    // the guest execution. The actor serves one request at a
+                    // time, so a capability gate firing below always resolves
+                    // to the caller that is waiting for this reply.
+                    current_consent.set(consent);
                     let provider = tool_provider.clone();
 
                     let collected: Arc<std::sync::Mutex<Vec<act::tools::types::ToolEvent>>> =
@@ -636,6 +652,9 @@ pub fn spawn_component_actor(
                             "run_concurrent failed: {e}"
                         ))),
                     };
+                    // Nothing is executing any more: drop the sink so a later
+                    // gate outside a call cannot answer through a stale caller.
+                    current_consent.set(None);
                     let _ = reply.send(response);
                 }
                 ComponentRequest::CallToolStreaming {
@@ -722,7 +741,9 @@ pub fn spawn_component_actor(
                     args,
                     metadata,
                     reply,
+                    consent,
                 } => {
+                    current_consent.set(consent);
                     let response = match &session_provider {
                         Some(sp) => {
                             let sp = sp.clone();
@@ -744,6 +765,7 @@ pub fn spawn_component_actor(
                             "component does not export act:sessions/session-provider"
                         ))),
                     };
+                    current_consent.set(None);
                     let _ = reply.send(response);
                 }
 

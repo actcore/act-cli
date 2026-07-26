@@ -221,6 +221,9 @@ async fn call_tool_buffered(
         arguments,
         metadata,
         reply: reply_tx,
+        // ACT-HTTP has no interactive channel back to the caller; `ask` is
+        // resolved by the DenyPrompter before it ever reaches a sink.
+        consent: None,
     };
 
     if state.component.send(request).await.is_err() {
@@ -482,6 +485,8 @@ async fn session_open(
         args: wit_args,
         metadata: meta.into(),
         reply: reply_tx,
+        // ACT-HTTP has no interactive channel back to the caller.
+        consent: None,
     };
 
     if state.component.send(request).await.is_err() {

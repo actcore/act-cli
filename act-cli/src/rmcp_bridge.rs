@@ -36,9 +36,6 @@ pub struct ActRmcpBridge {
     /// this id is forced into every call's `std:session-id` metadata,
     /// overriding any client-supplied value.
     pub default_session_id: Option<String>,
-    /// Shared slot holding the active MCP peer. Filled per `call_tool`
-    /// so the elicitation channel can send consent requests to the client.
-    pub peer_slot: Arc<crate::runtime::elicit::PeerSlot>,
 }
 
 fn map_content_part(part: &runtime::act::tools::types::ContentPart) -> ContentBlock {
@@ -199,6 +196,44 @@ fn fold_events_to_result(result: runtime::CallToolResult) -> rmcp::model::CallTo
     }
 }
 
+/// Await the actor's reply while answering consent questions on *this* task.
+///
+/// From protocol revision `2026-07-28` rmcp refuses a server-to-client request
+/// that is not associated with an in-flight client request (SEP-2260), and it
+/// tracks that with a task-local it installs around the handler future. The
+/// guest runs on the actor task, so its capability gates cannot elicit for
+/// themselves — they hand the question here instead. See `runtime::elicit`.
+async fn await_reply_servicing_consent<T>(
+    context: &rmcp::service::RequestContext<rmcp::RoleServer>,
+    mut consent_rx: tokio::sync::mpsc::Receiver<crate::runtime::elicit::ConsentRequest>,
+    mut reply_rx: tokio::sync::oneshot::Receiver<T>,
+) -> Result<T, rmcp::ErrorData> {
+    let capabilities = context.client_capabilities();
+    let reply = loop {
+        tokio::select! {
+            biased;
+            // Answer consent first: the guest is blocked until the answer lands.
+            Some(ask) = consent_rx.recv() => {
+                let decision = crate::runtime::elicit::confirm_via_peer(
+                    &context.peer,
+                    capabilities.as_ref(),
+                    ask.message,
+                )
+                .await;
+                let _ = ask.reply.send(decision);
+            }
+            reply = &mut reply_rx => break reply,
+        }
+    };
+    reply.map_err(|_| {
+        rmcp::ErrorData::new(
+            rmcp::model::ErrorCode::INTERNAL_ERROR,
+            "component actor dropped reply",
+            None,
+        )
+    })
+}
+
 // ── Public entry point ──────────────────────────────────────────────────────
 
 pub async fn run_stdio(
@@ -207,7 +242,6 @@ pub async fn run_stdio(
     metadata: runtime::Metadata,
     has_sessions: bool,
     default_session_id: Option<String>,
-    peer_slot: Arc<crate::runtime::elicit::PeerSlot>,
 ) -> anyhow::Result<()> {
     let bridge = ActRmcpBridge {
         handle,
@@ -215,7 +249,6 @@ pub async fn run_stdio(
         metadata,
         has_sessions,
         default_session_id,
-        peer_slot,
     };
 
     let service = rmcp::serve_server(bridge, (tokio::io::stdin(), tokio::io::stdout()))
@@ -231,10 +264,17 @@ pub async fn run_stdio(
 }
 
 /// Serve the component over MCP Streamable HTTP (the official MCP HTTP
-/// transport). The component instance is shared across MCP sessions —
-/// each `Mcp-Session-Id` from the client gets its own `ActRmcpBridge`
-/// front-end, but they all dispatch into the same `ComponentHandle`,
-/// matching the model the ACT-HTTP server uses.
+/// transport). Every connection gets its own `ActRmcpBridge` front-end, but
+/// they all dispatch into the same `ComponentHandle` — one component instance
+/// per process, matching the model the ACT-HTTP server uses.
+///
+/// Note that MCP's own sessions are not what holds ACT state, and from
+/// revision `2026-07-28` they no longer exist at all (`Mcp-Session-Id` was
+/// removed so that any instance may serve any request). An ACT session is
+/// transient component-level state living in this process: it lasts as long as
+/// the instance does, and `std:session-not-found` is an ordinary outcome the
+/// client recovers from by reopening. Spreading sessions across instances is a
+/// cluster-runtime concern, deliberately outside this host.
 pub async fn run_http(
     addr: std::net::SocketAddr,
     info: runtime::ComponentInfo,
@@ -242,7 +282,6 @@ pub async fn run_http(
     metadata: runtime::Metadata,
     has_sessions: bool,
     default_session_id: Option<String>,
-    peer_slot: Arc<crate::runtime::elicit::PeerSlot>,
 ) -> anyhow::Result<()> {
     use rmcp::transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
@@ -256,7 +295,6 @@ pub async fn run_http(
                 metadata: metadata.clone(),
                 has_sessions,
                 default_session_id: default_session_id.clone(),
-                peer_slot: peer_slot.clone(),
             })
         },
         Arc::new(LocalSessionManager::default()),
@@ -331,9 +369,10 @@ impl ActRmcpBridge {
             tools.push(virtual_close_session_tool());
         }
 
-        // rmcp 3 added `result_type` (SEP-2322) plus the `ttl_ms` / `cache_scope`
-        // hints (SEP-2549). We always answer with the whole list in one shot and
-        // publish no cache hints, which is exactly what this constructor means.
+        // `with_all_items` sets the SEP-2322 `resultType: "complete"`
+        // discriminator and leaves the SEP-2549 cache hints (`ttlMs`,
+        // `cacheScope`) unset. rmcp strips `resultType` again when the peer
+        // negotiated a pre-2026-07-28 version.
         Ok(rmcp::model::ListToolsResult::with_all_items(tools))
     }
 
@@ -374,9 +413,11 @@ impl ActRmcpBridge {
     async fn call_tool_impl(
         &self,
         request: rmcp::model::CallToolRequestParams,
-        ctx_meta: &rmcp::model::Meta,
+        context: &rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
         use rmcp::model::ErrorCode;
+
+        let ctx_meta = &context.meta;
 
         // Route reserved virtual tools (`open_session` / `close_session`)
         // before any argument-level `_meta` extraction. Virtual tools
@@ -388,7 +429,7 @@ impl ActRmcpBridge {
                     let mut call_metadata = self.metadata.clone();
                     apply_transport_meta(&mut call_metadata, ctx_meta);
                     return self
-                        .virtual_open_session(request.arguments, call_metadata)
+                        .virtual_open_session(request.arguments, call_metadata, context)
                         .await;
                 }
                 VIRTUAL_CLOSE_SESSION => {
@@ -425,11 +466,20 @@ impl ActRmcpBridge {
             })?;
 
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        // Capability gates fire on the actor task, which is outside the scope
+        // rmcp requires for a server-to-client request (SEP-2260). They send
+        // their question here instead, so the elicitation is issued on *this*
+        // task — the one handling the originating `tools/call`. Depth 1: the
+        // actor runs one call at a time and blocks on each answer.
+        let (consent_tx, consent_rx) =
+            tokio::sync::mpsc::channel::<crate::runtime::elicit::ConsentRequest>(1);
+
         let req = runtime::ComponentRequest::CallTool {
             name: request.name.to_string(),
             arguments: cbor_args,
             metadata: call_metadata.into(),
             reply: reply_tx,
+            consent: Some(consent_tx),
         };
 
         self.handle.send(req).await.map_err(|_| {
@@ -440,15 +490,8 @@ impl ActRmcpBridge {
             )
         })?;
 
-        let result = reply_rx
-            .await
-            .map_err(|_| {
-                rmcp::ErrorData::new(
-                    ErrorCode::INTERNAL_ERROR,
-                    "component actor dropped reply",
-                    None,
-                )
-            })?
+        let result = await_reply_servicing_consent(context, consent_rx, reply_rx)
+            .await?
             .map_err(component_error_to_mcp)?;
 
         Ok(fold_events_to_result(result))
@@ -458,6 +501,7 @@ impl ActRmcpBridge {
         &self,
         arguments: Option<rmcp::model::JsonObject>,
         metadata: runtime::Metadata,
+        context: &rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
         let args_obj = arguments.unwrap_or_default();
         let mut wit_args: Vec<(String, Vec<u8>)> = Vec::with_capacity(args_obj.len());
@@ -473,10 +517,15 @@ impl ActRmcpBridge {
         }
 
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        // A bridge does its network I/O while opening the session, so this is
+        // where its capability gate usually fires — route consent the same way.
+        let (consent_tx, consent_rx) =
+            tokio::sync::mpsc::channel::<crate::runtime::elicit::ConsentRequest>(1);
         let req = runtime::ComponentRequest::OpenSession {
             args: wit_args,
             metadata: metadata.into(),
             reply: reply_tx,
+            consent: Some(consent_tx),
         };
         self.handle.send(req).await.map_err(|_| {
             rmcp::ErrorData::new(
@@ -485,15 +534,8 @@ impl ActRmcpBridge {
                 None,
             )
         })?;
-        let session = reply_rx
-            .await
-            .map_err(|_| {
-                rmcp::ErrorData::new(
-                    rmcp::model::ErrorCode::INTERNAL_ERROR,
-                    "component actor dropped reply",
-                    None,
-                )
-            })?
+        let session = await_reply_servicing_consent(context, consent_rx, reply_rx)
+            .await?
             .map_err(component_error_to_mcp)?;
 
         let metadata_json: serde_json::Map<String, Value> = session
@@ -625,14 +667,32 @@ fn force_session_id(meta: &mut act_types::types::Metadata, default: &Option<Stri
 /// `RequestContext::meta`) onto `call_metadata`. Per ACT-MCP §3.3 the
 /// transport channel overrides any same-keyed value already present
 /// (argument-level `_meta` or adapter-cached defaults).
+/// Keys MCP reserves for the protocol itself, which must not reach the guest.
+///
+/// They describe the transport hop, not the call. From revision `2026-07-28`
+/// the `io.modelcontextprotocol/*` keys ride on *every* request (SEP-2575:
+/// protocol version, client info, client capabilities, log level), so
+/// forwarding them would hand a sandboxed component the connecting client's
+/// identity and capabilities on every single call — data the caller never
+/// asked to share and the component has no business knowing.
+fn is_protocol_reserved(key: &str) -> bool {
+    key == "progressToken" || key.starts_with("io.modelcontextprotocol/")
+}
+
+/// Merge the transport `_meta` channel (ACT-MCP §3.1) into the call metadata,
+/// minus the protocol's own reserved keys.
 fn apply_transport_meta(
     call_metadata: &mut act_types::types::Metadata,
     ctx_meta: &rmcp::model::Meta,
 ) {
-    if !ctx_meta.0.is_empty() {
-        call_metadata.extend(act_types::types::Metadata::from(Value::Object(
-            ctx_meta.0.clone(),
-        )));
+    let forwarded: serde_json::Map<String, Value> = ctx_meta
+        .0
+        .iter()
+        .filter(|(key, _)| !is_protocol_reserved(key))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    if !forwarded.is_empty() {
+        call_metadata.extend(act_types::types::Metadata::from(Value::Object(forwarded)));
     }
 }
 
@@ -656,22 +716,23 @@ impl rmcp::ServerHandler for ActRmcpBridge {
     ) -> impl std::future::Future<Output = Result<rmcp::model::ListToolsResult, rmcp::ErrorData>>
     + Send
     + '_ {
-        // Seed the peer slot early so any elicitation during list_tools has a peer.
-        self.peer_slot.set(context.peer.clone());
+        // `list-tools` runs without a consent sink: a capability touched here
+        // has no in-flight `tools/call` to hang an elicitation off, so the
+        // gate denies rather than prompting. See `runtime::elicit`.
+        let _ = context;
         self.list_tools_impl()
     }
 
+    /// rmcp 3 widened the return type to `CallToolResponse` (SEP-2322 MRTR /
+    /// SEP-2663 Tasks). ACT always completes a `tools/call` in one round trip
+    /// — consent is elicited live on this task while the guest runs — so we
+    /// only ever produce `CallToolResponse::Complete`.
     async fn call_tool(
         &self,
         request: rmcp::model::CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
-        // Always refresh the slot so consent elicitations during this call
-        // reach the active client peer.
-        self.peer_slot.set(context.peer.clone());
-        // rmcp 3 widened the return type to cover MRTR (SEP-2322) and Tasks
-        // (SEP-2663). ACT always completes a `tools/call` in one round trip.
-        self.call_tool_impl(request, &context.meta)
+        self.call_tool_impl(request, &context)
             .await
             .map(rmcp::model::CallToolResponse::Complete)
     }
@@ -680,6 +741,42 @@ impl rmcp::ServerHandler for ActRmcpBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transport_meta_drops_protocol_reserved_keys() {
+        let mut meta = act_types::types::Metadata::default();
+        let ctx = rmcp::model::Meta(
+            serde_json::json!({
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientInfo": {"name": "some-agent"},
+                "io.modelcontextprotocol/clientCapabilities": {"elicitation": {}},
+                "progressToken": 7,
+                "std:session-id": "sid_42",
+                "std:traceparent": "00-abc-def-01",
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+
+        apply_transport_meta(&mut meta, &ctx);
+
+        // The caller's own keys still reach the component...
+        assert_eq!(meta.get("std:session-id").unwrap(), "sid_42");
+        assert_eq!(meta.get("std:traceparent").unwrap(), "00-abc-def-01");
+        // ...while the protocol's transport plumbing does not.
+        for reserved in [
+            "io.modelcontextprotocol/protocolVersion",
+            "io.modelcontextprotocol/clientInfo",
+            "io.modelcontextprotocol/clientCapabilities",
+            "progressToken",
+        ] {
+            assert!(
+                !meta.contains_key(reserved),
+                "`{reserved}` must not be forwarded to the guest"
+            );
+        }
+    }
     // act:tools@0.2.0 split the data model out of the provider interface into
     // `act:tools/types`; `error` / `localized-string` resolve through `act:core`.
     use crate::runtime::act::core::types as runtime_core;
@@ -787,7 +884,6 @@ mod tests {
             metadata: runtime::Metadata::default(),
             has_sessions: true,
             default_session_id: default.map(str::to_string),
-            peer_slot: Arc::new(crate::runtime::elicit::PeerSlot::new()),
         }
     }
 
@@ -854,7 +950,6 @@ mod tests {
             metadata: runtime::Metadata::default(),
             has_sessions: false,
             default_session_id: None,
-            peer_slot: Arc::new(crate::runtime::elicit::PeerSlot::new()),
         };
         let info = rmcp::ServerHandler::get_info(&bridge);
         assert_eq!(info.server_info.name, "example");

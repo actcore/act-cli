@@ -1,0 +1,10 @@
+[std]
+name = "ask-canary"
+version = "0.1.0"
+description = "Canary component for `ask`-mode consent host integration tests. Its single tool makes one outbound HTTP request, so the host capability gate always fires."
+default-language = "en"
+
+[std.capabilities."wasi:http"]
+
+[[std.capabilities."wasi:http".allow]]
+host = "*"

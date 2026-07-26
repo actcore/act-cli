@@ -492,6 +492,24 @@ async fn prepare_component(
     opts: &CommonOpts,
     prompter: Arc<dyn act_policy::consent::ConsentPrompter>,
 ) -> Result<PreparedComponent> {
+    prepare_component_with_consent(
+        component,
+        opts,
+        prompter,
+        Arc::new(runtime::elicit::CurrentConsentSink::new()),
+    )
+    .await
+}
+
+/// [`prepare_component`], plus the slot the actor uses to route consent
+/// questions back to the caller currently waiting on a call. Only the MCP
+/// transports need it — everything else prompts locally or denies.
+async fn prepare_component_with_consent(
+    component: &ComponentRef,
+    opts: &CommonOpts,
+    prompter: Arc<dyn act_policy::consent::ConsentPrompter>,
+    current_consent: Arc<runtime::elicit::CurrentConsentSink>,
+) -> Result<PreparedComponent> {
     let resolved = resolve_opts(opts)?;
 
     let component_path = resolve::resolve(component, false).await?;
@@ -537,7 +555,7 @@ async fn prepare_component(
     )
     .await?;
     let has_sessions = session_provider.is_some();
-    let handle = runtime::spawn_component_actor(instance, session_provider, store);
+    let handle = runtime::spawn_component_actor(instance, session_provider, store, current_consent);
 
     tracing::debug!(name = %info.std.name, version = %info.std.version, "Component ready");
 
@@ -606,11 +624,12 @@ async fn cmd_run(
         };
         // MCP over HTTP: use MCP elicitation so the connected MCP client
         // can approve/deny capability requests.
-        let peer_slot = Arc::new(runtime::elicit::PeerSlot::new());
-        let channel = Arc::new(runtime::elicit::ElicitationChannel::new(peer_slot.clone()));
-        let prompter: Arc<dyn act_policy::consent::ConsentPrompter> =
-            Arc::new(runtime::elicit::McpElicitationPrompter::new(channel));
-        let pc = prepare_component(&component, &opts, prompter).await?;
+        let current_consent = Arc::new(runtime::elicit::CurrentConsentSink::new());
+        let prompter: Arc<dyn act_policy::consent::ConsentPrompter> = Arc::new(
+            runtime::elicit::McpElicitationPrompter::new(current_consent.clone()),
+        );
+        let pc =
+            prepare_component_with_consent(&component, &opts, prompter, current_consent).await?;
         let default_session_id = maybe_open_default_session(&pc, &session_args).await?;
         return rmcp_bridge::run_http(
             addr,
@@ -619,7 +638,6 @@ async fn cmd_run(
             pc.metadata,
             pc.has_sessions,
             default_session_id,
-            peer_slot,
         )
         .await;
     }
@@ -630,11 +648,12 @@ async fn cmd_run(
         }
         // MCP over stdio: use MCP elicitation so the connected MCP client
         // can approve/deny capability requests interactively.
-        let peer_slot = Arc::new(runtime::elicit::PeerSlot::new());
-        let channel = Arc::new(runtime::elicit::ElicitationChannel::new(peer_slot.clone()));
-        let prompter: Arc<dyn act_policy::consent::ConsentPrompter> =
-            Arc::new(runtime::elicit::McpElicitationPrompter::new(channel));
-        let pc = prepare_component(&component, &opts, prompter).await?;
+        let current_consent = Arc::new(runtime::elicit::CurrentConsentSink::new());
+        let prompter: Arc<dyn act_policy::consent::ConsentPrompter> = Arc::new(
+            runtime::elicit::McpElicitationPrompter::new(current_consent.clone()),
+        );
+        let pc =
+            prepare_component_with_consent(&component, &opts, prompter, current_consent).await?;
         let default_session_id = maybe_open_default_session(&pc, &session_args).await?;
         return rmcp_bridge::run_stdio(
             pc.info,
@@ -642,7 +661,6 @@ async fn cmd_run(
             pc.metadata,
             pc.has_sessions,
             default_session_id,
-            peer_slot,
         )
         .await;
     }
@@ -724,6 +742,9 @@ async fn cmd_call(
         arguments: cbor_args,
         metadata: metadata.into(),
         reply: reply_tx,
+        // `act call` prompts on the TTY (or denies when headless), so the
+        // gate answers locally and never routes a question anywhere.
+        consent: None,
     };
 
     let send_result = pc.handle.send(request).await;
@@ -809,6 +830,9 @@ async fn open_session_for_call(pc: &PreparedComponent, json: &str) -> Result<Str
             args: wit_args,
             metadata: pc.metadata.clone().into(),
             reply: reply_tx,
+            // Startup-time session-of-1: no client is connected yet, so a gate
+            // firing here has nobody to ask and falls back to the local prompter.
+            consent: None,
         })
         .await
         .map_err(|_| anyhow::anyhow!("component actor unavailable"))?;
