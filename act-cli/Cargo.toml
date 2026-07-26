@@ -48,13 +48,13 @@ tar.workspace = true
 url.workspace = true
 shellexpand = "3"
 wasmparser.workspace = true
-wasmtime = "46"
-wasmtime-wasi = { version = "46", default-features = false, features = ["p2", "p3"] }
-wasmtime-wasi-http = { version = "46", default-features = false, features = ["p2", "p3"] }
+wasmtime = "47"
+wasmtime-wasi = { version = "47", default-features = false, features = ["p2", "p3"] }
+wasmtime-wasi-http = { version = "47", default-features = false, features = ["p2", "p3"] }
 http.workspace = true
 http-body-util = "0.1"
 hyper = "1"
-rmcp = { version = "2.1", features = ["server", "transport-io", "transport-streamable-http-server", "elicitation", "schemars"] }
+rmcp = { version = "=3.0.0-beta.2", features = ["server", "transport-io", "transport-streamable-http-server", "elicitation", "schemars"] }
 schemars = "1.0"
 bytes = "1"
 cidr = "0.3"
@@ -68,4 +68,4 @@ bytesize = "2.3.1"
 
 [dev-dependencies]
 tempfile.workspace = true
-rmcp = { version = "2.1", features = ["client", "transport-child-process"] }
+rmcp = { version = "=3.0.0-beta.2", features = ["client", "transport-child-process"] }

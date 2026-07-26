@@ -331,11 +331,10 @@ impl ActRmcpBridge {
             tools.push(virtual_close_session_tool());
         }
 
-        Ok(rmcp::model::ListToolsResult {
-            tools,
-            next_cursor: None,
-            meta: None,
-        })
+        // rmcp 3 added `result_type` (SEP-2322) plus the `ttl_ms` / `cache_scope`
+        // hints (SEP-2549). We always answer with the whole list in one shot and
+        // publish no cache hints, which is exactly what this constructor means.
+        Ok(rmcp::model::ListToolsResult::with_all_items(tools))
     }
 
     /// Ask the component for its `get-open-session-args-schema` JSON Schema.
@@ -666,11 +665,15 @@ impl rmcp::ServerHandler for ActRmcpBridge {
         &self,
         request: rmcp::model::CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+    ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
         // Always refresh the slot so consent elicitations during this call
         // reach the active client peer.
         self.peer_slot.set(context.peer.clone());
-        self.call_tool_impl(request, &context.meta).await
+        // rmcp 3 widened the return type to cover MRTR (SEP-2322) and Tasks
+        // (SEP-2663). ACT always completes a `tools/call` in one round trip.
+        self.call_tool_impl(request, &context.meta)
+            .await
+            .map(rmcp::model::CallToolResponse::Complete)
     }
 }
 
