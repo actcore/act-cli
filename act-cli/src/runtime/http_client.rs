@@ -820,6 +820,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[ignore = "network: makes a real HTTPS request to example.com"]
     async fn dns_resolver_host_match_bypasses_allow_cidr() {
         // mode=Allowlist with BOTH a host-allow AND an allow-CIDR. A
         // request to the allowed host should succeed even if its IPs
