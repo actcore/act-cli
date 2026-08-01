@@ -645,10 +645,10 @@ fn virtual_close_session_tool() -> Tool {
     tool
 }
 
-fn session_op_meta(op: &'static str) -> rmcp::model::Meta {
+fn session_op_meta(op: &'static str) -> rmcp::model::MetaObject {
     let mut map = serde_json::Map::new();
     map.insert(META_SESSION_OP.to_string(), Value::String(op.to_string()));
-    rmcp::model::Meta(map)
+    rmcp::model::MetaObject(map)
 }
 
 /// Force `std:session-id` to `default` when set, overriding any existing
@@ -683,7 +683,7 @@ fn is_protocol_reserved(key: &str) -> bool {
 /// minus the protocol's own reserved keys.
 fn apply_transport_meta(
     call_metadata: &mut act_types::types::Metadata,
-    ctx_meta: &rmcp::model::Meta,
+    ctx_meta: &rmcp::model::MetaObject,
 ) {
     let forwarded: serde_json::Map<String, Value> = ctx_meta
         .0
@@ -745,7 +745,7 @@ mod tests {
     #[test]
     fn transport_meta_drops_protocol_reserved_keys() {
         let mut meta = act_types::types::Metadata::default();
-        let ctx = rmcp::model::Meta(
+        let ctx = rmcp::model::MetaObject(
             serde_json::json!({
                 "io.modelcontextprotocol/protocolVersion": "2026-07-28",
                 "io.modelcontextprotocol/clientInfo": {"name": "some-agent"},
@@ -1081,7 +1081,7 @@ mod tests {
         })));
 
         // Transport _meta says session B — must win.
-        let ctx = rmcp::model::Meta(
+        let ctx = rmcp::model::MetaObject(
             serde_json::json!({"std:session-id": "from-transport"})
                 .as_object()
                 .cloned()
@@ -1107,7 +1107,7 @@ mod tests {
             "std:traceparent": "00-...-...",
         })));
         // Transport carries an unrelated key.
-        let ctx = rmcp::model::Meta(
+        let ctx = rmcp::model::MetaObject(
             serde_json::json!({"std:request-id": "req-99"})
                 .as_object()
                 .cloned()
