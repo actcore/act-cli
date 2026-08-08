@@ -85,6 +85,13 @@ fn part_meta(
 
     if include_mime && let Some(mime) = part.mime_type.as_deref() {
         map.insert(MCP_MIME_TYPE.to_string(), Value::String(mime.to_string()));
+    } else {
+        // A colliding `std:mime-type` metadata entry respells to this same
+        // key. When the block type carries mime natively (`include_mime`
+        // false), that entry must not survive under `MCP_MIME_TYPE` — the
+        // key must be either the real projected mime or absent, never a
+        // metadata value smuggled in under the projection's key.
+        map.remove(MCP_MIME_TYPE);
     }
 
     (!map.is_empty()).then(|| rmcp::model::MetaObject(map))
@@ -730,7 +737,7 @@ impl ActRmcpBridge {
 }
 
 /// Build the synthetic `open_session` MCP tool. The args schema comes from
-/// `get-open-session-args-schema`. `_meta.std:session-op = "open"`
+/// `get-open-session-args-schema`. `_meta.dev.actcore/session-op = "open"`
 /// per ACT-CONSTANTS so agents can recognize this is a session-lifecycle
 /// tool, not an ordinary capability.
 fn virtual_open_session_tool(args_schema: Value) -> Tool {
@@ -750,7 +757,7 @@ fn virtual_open_session_tool(args_schema: Value) -> Tool {
 }
 
 /// Build the synthetic `close_session` MCP tool. Args is fixed:
-/// `{ session_id: string }`. `_meta.std:session-op = "close"`.
+/// `{ session_id: string }`. `_meta.dev.actcore/session-op = "close"`.
 fn virtual_close_session_tool() -> Tool {
     let schema_map: serde_json::Map<String, Value> = serde_json::json!({
         "type": "object",
@@ -1137,6 +1144,38 @@ mod tests {
                 );
             }
             _ => panic!("expected a text block"),
+        }
+    }
+
+    #[test]
+    fn image_block_drops_a_colliding_metadata_entry_instead_of_leaking_it() {
+        // Image blocks carry mime natively (`include_mime: false`), so a
+        // colliding `std:mime-type` metadata entry must not survive under
+        // `dev.actcore/mime-type` in `_meta` — that key must be either the
+        // real projected mime or entirely absent, never a smuggled-in
+        // metadata value. The rest of the part's metadata must still cross.
+        let mut p = part(Some("image/png"), b"\x89PNG");
+        p.metadata = act_types::types::Metadata::from(serde_json::json!({
+            "std:mime-type": "text/html",
+            "std:progress": 42,
+        }))
+        .into();
+
+        match map_content_part(&p) {
+            ContentBlock::Image(img) => {
+                assert_eq!(img.mime_type, "image/png");
+                let m = &img.meta.as_ref().expect("metadata must be present").0;
+                assert!(
+                    !m.contains_key(MCP_MIME_TYPE),
+                    "a colliding std:mime-type metadata entry must not leak into _meta as dev.actcore/mime-type"
+                );
+                assert_eq!(
+                    m["dev.actcore/progress"],
+                    serde_json::json!(42),
+                    "unrelated metadata must still cross"
+                );
+            }
+            _ => panic!("expected an image block"),
         }
     }
 
