@@ -23,6 +23,18 @@ const ARG_META_KEY: &str = "_meta";
 const ARG_META_DESCRIPTION: &str = "ACT metadata. Include {\"std:session-id\": \"<id from open_session>\"} for \
      session-bound tools. Other recognized keys: std:traceparent, std:locale.";
 
+/// ACT's MCP `_meta` prefix — reverse-DNS form of `actcore.dev`, per the
+/// MCP `_meta` SHOULD ("Implementations SHOULD use reverse DNS notation").
+/// Not reserved: reservation applies to prefixes whose *second* label is
+/// `modelcontextprotocol` or `mcp`.
+const MCP_META_PREFIX: &str = "dev.actcore/";
+
+/// The ACT well-known namespace. `:` is not a legal MCP `_meta` name
+/// character, so `std:` keys are respelled with `MCP_META_PREFIX` on the
+/// wire. This is a *key* transform only — kind strings, which are values,
+/// keep their `std:` form.
+const ACT_STD_PREFIX: &str = "std:";
+
 pub struct ActRmcpBridge {
     pub handle: runtime::ComponentHandle,
     pub info: runtime::ComponentInfo,
@@ -679,18 +691,38 @@ fn is_protocol_reserved(key: &str) -> bool {
     key == "progressToken" || key.starts_with("io.modelcontextprotocol/")
 }
 
+/// Respell an inbound MCP `_meta` key as an ACT metadata key.
+/// Only the `dev.actcore/` prefix is mapped; everything else crosses
+/// verbatim. The outbound counterpart, `act_key_to_mcp`, arrives in Task 2
+/// with its first production caller.
+fn mcp_key_to_act(key: &str) -> Cow<'_, str> {
+    match key.strip_prefix(MCP_META_PREFIX) {
+        Some(name) => Cow::Owned(format!("{ACT_STD_PREFIX}{name}")),
+        None => Cow::Borrowed(key),
+    }
+}
+
 /// Merge the transport `_meta` channel (ACT-MCP §3.1) into the call metadata,
 /// minus the protocol's own reserved keys.
 fn apply_transport_meta(
     call_metadata: &mut act_types::types::Metadata,
     ctx_meta: &rmcp::model::MetaObject,
 ) {
-    let forwarded: serde_json::Map<String, Value> = ctx_meta
-        .0
-        .iter()
-        .filter(|(key, _)| !is_protocol_reserved(key))
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect();
+    let mut forwarded = serde_json::Map::new();
+
+    // Two passes so the conformant spelling deterministically wins when a
+    // client sends both: legacy `std:*` first, `dev.actcore/*` second.
+    for (key, value) in ctx_meta.0.iter() {
+        if !is_protocol_reserved(key) && !key.starts_with(MCP_META_PREFIX) {
+            forwarded.insert(key.clone(), value.clone());
+        }
+    }
+    for (key, value) in ctx_meta.0.iter() {
+        if !is_protocol_reserved(key) && key.starts_with(MCP_META_PREFIX) {
+            forwarded.insert(mcp_key_to_act(key).into_owned(), value.clone());
+        }
+    }
+
     if !forwarded.is_empty() {
         call_metadata.extend(act_types::types::Metadata::from(Value::Object(forwarded)));
     }
@@ -777,6 +809,57 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn actcore_prefixed_keys_map_back_to_the_std_namespace() {
+        assert_eq!(mcp_key_to_act("dev.actcore/session-id"), "std:session-id");
+
+        // Third-party namespaces cross verbatim: ACT does not own them and
+        // must not mint keys inside them.
+        assert_eq!(mcp_key_to_act("acme:priority"), "acme:priority");
+        assert_eq!(mcp_key_to_act("traceparent"), "traceparent");
+    }
+
+    #[test]
+    fn transport_meta_accepts_both_session_id_spellings() {
+        let mut meta = act_types::types::Metadata::default();
+        let ctx = rmcp::model::MetaObject(
+            serde_json::json!({ "dev.actcore/session-id": "sid_new" })
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        apply_transport_meta(&mut meta, &ctx);
+        assert_eq!(meta.get("std:session-id").unwrap(), "sid_new");
+
+        // The legacy spelling keeps working for clients already sending it.
+        let mut legacy = act_types::types::Metadata::default();
+        let ctx = rmcp::model::MetaObject(
+            serde_json::json!({ "std:session-id": "sid_old" })
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        apply_transport_meta(&mut legacy, &ctx);
+        assert_eq!(legacy.get("std:session-id").unwrap(), "sid_old");
+    }
+
+    #[test]
+    fn conformant_session_id_wins_over_the_legacy_spelling() {
+        let mut meta = act_types::types::Metadata::default();
+        let ctx = rmcp::model::MetaObject(
+            serde_json::json!({
+                "std:session-id": "sid_legacy",
+                "dev.actcore/session-id": "sid_conformant",
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+        apply_transport_meta(&mut meta, &ctx);
+        assert_eq!(meta.get("std:session-id").unwrap(), "sid_conformant");
+    }
+
     // act:tools@0.2.0 split the data model out of the provider interface into
     // `act:tools/types`; `error` / `localized-string` resolve through `act:core`.
     use crate::runtime::act::core::types as runtime_core;
