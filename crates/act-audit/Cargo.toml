@@ -1,0 +1,15 @@
+[package]
+name = "act-audit"
+version.workspace = true
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Structured audit trail for the ACT toolchain host"
+repository = "https://github.com/actcore/act-cli"
+homepage = "https://actcore.dev"
+keywords = ["act", "audit", "observability", "tracing", "security"]
+
+[dependencies]
+act-policy = { path = "../act-policy" }
+sha2.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
