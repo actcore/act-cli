@@ -163,6 +163,29 @@ async fn emitted_meta_keys_are_conformant() {
             );
         }
     }
+
+    // Positive assertion, not just an absence check: the first block's _meta
+    // must actually carry the mime-type key the projection is supposed to
+    // emit, with the value the component actually produced. `time`'s
+    // get_current_time returns a plain String, which act_sdk's
+    // `String::into_tool_response` tags as MIME_TEXT ("text/plain").
+    let first_block = result
+        .content
+        .first()
+        .expect("must return at least one content item");
+    let rmcp::model::ContentBlock::Text(text) = first_block else {
+        panic!("expected the first content block to be Text, got: {first_block:?}");
+    };
+    let meta = text
+        .meta
+        .as_ref()
+        .expect("first text block must carry _meta with dev.actcore/mime-type");
+    assert_eq!(
+        meta.0.get("dev.actcore/mime-type").and_then(|v| v.as_str()),
+        Some("text/plain"),
+        "first text block's dev.actcore/mime-type must match the mime the component emitted"
+    );
+
     for block in &result.content {
         if let rmcp::model::ContentBlock::Text(t) = block {
             if let Some(meta) = t.meta.as_ref() {
