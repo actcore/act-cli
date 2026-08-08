@@ -8,7 +8,7 @@ use crate::Decision;
 use crate::effective::effective_http;
 use crate::grant::{CapabilityGrant, HttpConfig, HttpRule, PolicyError};
 use crate::net::{NetworkCheck, rule_matches};
-use crate::provider::{CapabilityProvider, CompiledCeiling, ResourceOp};
+use crate::provider::{CapabilityProvider, CompiledCeiling, Explained, ResourceOp};
 
 pub struct HttpProvider;
 
@@ -42,8 +42,12 @@ struct HttpCeiling {
     is_declared: bool,
 }
 
-impl CompiledCeiling for HttpCeiling {
-    fn classify(&self, op: &ResourceOp) -> Decision {
+impl HttpCeiling {
+    /// The same mode-dispatch `classify` used to run, but returning the
+    /// matching effective allow rule (rendered as a string) alongside the
+    /// decision. Both trait methods are expressed in terms of this so the
+    /// decision output cannot drift between them.
+    fn matched(&self, op: &ResourceOp) -> (Decision, Option<String>) {
         let (host, port) = parse_host_port(&op.key);
         let check = NetworkCheck::new(host, port);
         let scheme = op.attrs.get("scheme").and_then(|v| v.as_str());
@@ -54,8 +58,8 @@ impl CompiledCeiling for HttpCeiling {
         };
 
         match self.config.mode {
-            crate::grant::PolicyMode::Deny => Decision::Deny,
-            crate::grant::PolicyMode::Open => Decision::Allow,
+            crate::grant::PolicyMode::Deny => (Decision::Deny, None),
+            crate::grant::PolicyMode::Open => (Decision::Allow, None),
             crate::grant::PolicyMode::Ask => {
                 // Deny wins first.
                 if self
@@ -64,17 +68,15 @@ impl CompiledCeiling for HttpCeiling {
                     .iter()
                     .any(|r| http_rule_matches_net(r, &check, scheme))
                 {
-                    return Decision::Deny;
+                    return (Decision::Deny, None);
                 }
                 // In-ceiling: effective allow rule matches host AND declaration allows method.
-                let in_ceiling = self.config.allow.iter().any(|eff_rule| {
+                match self.config.allow.iter().find(|eff_rule| {
                     http_rule_matches_net(eff_rule, &check, scheme)
                         && decl_allows_method(&self.decl_rules, &check, scheme, method)
-                });
-                if in_ceiling {
-                    Decision::Ask
-                } else {
-                    Decision::Deny
+                }) {
+                    Some(rule) => (Decision::Ask, Some(render_http_rule(rule))),
+                    None => (Decision::Deny, None),
                 }
             }
             crate::grant::PolicyMode::Allowlist => {
@@ -85,19 +87,29 @@ impl CompiledCeiling for HttpCeiling {
                     .iter()
                     .any(|r| http_rule_matches_net(r, &check, scheme))
                 {
-                    return Decision::Deny;
+                    return (Decision::Deny, None);
                 }
                 // Allow if effective rule matches AND declaration allows method.
-                if self.config.allow.iter().any(|eff_rule| {
+                match self.config.allow.iter().find(|eff_rule| {
                     http_rule_matches_net(eff_rule, &check, scheme)
                         && decl_allows_method(&self.decl_rules, &check, scheme, method)
                 }) {
-                    Decision::Allow
-                } else {
-                    Decision::Deny
+                    Some(rule) => (Decision::Allow, Some(render_http_rule(rule))),
+                    None => (Decision::Deny, None),
                 }
             }
         }
+    }
+}
+
+impl CompiledCeiling for HttpCeiling {
+    fn classify(&self, op: &ResourceOp) -> Decision {
+        self.matched(op).0
+    }
+
+    fn classify_explained(&self, op: &ResourceOp) -> Explained {
+        let (decision, rule) = self.matched(op);
+        Explained { decision, rule }
     }
 
     fn declared(&self) -> bool {
@@ -107,6 +119,16 @@ impl CompiledCeiling for HttpCeiling {
     fn effective_mode(&self) -> crate::grant::PolicyMode {
         self.config.mode
     }
+}
+
+/// Render an `HttpRule` as a human-readable rule label for the audit
+/// rollup: the host pattern it anchors on, or the CIDR if host-less.
+fn render_http_rule(rule: &HttpRule) -> String {
+    rule.net
+        .host
+        .clone()
+        .or_else(|| rule.net.cidr.clone())
+        .unwrap_or_else(|| "*".to_string())
 }
 
 /// Check if any declaration rule allows the method for this target.

@@ -33,9 +33,27 @@ pub trait CapabilityProvider: Send + Sync {
     ) -> Result<Box<dyn CompiledCeiling>, PolicyError>;
 }
 
+/// A decision plus, when the provider can attribute one, the ceiling rule
+/// that produced it. Used by the host's audit rollup to group permitted
+/// operations under the grant that allowed them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Explained {
+    pub decision: Decision,
+    pub rule: Option<String>,
+}
+
 /// The compiled ceiling for one class in one run. Pure, sync, wasm-clean.
 pub trait CompiledCeiling: Send + Sync {
     fn classify(&self, op: &ResourceOp) -> Decision;
+    /// `classify`, plus the rule that matched. Defaulted so providers that
+    /// cannot attribute a rule (or have not been updated) keep working; the
+    /// audit rollup degrades to grouping by capability and action.
+    fn classify_explained(&self, op: &ResourceOp) -> Explained {
+        Explained {
+            decision: self.classify(op),
+            rule: None,
+        }
+    }
     fn declared(&self) -> bool;
     /// Effective policy mode for this ceiling. Used by hosts that need to
     /// know the mode for non-classify decisions (e.g. p3 preopens kill-switch).

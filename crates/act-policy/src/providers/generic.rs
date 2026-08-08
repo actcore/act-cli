@@ -14,7 +14,7 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use crate::Decision;
 use crate::grant::{CapabilityGrant, PolicyError, PolicyMode};
-use crate::provider::{CapabilityProvider, CompiledCeiling, ResourceOp};
+use crate::provider::{CapabilityProvider, CompiledCeiling, Explained, ResourceOp};
 
 pub struct GenericProvider;
 
@@ -50,6 +50,9 @@ impl CapabilityProvider for GenericProvider {
 struct CompiledConstraint {
     /// Each entry: (key, compiled glob set for that key's patterns).
     key_globs: Vec<(String, GlobSet)>,
+    /// Rendering of the original constraint JSON — reported as the "rule"
+    /// when this constraint is the one that decided.
+    source: String,
 }
 
 impl CompiledConstraint {
@@ -78,22 +81,25 @@ struct GenericCeiling {
     unbounded: bool,
 }
 
-impl CompiledCeiling for GenericCeiling {
-    fn classify(&self, op: &ResourceOp) -> Decision {
+impl GenericCeiling {
+    /// The same mode-dispatch `classify` used to run, but returning the
+    /// matching allow constraint (rendered as JSON text) alongside the
+    /// decision. Both trait methods are expressed in terms of this so the
+    /// decision output cannot drift between them.
+    fn matched(&self, op: &ResourceOp) -> (Decision, Option<String>) {
         // Deny wins first: any deny constraint matching → Deny.
         if self.deny_sets.iter().any(|c| c.matches(&op.attrs)) {
-            return Decision::Deny;
+            return (Decision::Deny, None);
         }
 
         match self.mode {
-            PolicyMode::Deny => Decision::Deny,
-            PolicyMode::Open => Decision::Allow,
+            PolicyMode::Deny => (Decision::Deny, None),
+            PolicyMode::Open => (Decision::Allow, None),
             PolicyMode::Allowlist => {
                 // Allow iff some allow constraint matches.
-                if self.allow_sets.iter().any(|c| c.matches(&op.attrs)) {
-                    Decision::Allow
-                } else {
-                    Decision::Deny
+                match self.allow_sets.iter().find(|c| c.matches(&op.attrs)) {
+                    Some(c) => (Decision::Allow, Some(c.source.clone())),
+                    None => (Decision::Deny, None),
                 }
             }
             PolicyMode::Ask => {
@@ -101,15 +107,26 @@ impl CompiledCeiling for GenericCeiling {
                 // Unbounded means no declaration was present (generic class never
                 // declared), so the ceiling is treated as universal — any request
                 // gets a prompt rather than a hard deny.
-                let in_ceiling =
-                    self.unbounded || self.allow_sets.iter().any(|c| c.matches(&op.attrs));
-                if in_ceiling {
-                    Decision::Ask
+                if self.unbounded {
+                    (Decision::Ask, None)
+                } else if let Some(c) = self.allow_sets.iter().find(|c| c.matches(&op.attrs)) {
+                    (Decision::Ask, Some(c.source.clone()))
                 } else {
-                    Decision::Deny
+                    (Decision::Deny, None)
                 }
             }
         }
+    }
+}
+
+impl CompiledCeiling for GenericCeiling {
+    fn classify(&self, op: &ResourceOp) -> Decision {
+        self.matched(op).0
+    }
+
+    fn classify_explained(&self, op: &ResourceOp) -> Explained {
+        let (decision, rule) = self.matched(op);
+        Explained { decision, rule }
     }
 
     fn declared(&self) -> bool {
@@ -124,12 +141,16 @@ fn compile_constraint_globs(
 ) -> Result<Vec<CompiledConstraint>, PolicyError> {
     cs.iter()
         .map(|c| {
+            let source = c.to_string();
             let obj = match c.as_object() {
                 Some(obj) => obj,
                 None => {
                     // Non-object constraint: treat as empty (always-match or never-match?).
                     // We treat it as a zero-key constraint that always matches (matches everything).
-                    return Ok(CompiledConstraint { key_globs: vec![] });
+                    return Ok(CompiledConstraint {
+                        key_globs: vec![],
+                        source,
+                    });
                 }
             };
             let mut key_globs = Vec::new();
@@ -150,7 +171,7 @@ fn compile_constraint_globs(
                 })?;
                 key_globs.push((key.clone(), glob_set));
             }
-            Ok(CompiledConstraint { key_globs })
+            Ok(CompiledConstraint { key_globs, source })
         })
         .collect()
 }

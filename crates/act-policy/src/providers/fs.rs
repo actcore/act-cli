@@ -3,12 +3,13 @@
 use std::collections::BTreeMap;
 
 use act_types::{Capabilities, CapabilityRequest};
+use globset::Glob;
 
 use crate::Decision;
 use crate::effective::effective_fs;
 use crate::fs_matcher::{FsAccess, FsMatcher};
 use crate::grant::{CapabilityGrant, FsAllow, FsConfig, PolicyError};
-use crate::provider::{CapabilityProvider, CompiledCeiling, ResourceOp};
+use crate::provider::{CapabilityProvider, CompiledCeiling, Explained, ResourceOp};
 
 pub struct FsProvider;
 
@@ -36,6 +37,7 @@ impl CapabilityProvider for FsProvider {
             matcher,
             effective_mode,
             is_declared: eff.declared,
+            allow: eff.config.allow,
         }))
     }
 }
@@ -44,16 +46,62 @@ struct FsCeiling {
     matcher: FsMatcher,
     effective_mode: crate::grant::PolicyMode,
     is_declared: bool,
+    /// The same effective allow entries the matcher was compiled from — kept
+    /// around only so `classify_explained` can report which glob decided an
+    /// Allow/Ask. Never consulted for the decision itself; `matcher` remains
+    /// the sole source of truth for that.
+    allow: Vec<FsAllow>,
+}
+
+impl FsCeiling {
+    fn access(op: &ResourceOp) -> FsAccess {
+        if op.action == "write" {
+            FsAccess::Write
+        } else {
+            FsAccess::Read
+        }
+    }
+
+    /// The authoritative decision (via `matcher`, unchanged), plus — when the
+    /// decision is Allow/Ask — the effective allow entry whose glob matches
+    /// the path. Deny always reports no rule: there is nothing to group an
+    /// audited allow under.
+    fn matched(&self, op: &ResourceOp) -> (Decision, Option<String>) {
+        let access = Self::access(op);
+        let decision = self.matcher.decide(std::path::Path::new(&op.key), access);
+        let rule = match decision {
+            Decision::Deny => None,
+            Decision::Allow | Decision::Ask => self.matching_glob(&op.key, access),
+        };
+        (decision, rule)
+    }
+
+    /// Best-effort: the first effective allow entry (respecting the
+    /// read/write split `matcher` itself enforces) whose glob directly
+    /// matches `key`. Returns `None` when no single entry matches directly —
+    /// e.g. the decision came from ancestor-traversal rather than a direct
+    /// glob hit — which is a graceful degradation, not an error.
+    fn matching_glob(&self, key: &str, access: FsAccess) -> Option<String> {
+        self.allow
+            .iter()
+            .filter(|e| access == FsAccess::Read || e.mode == act_types::FsMode::Rw)
+            .find(|e| {
+                Glob::new(&e.glob)
+                    .map(|g| g.compile_matcher().is_match(key))
+                    .unwrap_or(false)
+            })
+            .map(|e| e.glob.clone())
+    }
 }
 
 impl CompiledCeiling for FsCeiling {
     fn classify(&self, op: &ResourceOp) -> Decision {
-        let access = if op.action == "write" {
-            FsAccess::Write
-        } else {
-            FsAccess::Read
-        };
-        self.matcher.decide(std::path::Path::new(&op.key), access)
+        self.matched(op).0
+    }
+
+    fn classify_explained(&self, op: &ResourceOp) -> Explained {
+        let (decision, rule) = self.matched(op);
+        Explained { decision, rule }
     }
 
     fn declared(&self) -> bool {
@@ -188,5 +236,46 @@ mod tests {
         };
         assert_eq!(c.classify(&op), Decision::Allow);
         assert!(c.declared());
+    }
+
+    /// Build an allowlist ceiling over a single rw glob — same shape as the
+    /// `classify` tests above (allowlist mode, declared == granted).
+    async fn ceiling_allowlist_rw(glob: &str) -> Box<dyn crate::provider::CompiledCeiling> {
+        let p = FsProvider;
+        let declared = vec![json!({"path": glob, "mode": "rw"})];
+        let grant = CapabilityGrant {
+            mode: PolicyMode::Allowlist,
+            allow: vec![json!({"path": glob, "mode": "rw"})],
+            deny: vec![],
+        };
+        p.resolve("wasi:filesystem", &declared, &grant)
+            .await
+            .unwrap()
+    }
+
+    fn op_at(path: &str, action: &str) -> ResourceOp {
+        ResourceOp {
+            cap_id: "wasi:filesystem".into(),
+            key: path.into(),
+            action: action.into(),
+            attrs: serde_json::Value::Null,
+        }
+    }
+
+    #[tokio::test]
+    async fn classify_explained_reports_the_matching_glob() {
+        // Same ceiling shape as `classify` tests above: an allowlist over /data/**.
+        let c = ceiling_allowlist_rw("/data/**").await;
+        let e = c.classify_explained(&op_at("/data/app.db", "read"));
+        assert_eq!(e.decision, Decision::Allow);
+        assert_eq!(e.rule.as_deref(), Some("/data/**"));
+    }
+
+    #[tokio::test]
+    async fn classify_explained_reports_no_rule_on_deny() {
+        let c = ceiling_allowlist_rw("/data/**").await;
+        let e = c.classify_explained(&op_at("/etc/passwd", "read"));
+        assert_eq!(e.decision, Decision::Deny);
+        assert_eq!(e.rule, None);
     }
 }
