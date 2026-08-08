@@ -4,10 +4,12 @@
 //! is a span, and the capability decisions it triggers are events inside it.
 
 pub mod emit;
+pub mod layer;
 pub mod record;
 pub mod render;
 
 pub use emit::{emit_cap_decision, finish_tool_call, tool_call_span};
+pub use layer::{AuditLayer, AuditWriter, Detail, StderrWriter};
 pub use record::{
     Actor, CapDecisionRecord, Decision4, Outcome, ToolCallStart, Transport, attr, duration_ms,
     sha256_hex,
