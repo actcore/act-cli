@@ -60,9 +60,13 @@ fn is_json_mime(mime: &str) -> bool {
     mime == "application/json" || mime.ends_with("+json")
 }
 
-/// Build the `_meta` object for a content block: the part's mime-type when
-/// the MCP block type does not carry it natively, plus every entry of
-/// `content-part.metadata` with its keys respelled for the channel.
+/// Build the `_meta` object for a content block: every entry of
+/// `content-part.metadata` with its keys respelled for the channel, plus the
+/// part's mime-type when the MCP block type does not carry it natively.
+///
+/// The mime is inserted *last*, after metadata, so it always wins over a
+/// colliding metadata entry (e.g. a component-supplied `std:mime-type`):
+/// `dev.actcore/mime-type` reflects `content-part.mime-type` unconditionally.
 ///
 /// Returns `None` when there is nothing to say, so a bare part serialises
 /// without a `_meta` key at all.
@@ -72,15 +76,15 @@ fn part_meta(
 ) -> Option<rmcp::model::MetaObject> {
     let mut map = serde_json::Map::new();
 
-    if include_mime && let Some(mime) = part.mime_type.as_deref() {
-        map.insert(MCP_MIME_TYPE.to_string(), Value::String(mime.to_string()));
-    }
-
     if !part.metadata.is_empty() {
         let decoded = act_types::types::Metadata::from(part.metadata.clone());
         for (key, value) in decoded.iter() {
             map.insert(act_key_to_mcp(key).into_owned(), value.clone());
         }
+    }
+
+    if include_mime && let Some(mime) = part.mime_type.as_deref() {
+        map.insert(MCP_MIME_TYPE.to_string(), Value::String(mime.to_string()));
     }
 
     (!map.is_empty()).then(|| rmcp::model::MetaObject(map))
@@ -694,7 +698,7 @@ impl ActRmcpBridge {
                 rmcp::ErrorData::new(
                     rmcp::model::ErrorCode::INVALID_PARAMS,
                     "close_session requires `session_id` (string)",
-                    None,
+                    Some(error_detail_json(ERR_INVALID_ARGS, &[])),
                 )
             })?
             .to_string();
@@ -774,7 +778,10 @@ fn virtual_close_session_tool() -> Tool {
 
 fn session_op_meta(op: &'static str) -> rmcp::model::MetaObject {
     let mut map = serde_json::Map::new();
-    map.insert(META_SESSION_OP.to_string(), Value::String(op.to_string()));
+    map.insert(
+        act_key_to_mcp(META_SESSION_OP).into_owned(),
+        Value::String(op.to_string()),
+    );
     rmcp::model::MetaObject(map)
 }
 
@@ -1087,17 +1094,49 @@ mod tests {
 
     #[test]
     fn image_block_does_not_duplicate_its_native_mime() {
-        let block = map_content_part(&part(Some("image/png"), b"\x89PNG"));
-        match block {
+        // Give the part real metadata too, so this test would fail if
+        // `part_meta(part, false)` were ever deleted — asserting only the
+        // mime's absence passes trivially when `_meta` is `None` outright.
+        let mut p = part(Some("image/png"), b"\x89PNG");
+        p.metadata = act_types::types::Metadata::from(serde_json::json!({
+            "std:progress": 42,
+        }))
+        .into();
+
+        match map_content_part(&p) {
             ContentBlock::Image(img) => {
                 assert_eq!(img.mime_type, "image/png");
-                let duplicated = img
-                    .meta
-                    .as_ref()
-                    .is_some_and(|m| m.0.contains_key(MCP_MIME_TYPE));
-                assert!(!duplicated, "image blocks already carry mimeType natively");
+                let m = &img.meta.as_ref().expect("metadata must be present").0;
+                assert_eq!(m["dev.actcore/progress"], serde_json::json!(42));
+                assert!(
+                    !m.contains_key(MCP_MIME_TYPE),
+                    "image blocks already carry mimeType natively"
+                );
             }
             _ => panic!("expected an image block"),
+        }
+    }
+
+    #[test]
+    fn projected_mime_wins_over_a_colliding_metadata_entry() {
+        // A component-supplied `std:mime-type` metadata entry respells to
+        // the same MCP key as the projected mime (`dev.actcore/mime-type`).
+        // The part's actual mime must win the collision.
+        let mut p = part(Some("text/plain"), b"body");
+        p.metadata = act_types::types::Metadata::from(serde_json::json!({
+            "std:mime-type": "application/octet-stream",
+        }))
+        .into();
+
+        match map_content_part(&p) {
+            ContentBlock::Text(t) => {
+                assert_eq!(
+                    t.meta.as_ref().unwrap().0[MCP_MIME_TYPE],
+                    serde_json::json!("text/plain"),
+                    "the part's actual mime must win over a colliding metadata entry"
+                );
+            }
+            _ => panic!("expected a text block"),
         }
     }
 
@@ -1207,6 +1246,19 @@ mod tests {
             Some("client-supplied"),
             "no default → client value preserved"
         );
+    }
+
+    #[test]
+    fn synthesized_open_session_tool_meta_uses_the_conformant_spelling() {
+        let tool = virtual_open_session_tool(serde_json::json!({}));
+        let meta = &tool.meta.as_ref().expect("tool must carry _meta").0;
+        assert_eq!(meta["dev.actcore/session-op"], serde_json::json!("open"));
+        for key in meta.keys() {
+            assert!(
+                !key.contains(':'),
+                "`_meta` key `{key}` must not contain a colon (MCP disallows it)"
+            );
+        }
     }
 
     #[test]
