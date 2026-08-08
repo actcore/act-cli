@@ -72,9 +72,18 @@ impl Rollup {
     }
 }
 
+/// Truncate to at most `n` bytes without splitting a UTF-8 character.
+fn take_bytes(s: &str, n: usize) -> &str {
+    let mut e = s.len().min(n);
+    while e > 0 && !s.is_char_boundary(e) {
+        e -= 1;
+    }
+    &s[..e]
+}
+
 fn short_digest(digest: &str) -> String {
     let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
-    format!("sha256:{}", &hex[..hex.len().min(6)])
+    format!("sha256:{}", take_bytes(hex, 6))
 }
 
 fn humanise_ms(ms: u64) -> String {
@@ -128,10 +137,10 @@ pub fn render_rollup(span: &SpanFields, roll: &Rollup) -> String {
         span.tool,
         span.outcome,
         humanise_ms(span.duration_ms),
-        &span.args_sha256[..span.args_sha256.len().min(6)]
+        take_bytes(&span.args_sha256, 6)
     );
     if let Some(sid) = &span.session_id {
-        line.push_str(&format!("  session:{}", &sid[..sid.len().min(8)]));
+        line.push_str(&format!("  session:{}", take_bytes(sid, 8)));
     }
 
     // Group by capability so one clause covers all actions on that class.
@@ -300,5 +309,80 @@ mod tests {
         );
         assert!(line.contains("wasi:filesystem=allowlist"));
         assert!(line.contains("wasi:http=ask"));
+    }
+
+    #[test]
+    fn rollup_truncates_multibyte_session_id_safely() {
+        // Japanese hiragana: "アアアアア" = 5 chars × 3 bytes = 15 bytes total.
+        // Byte 8 lands mid-character (inside the 3rd "ア"). This must not panic.
+        let mut sf = span_fields();
+        sf.session_id = Some("アアアアア".to_string());
+        let roll = Rollup::new(64);
+
+        let line = render_rollup(&sf, &roll);
+        // Should render safely and contain the session clause
+        assert!(
+            line.contains("session:"),
+            "session clause missing from {line}"
+        );
+        // Should truncate to a safe point (2 chars = 6 bytes for "アア")
+        assert!(
+            line.contains("session:アア"),
+            "expected 2 chars, got {line}"
+        );
+    }
+
+    #[test]
+    fn rollup_with_short_session_id_unchanged() {
+        // Session ID shorter than 8 bytes should not be truncated
+        let mut sf = span_fields();
+        sf.session_id = Some("short".to_string()); // 5 bytes
+        let roll = Rollup::new(64);
+
+        let line = render_rollup(&sf, &roll);
+        assert!(
+            line.contains("session:short"),
+            "full short ID should appear, got {line}"
+        );
+    }
+
+    #[test]
+    fn rollup_truncates_multibyte_at_boundary() {
+        // A session ID where the 8-byte mark happens to be on a char boundary.
+        // UTF-8 boundary at 8: use a string that has a character boundary there.
+        // "café" (4 chars, 5 bytes: c=1, a=1, f=1, é=2), repeated to fit.
+        // We want exactly 8 bytes: "café" + "test" = 9 bytes (too long)
+        // "abcd" (4 chars, 4 bytes) × 2 = 8 bytes exactly
+        let mut sf = span_fields();
+        sf.session_id = Some("abcdefghijklmnop".to_string()); // 16 ASCII chars = 16 bytes
+        let roll = Rollup::new(64);
+
+        let line = render_rollup(&sf, &roll);
+        assert!(
+            line.contains("session:abcdefgh"),
+            "expected 8 chars, got {line}"
+        );
+    }
+
+    #[test]
+    fn take_bytes_helper_respects_utf8_boundaries() {
+        // Directly test the truncation helper via a rollup that exercises it.
+        // Emoji 🎉 is 4 bytes each. At max 8 bytes, we get exactly 2 emojis.
+        // This test ensures we render them without panic.
+        let mut sf = span_fields();
+        sf.session_id = Some("🎉🎉🎉".to_string()); // 3 emoji × 4 bytes = 12 bytes
+        let roll = Rollup::new(64);
+
+        let line = render_rollup(&sf, &roll);
+        // At 8 bytes exactly (char boundary), we get 2 emojis
+        assert!(
+            line.contains("session:🎉🎉"),
+            "expected 2 emoji at boundary, got {line}"
+        );
+        // Third emoji should not appear (would need 12 bytes)
+        assert!(
+            !line.contains("🎉🎉🎉"),
+            "should not contain 3 emoji, got {line}"
+        );
     }
 }
