@@ -5,12 +5,14 @@
 
 pub mod emit;
 pub mod record;
+pub mod render;
 
 pub use emit::{emit_cap_decision, finish_tool_call, tool_call_span};
 pub use record::{
     Actor, CapDecisionRecord, Decision4, Outcome, ToolCallStart, Transport, attr, duration_ms,
     sha256_hex,
 };
+pub use render::{Rollup, SpanFields, render_exception, render_header, render_rollup};
 
 /// Target for host-authored audit records. The audit layer's filter is pinned
 /// to this and nothing else.
