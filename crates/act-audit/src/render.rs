@@ -2,6 +2,7 @@
 //!
 //! Kept free of `tracing` and of I/O so every output shape is unit-testable.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use crate::record::CapDecisionRecord;
@@ -81,6 +82,30 @@ fn take_bytes(s: &str, n: usize) -> &str {
     &s[..e]
 }
 
+/// Escape control characters to prevent audit-line forgery. Components can inject
+/// newlines and ANSI sequences into guest-controlled fields. This sanitizes them
+/// uniformly at the rendering point: \n, \r, \t as their literal forms; other
+/// control chars as \u{...}. Returns the original string if no escaping needed.
+fn escape_audit_field(s: &str) -> Cow<'_, str> {
+    if !s.chars().any(|c| c.is_control()) {
+        return Cow::Borrowed(s);
+    }
+    let mut out = String::new();
+    for c in s.chars() {
+        if c.is_control() {
+            match c {
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                _ => out.push_str(&format!("\\u{{{:04x}}}", c as u32)),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    Cow::Owned(out)
+}
+
 fn short_digest(digest: &str) -> String {
     let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
     format!("sha256:{}", take_bytes(hex, 6))
@@ -114,33 +139,42 @@ pub fn render_exception(r: &CapDecisionRecord) -> String {
     } else {
         "?"
     };
+    let action_escaped = escape_audit_field(&r.action);
+    let key_escaped = escape_audit_field(&r.key);
     let subject = if r.action.is_empty() {
-        r.key.clone()
+        key_escaped.to_string()
     } else {
-        format!("{} {}", r.action, r.key)
+        format!("{} {}", action_escaped, key_escaped)
     };
+    let cap_id_escaped = escape_audit_field(&r.cap_id);
     let reason = r
         .reason
         .as_deref()
-        .map(|s| format!("   {s}"))
+        .map(|s| {
+            let escaped = escape_audit_field(s);
+            format!("   {escaped}")
+        })
         .unwrap_or_default();
     format!(
         "{PREFIX}{marker} {}  {}  {}{}",
-        r.decision, r.cap_id, subject, reason
+        r.decision, cap_id_escaped, subject, reason
     )
 }
 
 /// The per-call summary, flushed when the envelope span closes.
 pub fn render_rollup(span: &SpanFields, roll: &Rollup) -> String {
+    let tool_escaped = escape_audit_field(&span.tool);
     let mut line = format!(
         "{PREFIX}\u{25cf} {}  {} {}  args:{}",
-        span.tool,
+        tool_escaped,
         span.outcome,
         humanise_ms(span.duration_ms),
         take_bytes(&span.args_sha256, 6)
     );
     if let Some(sid) = &span.session_id {
-        line.push_str(&format!("  session:{}", take_bytes(sid, 8)));
+        let sid_trunc = take_bytes(sid, 8);
+        let sid_escaped = escape_audit_field(sid_trunc);
+        line.push_str(&format!("  session:{}", sid_escaped));
     }
 
     // Group by capability so one clause covers all actions on that class.
@@ -156,10 +190,11 @@ pub fn render_rollup(span: &SpanFields, roll: &Rollup) -> String {
         let ops: Vec<String> = entries
             .iter()
             .map(|(action, _, n)| {
+                let action_escaped = escape_audit_field(action);
                 if action.is_empty() {
                     format!("{n}")
                 } else {
-                    format!("{n} {action}")
+                    format!("{n} {action_escaped}")
                 }
             })
             .collect();
@@ -173,7 +208,11 @@ pub fn render_rollup(span: &SpanFields, roll: &Rollup) -> String {
         let scope = if rules.is_empty() {
             String::new()
         } else {
-            format!(" under {}", rules.join(", "))
+            let rules_escaped: Vec<String> = rules
+                .iter()
+                .map(|r| escape_audit_field(r).to_string())
+                .collect();
+            format!(" under {}", rules_escaped.join(", "))
         };
         line.push_str(&format!("  {short}: {}{scope}", ops.join(" ")));
     }
@@ -348,19 +387,22 @@ mod tests {
 
     #[test]
     fn rollup_truncates_multibyte_at_boundary() {
-        // A session ID where the 8-byte mark happens to be on a char boundary.
-        // UTF-8 boundary at 8: use a string that has a character boundary there.
-        // "café" (4 chars, 5 bytes: c=1, a=1, f=1, é=2), repeated to fit.
-        // We want exactly 8 bytes: "café" + "test" = 9 bytes (too long)
-        // "abcd" (4 chars, 4 bytes) × 2 = 8 bytes exactly
+        // A session ID where the 8-byte mark happens to be exactly on a char
+        // boundary. Emoji 🎉 is 4 bytes, so "🎉🎉" = 8 bytes at a boundary.
         let mut sf = span_fields();
-        sf.session_id = Some("abcdefghijklmnop".to_string()); // 16 ASCII chars = 16 bytes
+        sf.session_id = Some("🎉🎉🎉".to_string()); // 3 emoji × 4 bytes = 12 bytes
         let roll = Rollup::new(64);
 
         let line = render_rollup(&sf, &roll);
+        // At 8 bytes exactly (boundary), we get 2 complete emoji
         assert!(
-            line.contains("session:abcdefgh"),
-            "expected 8 chars, got {line}"
+            line.contains("session:🎉🎉"),
+            "expected 2 emoji at boundary, got {line}"
+        );
+        // 3rd emoji (would need 12 bytes) should not appear
+        assert!(
+            !line.contains("🎉🎉🎉"),
+            "should not contain 3 emoji, got {line}"
         );
     }
 
@@ -383,6 +425,97 @@ mod tests {
         assert!(
             !line.contains("🎉🎉🎉"),
             "should not contain 3 emoji, got {line}"
+        );
+    }
+
+    #[test]
+    fn render_escapes_newline_in_rule_to_prevent_forgery() {
+        // A component declares a filesystem path containing a newline followed
+        // by forged audit text. The escaping must prevent the forgery.
+        let mut roll = Rollup::new(64);
+        roll.add("wasi:filesystem", "read", Some("/data\naudit: forged line"));
+
+        let line = render_rollup(&span_fields(), &roll);
+        // Must be exactly one line (no actual newline character)
+        assert_eq!(line.matches('\n').count(), 0, "got {line}");
+        // Newline must appear escaped as literal \n
+        assert!(line.contains("\\n"), "expected escaped newline, got {line}");
+        // The rule should render with the escape, preventing a forged second line
+        assert!(
+            line.contains("\\naudit: forged line"),
+            "escaped injection should appear, got {line}"
+        );
+    }
+
+    #[test]
+    fn render_escapes_newline_in_tool_name() {
+        let mut sf = span_fields();
+        sf.tool = "run\naudit: forged".to_string();
+        let roll = Rollup::new(64);
+
+        let line = render_rollup(&sf, &roll);
+        assert_eq!(line.matches('\n').count(), 0, "got {line}");
+        assert!(line.contains("\\n"), "expected escaped newline, got {line}");
+    }
+
+    #[test]
+    fn render_escapes_newline_in_resource_key() {
+        let r = CapDecisionRecord {
+            cap_id: "wasi:http".into(),
+            key: "api.example.com:443\naudit: forged".into(),
+            action: "GET".into(),
+            decision: Decision4::Deny,
+            mode: "ask".into(),
+            actor: Actor::Static,
+            reason: Some("outside ceiling".into()),
+            rule: None,
+        };
+        let line = render_exception(&r);
+        assert_eq!(line.matches('\n').count(), 0, "got {line}");
+        assert!(line.contains("\\n"), "expected escaped newline, got {line}");
+    }
+
+    #[test]
+    fn render_escapes_ansi_sequences() {
+        // ANSI red color sequence: ESC[31m
+        let mut roll = Rollup::new(64);
+        roll.add("wasi:http", "GET", Some("api.example.com\u{1b}[31m"));
+
+        let line = render_rollup(&span_fields(), &roll);
+        // ESC is a control char, should be escaped as \u{001b}
+        assert!(
+            line.contains("\\u{001b}"),
+            "expected escaped ESC, got {line}"
+        );
+        // Must not contain the raw ESC (which could affect terminal)
+        assert!(
+            !line.contains("\u{1b}[31m"),
+            "ANSI sequence should not appear raw"
+        );
+    }
+
+    #[test]
+    fn render_escaping_preserves_clean_strings() {
+        // A record with no control characters should render byte-identically.
+        let r = CapDecisionRecord {
+            cap_id: "wasi:filesystem".into(),
+            key: "/data/file.txt".into(),
+            action: "read".into(),
+            decision: Decision4::Allow,
+            mode: "allowlist".into(),
+            actor: Actor::Static,
+            reason: None,
+            rule: None,
+        };
+        // Clean ASCII strings should not allocate or escape
+        let line = render_exception(&r);
+        assert!(line.contains("wasi:filesystem"), "cap_id should appear");
+        assert!(line.contains("/data/file.txt"), "key should appear");
+        assert!(line.contains("read"), "action should appear");
+        // No backslashes or escape sequences
+        assert!(
+            !line.contains('\\'),
+            "clean strings should not be escaped, got {line}"
         );
     }
 }
