@@ -38,6 +38,8 @@ const ACT_STD_PREFIX: &str = "std:";
 const MCP_ERROR_KIND: &str = "dev.actcore/error-kind";
 const MCP_ERROR_METADATA: &str = "dev.actcore/error-metadata";
 
+const MCP_MIME_TYPE: &str = "dev.actcore/mime-type";
+
 pub struct ActRmcpBridge {
     pub handle: runtime::ComponentHandle,
     pub info: runtime::ComponentInfo,
@@ -58,6 +60,32 @@ fn is_json_mime(mime: &str) -> bool {
     mime == "application/json" || mime.ends_with("+json")
 }
 
+/// Build the `_meta` object for a content block: the part's mime-type when
+/// the MCP block type does not carry it natively, plus every entry of
+/// `content-part.metadata` with its keys respelled for the channel.
+///
+/// Returns `None` when there is nothing to say, so a bare part serialises
+/// without a `_meta` key at all.
+fn part_meta(
+    part: &runtime::act::tools::types::ContentPart,
+    include_mime: bool,
+) -> Option<rmcp::model::MetaObject> {
+    let mut map = serde_json::Map::new();
+
+    if include_mime && let Some(mime) = part.mime_type.as_deref() {
+        map.insert(MCP_MIME_TYPE.to_string(), Value::String(mime.to_string()));
+    }
+
+    if !part.metadata.is_empty() {
+        let decoded = act_types::types::Metadata::from(part.metadata.clone());
+        for (key, value) in decoded.iter() {
+            map.insert(act_key_to_mcp(key).into_owned(), value.clone());
+        }
+    }
+
+    (!map.is_empty()).then(|| rmcp::model::MetaObject(map))
+}
+
 fn map_content_part(part: &runtime::act::tools::types::ContentPart) -> ContentBlock {
     let mime = part.mime_type.as_deref().unwrap_or("");
 
@@ -67,13 +95,16 @@ fn map_content_part(part: &runtime::act::tools::types::ContentPart) -> ContentBl
     // below. Matches the ACT-HTTP transport, which also treats JSON as text.
     if mime.starts_with("text/") || is_json_mime(mime) {
         let text = String::from_utf8_lossy(&part.data).into_owned();
-        return ContentBlock::text(text);
+        return text_block(text, part);
     }
 
     if mime.starts_with("image/") {
         use base64::Engine as _;
         let data_b64 = base64::engine::general_purpose::STANDARD.encode(&part.data);
-        return ContentBlock::image(data_b64, mime.to_string());
+        let mut img = rmcp::model::ImageContent::new(data_b64, mime.to_string());
+        // `include_mime: false` — an image block carries `mimeType` natively.
+        img.meta = part_meta(part, false);
+        return ContentBlock::Image(img);
     }
 
     // Non-text / non-image: try CBOR → JSON text, then base64 fallback.
@@ -85,7 +116,15 @@ fn map_content_part(part: &runtime::act::tools::types::ContentPart) -> ContentBl
             base64::engine::general_purpose::STANDARD.encode(&part.data)
         }
     };
-    ContentBlock::text(text)
+    text_block(text, part)
+}
+
+/// A text block carrying the part's mime and metadata in `_meta`. MCP text
+/// content has no native mime field, so `include_mime: true`.
+fn text_block(text: String, part: &runtime::act::tools::types::ContentPart) -> ContentBlock {
+    let mut content = rmcp::model::TextContent::new(text);
+    content.meta = part_meta(part, true);
+    ContentBlock::Text(content)
 }
 
 /// Project an ACT `error`'s non-message fields into a JSON object shared by
@@ -1032,6 +1071,65 @@ mod tests {
             .decode(text)
             .unwrap();
         assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn text_block_carries_its_mime_in_meta() {
+        let block = map_content_part(&part(Some("text/markdown"), b"# hi"));
+        match block {
+            ContentBlock::Text(t) => assert_eq!(
+                t.meta.as_ref().unwrap().0[MCP_MIME_TYPE],
+                serde_json::json!("text/markdown")
+            ),
+            _ => panic!("expected a text block"),
+        }
+    }
+
+    #[test]
+    fn image_block_does_not_duplicate_its_native_mime() {
+        let block = map_content_part(&part(Some("image/png"), b"\x89PNG"));
+        match block {
+            ContentBlock::Image(img) => {
+                assert_eq!(img.mime_type, "image/png");
+                let duplicated = img
+                    .meta
+                    .as_ref()
+                    .is_some_and(|m| m.0.contains_key(MCP_MIME_TYPE));
+                assert!(!duplicated, "image blocks already carry mimeType natively");
+            }
+            _ => panic!("expected an image block"),
+        }
+    }
+
+    #[test]
+    fn part_metadata_reaches_the_block_with_mapped_keys() {
+        let mut p = part(Some("text/plain"), b"body");
+        p.metadata = act_types::types::Metadata::from(serde_json::json!({
+            "std:progress": 42,
+            "acme:shard": "eu-1",
+        }))
+        .into();
+
+        match map_content_part(&p) {
+            ContentBlock::Text(t) => {
+                let m = &t.meta.as_ref().unwrap().0;
+                assert_eq!(m["dev.actcore/progress"], serde_json::json!(42));
+                assert_eq!(m["acme:shard"], serde_json::json!("eu-1"));
+            }
+            _ => panic!("expected a text block"),
+        }
+    }
+
+    #[test]
+    fn a_bare_part_gets_no_meta_object_at_all() {
+        let block = map_content_part(&part(None, b"opaque"));
+        match block {
+            ContentBlock::Text(t) => assert!(
+                t.meta.is_none(),
+                "no mime and no metadata must mean no _meta key on the wire"
+            ),
+            _ => panic!("expected a text block"),
+        }
     }
 
     fn fake_info() -> runtime::ComponentInfo {
