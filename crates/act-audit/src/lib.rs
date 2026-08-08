@@ -3,8 +3,10 @@
 //! Two record kinds mirror the span/event split that OTLP wants: a tool call
 //! is a span, and the capability decisions it triggers are events inside it.
 
+pub mod emit;
 pub mod record;
 
+pub use emit::{emit_cap_decision, finish_tool_call, tool_call_span};
 pub use record::{
     Actor, CapDecisionRecord, Decision4, Outcome, ToolCallStart, Transport, attr, duration_ms,
     sha256_hex,
