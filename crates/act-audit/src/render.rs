@@ -121,12 +121,18 @@ fn humanise_ms(ms: u64) -> String {
 
 /// The instantiation header: what is running and under what modes.
 pub fn render_header(component_ref: &str, digest: &str, modes: &[(String, String)]) -> String {
+    let component_ref_escaped = escape_audit_field(component_ref);
     let modes: Vec<String> = modes
         .iter()
-        .map(|(id, mode)| format!("{id}={mode}"))
+        .map(|(id, mode)| {
+            let id_escaped = escape_audit_field(id);
+            let mode_escaped = escape_audit_field(mode);
+            format!("{id_escaped}={mode_escaped}")
+        })
         .collect();
     format!(
-        "{PREFIX}{component_ref} {} \u{2502} {}",
+        "{PREFIX}{} {} \u{2502} {}",
+        component_ref_escaped,
         short_digest(digest),
         modes.join(" ")
     )
@@ -187,6 +193,7 @@ pub fn render_rollup(span: &SpanFields, roll: &Rollup) -> String {
     }
     for (cap_id, entries) in by_cap {
         let short = cap_id.strip_prefix("wasi:").unwrap_or(cap_id);
+        let short_escaped = escape_audit_field(short);
         let ops: Vec<String> = entries
             .iter()
             .map(|(action, _, n)| {
@@ -214,7 +221,7 @@ pub fn render_rollup(span: &SpanFields, roll: &Rollup) -> String {
                 .collect();
             format!(" under {}", rules_escaped.join(", "))
         };
-        line.push_str(&format!("  {short}: {}{scope}", ops.join(" ")));
+        line.push_str(&format!("  {short_escaped}: {}{scope}", ops.join(" ")));
     }
     if roll.overflow > 0 {
         line.push_str(&format!("  and {} more", roll.overflow));
@@ -516,6 +523,57 @@ mod tests {
         assert!(
             !line.contains('\\'),
             "clean strings should not be escaped, got {line}"
+        );
+    }
+
+    #[test]
+    fn render_escapes_newline_in_capability_id() {
+        // Gap 1 fix: capability ID in render_rollup was unescaped.
+        // A component declares a custom capability class "db\naudit: forged".
+        let mut roll = Rollup::new(64);
+        roll.add("db\naudit: forged", "drop-database", Some("/data"));
+
+        let line = render_rollup(&span_fields(), &roll);
+        // Must be exactly one line (no actual newline character)
+        assert_eq!(line.matches('\n').count(), 0, "got {line}");
+        // Newline must appear escaped
+        assert!(
+            line.contains("\\n"),
+            "expected escaped newline in cap_id, got {line}"
+        );
+    }
+
+    #[test]
+    fn render_header_escapes_capability_class_id() {
+        // Gap 1 fix: capability class id in render_header was unescaped.
+        let line = render_header(
+            "python-eval@0.16.0",
+            "1f3a9c4e5d6b7a8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c",
+            &[("db\naudit: forged".to_string(), "allowlist".to_string())],
+        );
+        // Must be exactly one line
+        assert_eq!(line.matches('\n').count(), 0, "got {line}");
+        // Newline must appear escaped
+        assert!(
+            line.contains("\\n"),
+            "expected escaped newline in capability class id, got {line}"
+        );
+    }
+
+    #[test]
+    fn render_header_escapes_component_ref() {
+        // Gap 2 fix: component_ref in render_header was unescaped.
+        let line = render_header(
+            "python-eval\naudit: forged@0.16.0",
+            "1f3a9c4e5d6b7a8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c",
+            &[("wasi:filesystem".to_string(), "allowlist".to_string())],
+        );
+        // Must be exactly one line
+        assert_eq!(line.matches('\n').count(), 0, "got {line}");
+        // Newline must appear escaped
+        assert!(
+            line.contains("\\n"),
+            "expected escaped newline in component_ref, got {line}"
         );
     }
 }
