@@ -53,6 +53,11 @@ pub struct ActRmcpBridge {
     pub default_session_id: Option<String>,
 }
 
+/// UTF-8 JSON payloads, which must not take the CBOR or base64 paths.
+fn is_json_mime(mime: &str) -> bool {
+    mime == "application/json" || mime.ends_with("+json")
+}
+
 fn map_content_part(part: &runtime::act::tools::types::ContentPart) -> ContentBlock {
     let mime = part.mime_type.as_deref().unwrap_or("");
 
@@ -60,7 +65,7 @@ fn map_content_part(part: &runtime::act::tools::types::ContentPart) -> ContentBl
     // covers `text/*` and JSON (`application/json`, `application/*+json`) —
     // JSON bytes are UTF-8, not CBOR, so they must not hit the base64 path
     // below. Matches the ACT-HTTP transport, which also treats JSON as text.
-    if mime.starts_with("text/") || mime == "application/json" || mime.ends_with("+json") {
+    if mime.starts_with("text/") || is_json_mime(mime) {
         let text = String::from_utf8_lossy(&part.data).into_owned();
         return ContentBlock::text(text);
     }
@@ -212,6 +217,36 @@ fn build_annotations(metadata: &[(String, Vec<u8>)]) -> Option<rmcp::model::Tool
     ))
 }
 
+/// Pick a `structuredContent` payload, per design §3.4: exactly one content
+/// part, a structured mime, and an object at the top level.
+///
+/// Deliberately conservative. `act:tools@0.2.0` `tool-definition` has no
+/// output schema, so nothing describes this value to the client; inventing a
+/// `{"parts": [...]}` envelope for the multi-part case would assert a shape
+/// no schema declares.
+fn structured_content_for(events: &[runtime::act::tools::types::ToolEvent]) -> Option<Value> {
+    let mut parts = events.iter().filter_map(|e| match e {
+        runtime::act::tools::types::ToolEvent::Content(p) => Some(p),
+        runtime::act::tools::types::ToolEvent::Error(_) => None,
+    });
+
+    let part = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+
+    let mime = part.mime_type.as_deref().unwrap_or("");
+    let value = if mime == "application/cbor" {
+        cbor::cbor_to_json(&part.data).ok()?
+    } else if is_json_mime(mime) {
+        serde_json::from_slice(&part.data).ok()?
+    } else {
+        return None;
+    };
+
+    matches!(value, Value::Object(_)).then_some(value)
+}
+
 // ── fold_events_to_result ───────────────────────────────────────────────────
 
 fn fold_events_to_result(result: runtime::CallToolResult) -> rmcp::model::CallToolResult {
@@ -241,7 +276,11 @@ fn fold_events_to_result(result: runtime::CallToolResult) -> rmcp::model::CallTo
             ));
             out
         }
-        None => rmcp::model::CallToolResult::success(content),
+        None => {
+            let mut out = rmcp::model::CallToolResult::success(content);
+            out.structured_content = structured_content_for(&result.events);
+            out
+        }
     }
 }
 
@@ -1407,5 +1446,92 @@ mod tests {
             .as_ref()
             .is_some_and(|m| m.0.contains_key(MCP_ERROR_KIND));
         assert!(!has_kind, "a success must not advertise an error kind");
+    }
+
+    fn cbor_of(value: serde_json::Value) -> Vec<u8> {
+        act_types::cbor::json_to_cbor(&value).expect("encode cbor")
+    }
+
+    #[test]
+    fn single_cbor_object_populates_structured_content() {
+        let events = vec![runtime_types::ToolEvent::Content(part(
+            Some("application/cbor"),
+            &cbor_of(serde_json::json!({"rows_affected": 3})),
+        ))];
+        let result = fold_events_to_result(ActCallToolResult { events });
+
+        assert_eq!(
+            result.structured_content.as_ref().unwrap()["rows_affected"],
+            serde_json::json!(3)
+        );
+        // The text mirror is still emitted for clients that ignore it.
+        assert_eq!(result.content.len(), 1);
+    }
+
+    #[test]
+    fn single_json_object_populates_structured_content() {
+        let events = vec![runtime_types::ToolEvent::Content(part(
+            Some("application/json"),
+            br#"{"ok":true}"#,
+        ))];
+        let result = fold_events_to_result(ActCallToolResult { events });
+        assert_eq!(
+            result.structured_content.as_ref().unwrap()["ok"],
+            serde_json::json!(true)
+        );
+    }
+
+    #[test]
+    fn non_object_and_multipart_results_have_no_structured_content() {
+        // A CBOR array has no valid home: MCP types structuredContent as an object.
+        let array = vec![runtime_types::ToolEvent::Content(part(
+            Some("application/cbor"),
+            &cbor_of(serde_json::json!([1, 2, 3])),
+        ))];
+        assert!(
+            fold_events_to_result(ActCallToolResult { events: array })
+                .structured_content
+                .is_none()
+        );
+
+        // A scalar likewise.
+        let scalar = vec![runtime_types::ToolEvent::Content(part(
+            Some("application/cbor"),
+            &cbor_of(serde_json::json!("just a string")),
+        ))];
+        assert!(
+            fold_events_to_result(ActCallToolResult { events: scalar })
+                .structured_content
+                .is_none()
+        );
+
+        // Two parts: no output schema exists to describe an envelope, so we
+        // decline rather than invent one.
+        let multi = vec![
+            runtime_types::ToolEvent::Content(part(
+                Some("application/cbor"),
+                &cbor_of(serde_json::json!({"a": 1})),
+            )),
+            runtime_types::ToolEvent::Content(part(
+                Some("application/cbor"),
+                &cbor_of(serde_json::json!({"b": 2})),
+            )),
+        ];
+        assert!(
+            fold_events_to_result(ActCallToolResult { events: multi })
+                .structured_content
+                .is_none()
+        );
+
+        // Plain text is not structured.
+        let text = vec![runtime_types::ToolEvent::Content(part(
+            Some("text/plain"),
+            b"hello",
+        ))];
+        assert!(
+            fold_events_to_result(ActCallToolResult { events: text })
+                .structured_content
+                .is_none()
+        );
     }
 }
