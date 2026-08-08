@@ -35,6 +35,9 @@ const MCP_META_PREFIX: &str = "dev.actcore/";
 /// keep their `std:` form.
 const ACT_STD_PREFIX: &str = "std:";
 
+const MCP_ERROR_KIND: &str = "dev.actcore/error-kind";
+const MCP_ERROR_METADATA: &str = "dev.actcore/error-metadata";
+
 pub struct ActRmcpBridge {
     pub handle: runtime::ComponentHandle,
     pub info: runtime::ComponentInfo,
@@ -80,6 +83,31 @@ fn map_content_part(part: &runtime::act::tools::types::ContentPart) -> ContentBl
     ContentBlock::text(text)
 }
 
+/// Project an ACT `error`'s non-message fields into a JSON object shared by
+/// both error paths: `ErrorData.data` for an early error, `CallToolResult`
+/// `_meta` for a mid-stream one. A client therefore reads the same key,
+/// `dev.actcore/error-kind`, whichever path produced the failure.
+///
+/// The kind is a *value* and keeps its `std:` spelling; only metadata *keys*
+/// are respelled for the `_meta` channel.
+fn error_detail_json(kind: &str, metadata: &[(String, Vec<u8>)]) -> Value {
+    let mut detail = serde_json::Map::new();
+    detail.insert(MCP_ERROR_KIND.to_string(), Value::String(kind.to_string()));
+
+    if !metadata.is_empty() {
+        let decoded = act_types::types::Metadata::from(metadata.to_vec());
+        let mapped: serde_json::Map<String, Value> = decoded
+            .iter()
+            .map(|(k, v)| (act_key_to_mcp(k).into_owned(), v.clone()))
+            .collect();
+        if !mapped.is_empty() {
+            detail.insert(MCP_ERROR_METADATA.to_string(), Value::Object(mapped));
+        }
+    }
+
+    Value::Object(detail)
+}
+
 fn component_error_to_mcp(err: runtime::ComponentError) -> ErrorData {
     match err {
         runtime::ComponentError::Tool(te) => {
@@ -92,10 +120,14 @@ fn component_error_to_mcp(err: runtime::ComponentError) -> ErrorData {
                 ERR_CAPABILITY_DENIED => ErrorCode::INVALID_REQUEST,
                 _ => ErrorCode::INTERNAL_ERROR,
             };
-            ErrorData::new(code, message, None)
+            let detail = error_detail_json(&te.kind, &te.metadata);
+            ErrorData::new(code, message, Some(detail))
         }
         runtime::ComponentError::Internal(e) => {
-            ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None)
+            // A host-side failure has no guest-supplied kind; report the
+            // registry's own value so the lookup key is always present.
+            let detail = error_detail_json(act_types::constants::ERR_INTERNAL, &[]);
+            ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), Some(detail))
         }
     }
 }
@@ -184,7 +216,7 @@ fn build_annotations(metadata: &[(String, Vec<u8>)]) -> Option<rmcp::model::Tool
 
 fn fold_events_to_result(result: runtime::CallToolResult) -> rmcp::model::CallToolResult {
     let mut content = Vec::new();
-    let mut is_error = false;
+    let mut error_detail: Option<Value> = None;
 
     for event in &result.events {
         match event {
@@ -192,19 +224,24 @@ fn fold_events_to_result(result: runtime::CallToolResult) -> rmcp::model::CallTo
                 content.push(map_content_part(part));
             }
             runtime::act::tools::types::ToolEvent::Error(err) => {
-                is_error = true;
                 let message = act_types::types::LocalizedString::from(&err.message)
                     .any_text()
                     .to_string();
                 content.push(rmcp::model::ContentBlock::text(message));
+                error_detail = Some(error_detail_json(&err.kind, &err.metadata));
             }
         }
     }
 
-    if is_error {
-        rmcp::model::CallToolResult::error(content)
-    } else {
-        rmcp::model::CallToolResult::success(content)
+    match error_detail {
+        Some(detail) => {
+            let mut out = rmcp::model::CallToolResult::error(content);
+            out.meta = Some(rmcp::model::MetaObject(
+                detail.as_object().cloned().unwrap_or_default(),
+            ));
+            out
+        }
+        None => rmcp::model::CallToolResult::success(content),
     }
 }
 
@@ -698,6 +735,16 @@ fn is_protocol_reserved(key: &str) -> bool {
 fn mcp_key_to_act(key: &str) -> Cow<'_, str> {
     match key.strip_prefix(MCP_META_PREFIX) {
         Some(name) => Cow::Owned(format!("{ACT_STD_PREFIX}{name}")),
+        None => Cow::Borrowed(key),
+    }
+}
+
+/// Respell an ACT metadata key for the MCP `_meta` channel — the inverse of
+/// [`mcp_key_to_act`]. Only the `std:` namespace is mapped; everything else
+/// crosses verbatim.
+fn act_key_to_mcp(key: &str) -> Cow<'_, str> {
+    match key.strip_prefix(ACT_STD_PREFIX) {
+        Some(name) => Cow::Owned(format!("{MCP_META_PREFIX}{name}")),
         None => Cow::Borrowed(key),
     }
 }
@@ -1245,5 +1292,120 @@ mod tests {
         let result = fold_events_to_result(ActCallToolResult { events });
         assert!(!result.is_error.unwrap_or(false));
         assert_eq!(result.content.len(), 1);
+    }
+
+    #[test]
+    fn std_keys_map_out_to_the_actcore_prefix() {
+        assert_eq!(act_key_to_mcp("std:session-id"), "dev.actcore/session-id");
+        // Third-party namespaces cross verbatim: ACT does not own them and
+        // must not mint keys inside them.
+        assert_eq!(act_key_to_mcp("acme:priority"), "acme:priority");
+    }
+
+    #[test]
+    fn early_error_carries_kind_in_error_data() {
+        let err = runtime::ComponentError::Tool(runtime_core::Error {
+            kind: act_types::constants::ERR_SESSION_NOT_FOUND.to_string(),
+            message: runtime_core::LocalizedString::Plain("session gone".into()),
+            metadata: vec![],
+        });
+        let data = component_error_to_mcp(err);
+
+        // Kind is a *value*, so it keeps its `std:` spelling.
+        assert_eq!(
+            data.data.as_ref().unwrap()[MCP_ERROR_KIND],
+            serde_json::json!("std:session-not-found")
+        );
+        // Message and code keep their current behaviour.
+        assert!(data.message.contains("session gone"));
+        assert_eq!(data.code, ErrorCode::INTERNAL_ERROR);
+    }
+
+    #[test]
+    fn early_error_maps_known_kinds_to_their_codes() {
+        for (kind, expected) in [
+            (
+                act_types::constants::ERR_INVALID_ARGS,
+                ErrorCode::INVALID_PARAMS,
+            ),
+            (
+                act_types::constants::ERR_NOT_FOUND,
+                ErrorCode::METHOD_NOT_FOUND,
+            ),
+            (
+                act_types::constants::ERR_CAPABILITY_DENIED,
+                ErrorCode::INVALID_REQUEST,
+            ),
+            (act_types::constants::ERR_TIMEOUT, ErrorCode::INTERNAL_ERROR),
+            (
+                act_types::constants::ERR_INTERNAL,
+                ErrorCode::INTERNAL_ERROR,
+            ),
+        ] {
+            let err = runtime::ComponentError::Tool(runtime_core::Error {
+                kind: kind.to_string(),
+                message: runtime_core::LocalizedString::Plain("x".into()),
+                metadata: vec![],
+            });
+            let data = component_error_to_mcp(err);
+            assert_eq!(data.code, expected, "wrong code for {kind}");
+            assert_eq!(
+                data.data.as_ref().unwrap()[MCP_ERROR_KIND],
+                serde_json::json!(kind),
+                "kind must survive for {kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn early_error_carries_error_metadata_with_mapped_keys() {
+        let err = runtime::ComponentError::Tool(runtime_core::Error {
+            kind: act_types::constants::ERR_CAPABILITY_DENIED.to_string(),
+            message: runtime_core::LocalizedString::Plain("denied".into()),
+            metadata: act_types::types::Metadata::from(serde_json::json!({
+                "std:capability": "wasi:http",
+                "acme:hint": "ask an admin",
+            }))
+            .into(),
+        });
+        let data = component_error_to_mcp(err);
+        let md = &data.data.as_ref().unwrap()[MCP_ERROR_METADATA];
+        assert_eq!(md["dev.actcore/capability"], serde_json::json!("wasi:http"));
+        assert_eq!(md["acme:hint"], serde_json::json!("ask an admin"));
+    }
+
+    #[test]
+    fn mid_stream_error_carries_kind_in_result_meta() {
+        let events = vec![runtime_types::ToolEvent::Error(runtime_core::Error {
+            kind: act_types::constants::ERR_SESSION_NOT_FOUND.to_string(),
+            message: runtime_core::LocalizedString::Plain("session gone".into()),
+            metadata: vec![],
+        })];
+        let result = fold_events_to_result(ActCallToolResult { events });
+
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(
+            result.meta.as_ref().unwrap().0[MCP_ERROR_KIND],
+            serde_json::json!("std:session-not-found")
+        );
+        // The message text block is unchanged.
+        match &result.content[0] {
+            ContentBlock::Text(t) => assert!(t.text.contains("session gone")),
+            _ => panic!("expected text content for error"),
+        }
+    }
+
+    #[test]
+    fn successful_result_has_no_error_meta() {
+        let events = vec![runtime_types::ToolEvent::Content(part(
+            Some("text/plain"),
+            b"ok",
+        ))];
+        let result = fold_events_to_result(ActCallToolResult { events });
+        let has_kind = result
+            .meta
+            .as_ref()
+            .is_some_and(|m| m.0.contains_key(MCP_ERROR_KIND));
+        assert!(!has_kind, "a success must not advertise an error kind");
     }
 }
