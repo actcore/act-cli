@@ -41,6 +41,11 @@ pub fn finish_tool_call(span: &tracing::Span, outcome: Outcome, elapsed: Duratio
 
 /// Emit one capability decision as an event inside the current span.
 pub fn emit_cap_decision(r: &CapDecisionRecord) {
+    // `tracing::info!`'s `target: .., { fields }, args` arm treats a single
+    // leading brace-group as the *whole* field list, so a leading
+    // `{ attr::CONST } = val` field gets misread as that marker instead of
+    // one field. Wrapping every field below in this outer `{ }` is required
+    // — do not remove it (`tool_call_span` has no such arm, hence no wrap).
     tracing::info!(
         target: TARGET_AUDIT,
         {
@@ -99,6 +104,10 @@ mod tests {
         }
     }
 
+    // Every field gets its own value, and no two fields share a value, so a
+    // copy-paste mapping swap (e.g. `r.actor` written to `attr::POLICY_MODE`
+    // and `r.mode` to `attr::POLICY_ACTOR`) fails an exact-match assertion
+    // instead of silently passing.
     fn cap_record() -> CapDecisionRecord {
         CapDecisionRecord {
             cap_id: "wasi:filesystem".into(),
@@ -107,7 +116,7 @@ mod tests {
             decision: Decision4::Allow,
             mode: "allowlist".into(),
             actor: Actor::Static,
-            reason: None,
+            reason: Some("no-exception".into()),
             rule: Some("/data/**".into()),
         }
     }
@@ -131,6 +140,7 @@ mod tests {
             attr::DECISION,
             attr::POLICY_MODE,
             attr::POLICY_ACTOR,
+            attr::POLICY_REASON,
             attr::POLICY_RULE,
         ] {
             assert!(
@@ -159,8 +169,16 @@ mod tests {
                 .map(|(_, v)| v.clone())
                 .unwrap_or_default()
         };
-        assert_eq!(by(attr::DECISION), "allow");
+        // Pins the complete eight-field map, one assertion per field, each
+        // against a fixture value found nowhere else in the record — a
+        // mapping swap between any two fields fails at least one of these.
+        assert_eq!(by(attr::CAPABILITY_ID), "wasi:filesystem");
         assert_eq!(by(attr::RESOURCE_KEY), "/data/app.db");
+        assert_eq!(by(attr::RESOURCE_ACTION), "read");
+        assert_eq!(by(attr::DECISION), "allow");
+        assert_eq!(by(attr::POLICY_MODE), "allowlist");
+        assert_eq!(by(attr::POLICY_ACTOR), "static");
+        assert_eq!(by(attr::POLICY_REASON), "no-exception");
         assert_eq!(by(attr::POLICY_RULE), "/data/**");
         // The message field must be a stable event name, never a sentence.
         assert!(!by("message").contains("/data/app.db"));
