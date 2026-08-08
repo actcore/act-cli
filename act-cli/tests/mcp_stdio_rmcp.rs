@@ -74,3 +74,107 @@ async fn call_tool_now_returns_text_content() {
 
     client.cancel().await.ok();
 }
+
+fn sessions_canary_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sessions-canary.wasm")
+}
+
+/// An unknown session id must reach the client as a *named* ACT error kind,
+/// not as an anonymous -32603. This is the whole point of the projection.
+#[tokio::test]
+async fn error_kind_reaches_the_client() {
+    let transport = TokioChildProcess::new(
+        tokio::process::Command::new(act_binary_path()).configure(|cmd| {
+            cmd.arg("run").arg(sessions_canary_path()).arg("--mcp");
+        }),
+    )
+    .expect("spawn act --mcp");
+
+    let client = ().serve(transport).await.expect("rmcp handshake");
+
+    // No --session-args here, so the rogue id is not overridden and actually
+    // reaches the component. Same argument-_meta shape as session_of_1_mcp.rs.
+    let arguments = serde_json::json!({"_meta": {"std:session-id": "sid-does-not-exist"}})
+        .as_object()
+        .unwrap()
+        .clone();
+    let params = CallToolRequestParams::new("read").with_arguments(arguments);
+
+    // The kind may arrive on either path: as a JSON-RPC error response
+    // (ErrorData.data) or as an isError result (_meta). Both must carry it.
+    let kind = match client.call_tool(params).await {
+        Err(rmcp::ServiceError::McpError(e)) => e
+            .data
+            .as_ref()
+            .and_then(|d| d.get("dev.actcore/error-kind"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        Ok(result) => {
+            assert_eq!(
+                result.is_error,
+                Some(true),
+                "an unknown session id must fail: {result:?}"
+            );
+            result
+                .meta
+                .as_ref()
+                .and_then(|m| m.0.get("dev.actcore/error-kind"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        }
+        Err(other) => panic!("unexpected transport failure: {other:?}"),
+    };
+
+    assert_eq!(
+        kind.as_deref(),
+        Some("std:session-not-found"),
+        "the ACT kind must reach the client, keeping its `std:` spelling as a value"
+    );
+
+    client.cancel().await.ok();
+}
+
+/// Whatever the projection puts on the wire, every `_meta` key it emits must
+/// be a legal MCP key name — no colons.
+#[tokio::test]
+async fn emitted_meta_keys_are_conformant() {
+    let transport = TokioChildProcess::new(
+        tokio::process::Command::new(act_binary_path()).configure(|cmd| {
+            cmd.arg("run").arg(time_component_path()).arg("--mcp");
+        }),
+    )
+    .expect("spawn act --mcp");
+
+    let client = ().serve(transport).await.expect("handshake");
+
+    let tools = client.list_all_tools().await.expect("list_all_tools");
+    let tool_name = tools.first().expect("at least one tool").name.to_string();
+
+    let result = client
+        .call_tool(CallToolRequestParams::new(tool_name))
+        .await
+        .expect("call_tool");
+
+    if let Some(meta) = result.meta.as_ref() {
+        for key in meta.0.keys() {
+            assert!(
+                !key.contains(':'),
+                "result _meta key `{key}` contains a colon"
+            );
+        }
+    }
+    for block in &result.content {
+        if let rmcp::model::ContentBlock::Text(t) = block {
+            if let Some(meta) = t.meta.as_ref() {
+                for key in meta.0.keys() {
+                    assert!(
+                        !key.contains(':'),
+                        "block _meta key `{key}` contains a colon"
+                    );
+                }
+            }
+        }
+    }
+
+    client.cancel().await.ok();
+}
