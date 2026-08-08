@@ -3,7 +3,6 @@
 use std::collections::BTreeMap;
 
 use act_types::{Capabilities, CapabilityRequest};
-use globset::Glob;
 
 use crate::Decision;
 use crate::effective::effective_fs;
@@ -37,7 +36,6 @@ impl CapabilityProvider for FsProvider {
             matcher,
             effective_mode,
             is_declared: eff.declared,
-            allow: eff.config.allow,
         }))
     }
 }
@@ -46,11 +44,6 @@ struct FsCeiling {
     matcher: FsMatcher,
     effective_mode: crate::grant::PolicyMode,
     is_declared: bool,
-    /// The same effective allow entries the matcher was compiled from — kept
-    /// around only so `classify_explained` can report which glob decided an
-    /// Allow/Ask. Never consulted for the decision itself; `matcher` remains
-    /// the sole source of truth for that.
-    allow: Vec<FsAllow>,
 }
 
 impl FsCeiling {
@@ -61,46 +54,32 @@ impl FsCeiling {
             FsAccess::Read
         }
     }
-
-    /// The authoritative decision (via `matcher`, unchanged), plus — when the
-    /// decision is Allow/Ask — the effective allow entry whose glob matches
-    /// the path. Deny always reports no rule: there is nothing to group an
-    /// audited allow under.
-    fn matched(&self, op: &ResourceOp) -> (Decision, Option<String>) {
-        let access = Self::access(op);
-        let decision = self.matcher.decide(std::path::Path::new(&op.key), access);
-        let rule = match decision {
-            Decision::Deny => None,
-            Decision::Allow | Decision::Ask => self.matching_glob(&op.key, access),
-        };
-        (decision, rule)
-    }
-
-    /// Best-effort: the first effective allow entry (respecting the
-    /// read/write split `matcher` itself enforces) whose glob directly
-    /// matches `key`. Returns `None` when no single entry matches directly —
-    /// e.g. the decision came from ancestor-traversal rather than a direct
-    /// glob hit — which is a graceful degradation, not an error.
-    fn matching_glob(&self, key: &str, access: FsAccess) -> Option<String> {
-        self.allow
-            .iter()
-            .filter(|e| access == FsAccess::Read || e.mode == act_types::FsMode::Rw)
-            .find(|e| {
-                Glob::new(&e.glob)
-                    .map(|g| g.compile_matcher().is_match(key))
-                    .unwrap_or(false)
-            })
-            .map(|e| e.glob.clone())
-    }
 }
 
 impl CompiledCeiling for FsCeiling {
     fn classify(&self, op: &ResourceOp) -> Decision {
-        self.matched(op).0
+        // Straight to the matcher — same call as before this task, no
+        // per-op glob compilation added. This runs on the per-syscall hot
+        // path (`check_path_sync`) and is also the browser kernel's
+        // decision path, so it must stay exactly this cheap.
+        self.matcher
+            .decide(std::path::Path::new(&op.key), Self::access(op))
     }
 
     fn classify_explained(&self, op: &ResourceOp) -> Explained {
-        let (decision, rule) = self.matched(op);
+        let access = Self::access(op);
+        let path = std::path::Path::new(&op.key);
+        let decision = self.matcher.decide(path, access);
+        // Deny always reports no rule: there is nothing to group an audited
+        // allow under. Attribution for Allow/Ask goes through the matcher's
+        // own precompiled per-entry sets (`which_allow`) — never re-derived
+        // here, so it can't drift from what `decide` actually matched.
+        let rule = match decision {
+            Decision::Deny => None,
+            Decision::Allow | Decision::Ask => {
+                self.matcher.which_allow(path, access).map(str::to_string)
+            }
+        };
         Explained { decision, rule }
     }
 

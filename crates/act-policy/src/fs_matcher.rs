@@ -60,6 +60,13 @@ pub struct FsMatcher {
     /// traversal of intermediate directories on the path to any
     /// allowed target.
     allow_prefixes: Vec<PathBuf>,
+    /// Per-entry compiled allow sets, tagged with the entry's original
+    /// (pre-expansion) glob text. Built once here, at compile time — never
+    /// re-derived per call. Used only by `which_allow` for rule attribution;
+    /// `decide` above never consults these, so decision semantics are
+    /// governed solely by the merged `read_allow`/`write_allow` sets.
+    read_allow_entries: Vec<(String, GlobSet)>,
+    write_allow_entries: Vec<(String, GlobSet)>,
 }
 
 impl FsMatcher {
@@ -77,13 +84,46 @@ impl FsMatcher {
             .filter(|e| e.mode == act_types::FsMode::Rw)
             .map(|e| e.glob.clone())
             .collect();
+        // Per-entry sets: each built by feeding `compile_set` a single-entry
+        // slice, so they go through the exact same expansion + descendant/
+        // dir-itself synthesis as the merged sets above — no second copy of
+        // that logic to drift out of sync.
+        let mut read_allow_entries = Vec::with_capacity(cfg.allow.len());
+        for entry in &cfg.allow {
+            let gs = compile_set("read_allow_entry", std::slice::from_ref(&entry.glob))?;
+            read_allow_entries.push((entry.glob.clone(), gs));
+        }
+        let mut write_allow_entries = Vec::new();
+        for entry in cfg.allow.iter().filter(|e| e.mode == act_types::FsMode::Rw) {
+            let gs = compile_set("write_allow_entry", std::slice::from_ref(&entry.glob))?;
+            write_allow_entries.push((entry.glob.clone(), gs));
+        }
         Ok(Self {
             mode: cfg.mode,
             read_allow: compile_set("read_allow", &all_globs)?,
             write_allow: compile_set("write_allow", &rw_globs)?,
             deny: compile_set("deny", &cfg.deny)?,
             allow_prefixes,
+            read_allow_entries,
+            write_allow_entries,
         })
+    }
+
+    /// Which allow entry's glob (as originally written, pre-expansion)
+    /// matches `path` for `access`, if any. For rule attribution only — the
+    /// decision itself always comes from `decide`, never from this. First
+    /// match wins; `None` means no single entry directly matches (e.g. the
+    /// decision came from ancestor-traversal rather than a direct glob hit),
+    /// which is an expected, graceful "can't attribute" case.
+    pub fn which_allow(&self, path: &Path, access: FsAccess) -> Option<&str> {
+        let entries = match access {
+            FsAccess::Read => &self.read_allow_entries,
+            FsAccess::Write => &self.write_allow_entries,
+        };
+        entries
+            .iter()
+            .find(|(_, gs)| gs.is_match(path))
+            .map(|(glob, _)| glob.as_str())
     }
 
     /// Decide whether an absolute, canonical host path may be accessed.
@@ -666,5 +706,85 @@ mod tests {
             m.decide(&PathBuf::from("/tmp/work/a.txt"), FsAccess::Write),
             Decision::Deny
         );
+    }
+
+    // ── which_allow: rule attribution (never consulted by `decide`) ──
+
+    #[test]
+    fn which_allow_reports_the_matching_entry_among_several() {
+        let m = FsMatcher::compile(&cfg(PolicyMode::Allowlist, &["/data/**", "/other/**"], &[]))
+            .unwrap();
+        assert_eq!(
+            m.which_allow(&PathBuf::from("/data/app.db"), FsAccess::Read),
+            Some("/data/**")
+        );
+        assert_eq!(
+            m.which_allow(&PathBuf::from("/other/x"), FsAccess::Read),
+            Some("/other/**")
+        );
+        // Out-of-ceiling: no entry matches.
+        assert_eq!(
+            m.which_allow(&PathBuf::from("/etc/passwd"), FsAccess::Read),
+            None
+        );
+    }
+
+    #[test]
+    fn which_allow_respects_the_ro_write_filter() {
+        // Same shape as `ro_entry_denies_write_allows_read`: a read-only
+        // entry attributes on Read but never on Write.
+        let cfg = FsConfig {
+            mode: PolicyMode::Allowlist,
+            allow: vec![FsAllow {
+                glob: "/data/**".into(),
+                mode: act_types::FsMode::Ro,
+            }],
+            deny: vec![],
+        };
+        let m = FsMatcher::compile(&cfg).unwrap();
+        assert_eq!(
+            m.which_allow(&PathBuf::from("/data/x.db"), FsAccess::Read),
+            Some("/data/**")
+        );
+        assert_eq!(
+            m.which_allow(&PathBuf::from("/data/x.db"), FsAccess::Write),
+            None
+        );
+    }
+
+    #[test]
+    fn which_allow_reports_bare_dir_pattern_for_a_descendant_op() {
+        // A bare directory pattern (no trailing `/**`) implicitly matches
+        // descendants (see `allow_literal_path_matches_descendants`).
+        // `which_allow` must still report the original glob text `/data`,
+        // not the synthesized `/data/**` variant.
+        let m = FsMatcher::compile(&cfg(PolicyMode::Allowlist, &["/data"], &[])).unwrap();
+        assert_eq!(
+            m.which_allow(&PathBuf::from("/data/app.db"), FsAccess::Read),
+            Some("/data")
+        );
+    }
+
+    #[test]
+    fn which_allow_reports_subtree_pattern_for_the_dir_itself() {
+        // A subtree pattern `/data/**` also matches the directory itself
+        // (see `subtree_glob_matches_dir_itself`). `which_allow` must report
+        // the original `/data/**` text for that dir-itself op too.
+        let m = FsMatcher::compile(&cfg(PolicyMode::Allowlist, &["/data/**"], &[])).unwrap();
+        assert_eq!(
+            m.which_allow(&PathBuf::from("/data"), FsAccess::Read),
+            Some("/data/**")
+        );
+    }
+
+    #[test]
+    fn which_allow_matches_a_relative_pattern_against_the_expanded_path() {
+        // Relative patterns are expanded against the cwd before matching
+        // (see `expand_pattern`); the reported rule stays the original,
+        // pre-expansion text.
+        let cwd = std::env::current_dir().unwrap();
+        let m = FsMatcher::compile(&cfg(PolicyMode::Allowlist, &["rel/**"], &[])).unwrap();
+        let target = cwd.join("rel/x.txt");
+        assert_eq!(m.which_allow(&target, FsAccess::Read), Some("rel/**"));
     }
 }
