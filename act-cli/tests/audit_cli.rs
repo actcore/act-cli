@@ -37,3 +37,46 @@ fn rust_log_off_does_not_disable_the_audit_layer() {
         .expect("ran act");
     assert!(out.status.success());
 }
+
+/// `call-tool` never returns `result<tool-result, error>` — a guest failure
+/// arrives as a `tool-event::error` inside an otherwise `Ok` response (the
+/// same shape `rmcp_bridge::fold_events_to_result` inspects to build an MCP
+/// error response). The audit outcome has to be read off the events, not the
+/// outer `Result`, or every guest failure would audit as `ok`.
+#[test]
+fn a_guest_tool_error_is_audited_as_tool_error_not_ok() {
+    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/sessions-canary.wasm");
+
+    // `read` looks up per-session counter state by `std:session-id`; an id
+    // that was never opened makes the guest itself report a `std:not-found`
+    // tool-event::error — same failure `mcp_stdio_rmcp.rs`'s
+    // `error_kind_reaches_the_client` provokes over MCP, reached here
+    // directly via `-m` instead of MCP's `_meta` argument mapping.
+    let out = act_bin()
+        .args([
+            "call",
+            fixture.to_str().expect("fixture path is utf-8"),
+            "read",
+            "--args",
+            "{}",
+            "-m",
+            "std:session-id=sid-does-not-exist",
+        ])
+        .output()
+        .expect("ran act");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let audit_line = stderr
+        .lines()
+        .find(|l| l.starts_with("audit: "))
+        .unwrap_or_else(|| panic!("no audit rollup line in stderr: {stderr}"));
+    assert!(
+        audit_line.contains("tool-error"),
+        "guest failure must audit as tool-error, got: {audit_line}"
+    );
+    assert!(
+        !audit_line.contains(" ok "),
+        "guest failure must not audit as ok: {audit_line}"
+    );
+}

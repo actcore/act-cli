@@ -3,6 +3,7 @@
 use anyhow::Result;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use tokio::sync::{mpsc, oneshot};
 use tracing::Instrument;
@@ -138,6 +139,19 @@ fn decode_meta_strings(metadata: &[(String, Vec<u8>)]) -> Vec<(String, String)> 
             value.as_str().map(|s| (k.clone(), s.to_string()))
         })
         .collect()
+}
+
+/// True if any event in a completed call's result signals a guest tool-level
+/// failure. `call-tool` never returns `result<tool-result, error>` — an early
+/// failure is encoded as a `tool-event::error` inside an otherwise `Ok`
+/// response (ACT-TOOLS §5.2), the same shape `rmcp_bridge`'s
+/// `fold_events_to_result` inspects to map a call to an MCP error response.
+/// The audit envelope has to look at the same signal, or every guest failure
+/// audits as `ok`.
+fn events_contain_error(events: &[act::tools::types::ToolEvent]) -> bool {
+    events
+        .iter()
+        .any(|e| matches!(e, act::tools::types::ToolEvent::Error(_)))
 }
 
 /// Host-generated correlation id, used when the caller supplied no
@@ -736,6 +750,10 @@ pub fn spawn_component_actor(
                     // gate outside a call cannot answer through a stale caller.
                     current_consent.set(None);
                     let outcome = match &response {
+                        // `call-tool` reports a guest failure inside the event
+                        // list, not via the outer Result — see
+                        // `events_contain_error`.
+                        Ok(r) if events_contain_error(&r.events) => act_audit::Outcome::ToolError,
                         Ok(_) => act_audit::Outcome::Ok,
                         Err(ComponentError::Tool(_)) => act_audit::Outcome::ToolError,
                         Err(_) => act_audit::Outcome::HostError,
@@ -771,6 +789,11 @@ pub fn spawn_component_actor(
                     });
 
                     let (done_tx, done_rx) = oneshot::channel::<()>();
+                    // This arm never collects events (they're forwarded live),
+                    // so a guest `tool-event::error` has to be tracked as it
+                    // passes through — set by `ForwardingConsumer` or the
+                    // Immediate branch below, read after the call completes.
+                    let saw_error = Arc::new(AtomicBool::new(false));
 
                     let result = store
                         .run_concurrent(async |accessor| {
@@ -790,6 +813,7 @@ pub fn spawn_component_actor(
                                     let consumer = ForwardingConsumer {
                                         event_tx: event_tx.clone(),
                                         done_tx: Some(done_tx),
+                                        saw_error: saw_error.clone(),
                                     };
                                     let _ = stream.pipe(access, consumer);
                                 }
@@ -797,6 +821,9 @@ pub fn spawn_component_actor(
                                     events,
                                 ) => {
                                     for event in events {
+                                        if matches!(event, act::tools::types::ToolEvent::Error(_)) {
+                                            saw_error.store(true, Ordering::Relaxed);
+                                        }
                                         if event_tx.try_send(SseEvent::Stream(event)).is_err() {
                                             break;
                                         }
@@ -812,11 +839,10 @@ pub fn spawn_component_actor(
                         .instrument(audit_span.clone())
                         .await;
 
-                    // Neither branch below can observe a guest tool-error: a
-                    // mid-stream `tool-event::error` travels as a `SseEvent`
-                    // item, not through this Result. Every failure this arm
-                    // can see is host-side.
                     let outcome = match &result {
+                        Ok(Ok(())) if saw_error.load(Ordering::Relaxed) => {
+                            act_audit::Outcome::ToolError
+                        }
                         Ok(Ok(())) => act_audit::Outcome::Ok,
                         Ok(Err(_)) | Err(_) => act_audit::Outcome::HostError,
                     };
@@ -998,6 +1024,10 @@ impl StreamConsumer<HostState> for CollectingConsumer {
 struct ForwardingConsumer {
     event_tx: mpsc::Sender<SseEvent>,
     done_tx: Option<oneshot::Sender<()>>,
+    /// Set when a forwarded event is `tool-event::error`, so the actor can
+    /// audit the call as `ToolError` instead of `Ok` once it completes —
+    /// this consumer never collects events, so this flag is the only signal.
+    saw_error: Arc<AtomicBool>,
 }
 
 impl StreamConsumer<HostState> for ForwardingConsumer {
@@ -1014,6 +1044,9 @@ impl StreamConsumer<HostState> for ForwardingConsumer {
         source.read(store, &mut buffer)?;
 
         for event in buffer {
+            if matches!(event, act::tools::types::ToolEvent::Error(_)) {
+                self.saw_error.store(true, Ordering::Relaxed);
+            }
             if self.event_tx.try_send(SseEvent::Stream(event)).is_err() {
                 if let Some(tx) = self.done_tx.take() {
                     let _ = tx.send(());
