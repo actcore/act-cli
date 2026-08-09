@@ -269,7 +269,8 @@ enum InspectCommand {
 /// then reach stderr unescaped through this second path, reopening the
 /// audit-line forgery hole `act-audit` already closed. `act::guest` is
 /// excluded for the same reason even though nothing emits on it yet — it is
-/// reserved for untrusted guest-authored telemetry (ACT-EVENTS, deferred)
+/// reserved for untrusted guest-authored telemetry (`wasi:otel`, deferred
+/// — see `act_audit::TARGET_GUEST`)
 /// that must never be rendered as though the host authored it.
 fn fmt_filter<S>(
     env_filter: tracing_subscriber::EnvFilter,
