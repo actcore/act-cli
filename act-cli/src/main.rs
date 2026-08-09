@@ -573,12 +573,14 @@ async fn prepare_component(
     component: &ComponentRef,
     opts: &CommonOpts,
     prompter: Arc<dyn act_policy::consent::ConsentPrompter>,
+    transport: act_audit::Transport,
 ) -> Result<PreparedComponent> {
     prepare_component_with_consent(
         component,
         opts,
         prompter,
         Arc::new(runtime::elicit::CurrentConsentSink::new()),
+        transport,
     )
     .await
 }
@@ -591,6 +593,7 @@ async fn prepare_component_with_consent(
     opts: &CommonOpts,
     prompter: Arc<dyn act_policy::consent::ConsentPrompter>,
     current_consent: Arc<runtime::elicit::CurrentConsentSink>,
+    transport: act_audit::Transport,
 ) -> Result<PreparedComponent> {
     let resolved = resolve_opts(opts)?;
 
@@ -622,7 +625,7 @@ async fn prepare_component_with_consent(
     let cache = Arc::new(act_policy::consent::DecisionCache::new());
 
     let engine = runtime::create_engine()?;
-    let wasm = runtime::load_component(&engine, &component_path)?;
+    let (wasm, digest) = runtime::load_component(&engine, &component_path)?;
     let linker = runtime::create_linker(&engine)?;
     let (instance, session_provider, store) = runtime::instantiate_component(
         &engine,
@@ -637,7 +640,13 @@ async fn prepare_component_with_consent(
     )
     .await?;
     let has_sessions = session_provider.is_some();
-    let handle = runtime::spawn_component_actor(instance, session_provider, store, current_consent);
+    let audit = runtime::AuditContext {
+        component_ref: component.to_string(),
+        digest,
+        transport,
+    };
+    let handle =
+        runtime::spawn_component_actor(instance, session_provider, store, current_consent, audit);
 
     tracing::debug!(name = %info.std.name, version = %info.std.version, "Component ready");
 
@@ -710,8 +719,16 @@ async fn cmd_run(
         let prompter: Arc<dyn act_policy::consent::ConsentPrompter> = Arc::new(
             runtime::elicit::McpElicitationPrompter::new(current_consent.clone()),
         );
-        let pc =
-            prepare_component_with_consent(&component, &opts, prompter, current_consent).await?;
+        // Still MCP wire protocol (rmcp_bridge), just carried over an HTTP
+        // listener instead of stdio — audited as Mcp, not Http.
+        let pc = prepare_component_with_consent(
+            &component,
+            &opts,
+            prompter,
+            current_consent,
+            act_audit::Transport::Mcp,
+        )
+        .await?;
         let default_session_id = maybe_open_default_session(&pc, &session_args).await?;
         return rmcp_bridge::run_http(
             addr,
@@ -734,8 +751,14 @@ async fn cmd_run(
         let prompter: Arc<dyn act_policy::consent::ConsentPrompter> = Arc::new(
             runtime::elicit::McpElicitationPrompter::new(current_consent.clone()),
         );
-        let pc =
-            prepare_component_with_consent(&component, &opts, prompter, current_consent).await?;
+        let pc = prepare_component_with_consent(
+            &component,
+            &opts,
+            prompter,
+            current_consent,
+            act_audit::Transport::Mcp,
+        )
+        .await?;
         let default_session_id = maybe_open_default_session(&pc, &session_args).await?;
         return rmcp_bridge::run_stdio(
             pc.info,
@@ -756,7 +779,7 @@ async fn cmd_run(
         // ACT-HTTP: no MCP peer, no TTY; use DenyPrompter (fail-safe).
         let prompter: Arc<dyn act_policy::consent::ConsentPrompter> =
             Arc::new(act_policy::consent::DenyPrompter);
-        let pc = prepare_component(&component, &opts, prompter).await?;
+        let pc = prepare_component(&component, &opts, prompter, act_audit::Transport::Http).await?;
         let default_session_id = maybe_open_default_session(&pc, &session_args).await?;
 
         let state = Arc::new(http::AppState {
@@ -788,7 +811,7 @@ async fn cmd_call(
     opts: CommonOpts,
 ) -> Result<()> {
     let prompter = tty_or_deny_prompter();
-    let pc = prepare_component(&component, &opts, prompter).await?;
+    let pc = prepare_component(&component, &opts, prompter, act_audit::Transport::Cli).await?;
 
     let arguments: serde_json::Value =
         serde_json::from_str(&args).context("invalid --args JSON")?;
@@ -954,7 +977,13 @@ async fn close_session_best_effort(pc: &PreparedComponent, session_id: String) {
 // ── Session subcommands ────────────────────────────────────────────────────
 
 async fn cmd_session_open_args_schema(component: ComponentRef, opts: CommonOpts) -> Result<()> {
-    let pc = prepare_component(&component, &opts, tty_or_deny_prompter()).await?;
+    let pc = prepare_component(
+        &component,
+        &opts,
+        tty_or_deny_prompter(),
+        act_audit::Transport::Cli,
+    )
+    .await?;
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     pc.handle
         .send(runtime::ComponentRequest::GetOpenSessionArgsSchema {
@@ -1008,7 +1037,13 @@ async fn cmd_inspect_tools(
 ) -> Result<()> {
     // `list-tools` runs component code, so this leaf instantiates (same
     // capability handling as `act info --tools`).
-    let pc = prepare_component(&component, &opts, tty_or_deny_prompter()).await?;
+    let pc = prepare_component(
+        &component,
+        &opts,
+        tty_or_deny_prompter(),
+        act_audit::Transport::Cli,
+    )
+    .await?;
 
     let (tools_tx, tools_rx) = tokio::sync::oneshot::channel();
     pc.handle
@@ -1052,7 +1087,13 @@ async fn cmd_info(
     let component_info = runtime::read_component_info(&wasm_bytes)?;
 
     let tools = if show_tools {
-        let pc = prepare_component(&component, &opts, tty_or_deny_prompter()).await?;
+        let pc = prepare_component(
+            &component,
+            &opts,
+            tty_or_deny_prompter(),
+            act_audit::Transport::Cli,
+        )
+        .await?;
 
         let (tools_tx, tools_rx) = tokio::sync::oneshot::channel();
         pc.handle

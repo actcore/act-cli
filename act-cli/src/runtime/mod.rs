@@ -5,6 +5,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::sync::{mpsc, oneshot};
+use tracing::Instrument;
 use wasmtime::component::{Component, Linker, ResourceTable, Source, StreamConsumer, StreamResult};
 use wasmtime::{Config, Engine, Store, StoreContextMut, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
@@ -105,10 +106,68 @@ pub fn create_engine() -> Result<Engine> {
     Ok(engine)
 }
 
-/// Load a .wasm component from a file path.
-pub fn load_component(engine: &Engine, path: &std::path::Path) -> Result<Component> {
-    Component::from_file(engine, path)
-        .map_err(|e| anyhow::anyhow!("failed to load component from {}: {e}", path.display()))
+/// Identity of the running artifact, carried into every audit record.
+#[derive(Debug, Clone)]
+pub struct AuditContext {
+    pub component_ref: String,
+    pub digest: String,
+    pub transport: act_audit::Transport,
+}
+
+/// Pull a well-known `std:` key out of decoded call metadata for the audit
+/// envelope. Only ids are ever read this way — session *args* carry auth and
+/// are never logged, only the session id they produced.
+fn meta_str(metadata: &[(String, String)], key: &str) -> Option<String> {
+    metadata
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.clone())
+        .filter(|v| !v.is_empty())
+}
+
+/// Decode the string-valued entries out of raw WIT call metadata
+/// (`list<tuple<string, list<u8>>>`, each value dCBOR-encoded) so `meta_str`
+/// can search them. The `std:*` correlation ids the envelope reads are always
+/// CBOR text strings; anything that doesn't decode to one is dropped rather
+/// than guessed at.
+fn decode_meta_strings(metadata: &[(String, Vec<u8>)]) -> Vec<(String, String)> {
+    metadata
+        .iter()
+        .filter_map(|(k, v)| {
+            let value = act_types::cbor::cbor_to_json(v).ok()?;
+            value.as_str().map(|s| (k.clone(), s.to_string()))
+        })
+        .collect()
+}
+
+/// Host-generated correlation id, used when the caller supplied no
+/// `std:request-id`. Keeping this non-optional is what makes every audit line
+/// joinable to a client log line.
+fn new_request_id() -> String {
+    // Monotonic counter + process id: no new dependency, unique within a host
+    // process, and cheap enough to sit on the call path.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "act-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// Load a .wasm component from a file path and report the SHA-256 of its
+/// bytes.
+///
+/// The digest identifies the exact artifact in the audit trail, so it is read
+/// from the file rather than inferred from the reference — a local path and an
+/// OCI cache entry are treated identically.
+pub fn load_component(engine: &Engine, path: &std::path::Path) -> Result<(Component, String)> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| anyhow::anyhow!("failed to read component {}: {e}", path.display()))?;
+    let digest = act_audit::sha256_hex(&bytes);
+    let component = Component::from_binary(engine, &bytes)
+        .map_err(|e| anyhow::anyhow!("failed to load component from {}: {e}", path.display()))?;
+    Ok((component, digest))
 }
 
 /// Create a linker with WASI bindings (both P2 and P3).
@@ -547,6 +606,7 @@ pub fn spawn_component_actor(
     session_provider: Option<sessions::SessionProvider>,
     mut store: Store<HostState>,
     current_consent: Arc<elicit::CurrentConsentSink>,
+    audit: AuditContext,
 ) -> ComponentHandle {
     let (tx, mut rx) = mpsc::channel::<ComponentRequest>(32);
 
@@ -593,6 +653,25 @@ pub fn spawn_component_actor(
                     current_consent.set(consent);
                     let provider = tool_provider.clone();
 
+                    let started = std::time::Instant::now();
+                    let meta_strings = decode_meta_strings(&metadata);
+                    let audit_span = act_audit::tool_call_span(&act_audit::ToolCallStart {
+                        component_ref: audit.component_ref.clone(),
+                        digest: audit.digest.clone(),
+                        tool: name.clone(),
+                        args_sha256: act_audit::sha256_hex(&arguments),
+                        session_id: meta_str(&meta_strings, act_types::constants::META_SESSION_ID),
+                        agent_id: meta_str(&meta_strings, act_types::constants::META_AGENT_ID),
+                        request_id: meta_str(&meta_strings, act_types::constants::META_REQUEST_ID)
+                            .unwrap_or_else(new_request_id),
+                        traceparent: meta_str(
+                            &meta_strings,
+                            act_types::constants::META_TRACEPARENT,
+                        ),
+                        tracestate: meta_str(&meta_strings, act_types::constants::META_TRACESTATE),
+                        transport: audit.transport,
+                    });
+
                     let collected: Arc<std::sync::Mutex<Vec<act::tools::types::ToolEvent>>> =
                         Arc::new(std::sync::Mutex::new(Vec::new()));
                     let collected2 = collected.clone();
@@ -634,6 +713,7 @@ pub fn spawn_component_actor(
 
                             Ok::<_, wasmtime::Error>(())
                         })
+                        .instrument(audit_span.clone())
                         .await;
 
                     let response = match result {
@@ -655,6 +735,12 @@ pub fn spawn_component_actor(
                     // Nothing is executing any more: drop the sink so a later
                     // gate outside a call cannot answer through a stale caller.
                     current_consent.set(None);
+                    let outcome = match &response {
+                        Ok(_) => act_audit::Outcome::Ok,
+                        Err(ComponentError::Tool(_)) => act_audit::Outcome::ToolError,
+                        Err(_) => act_audit::Outcome::HostError,
+                    };
+                    act_audit::finish_tool_call(&audit_span, outcome, started.elapsed());
                     let _ = reply.send(response);
                 }
                 ComponentRequest::CallToolStreaming {
@@ -664,6 +750,26 @@ pub fn spawn_component_actor(
                     event_tx,
                 } => {
                     let provider = tool_provider.clone();
+
+                    let started = std::time::Instant::now();
+                    let meta_strings = decode_meta_strings(&metadata);
+                    let audit_span = act_audit::tool_call_span(&act_audit::ToolCallStart {
+                        component_ref: audit.component_ref.clone(),
+                        digest: audit.digest.clone(),
+                        tool: name.clone(),
+                        args_sha256: act_audit::sha256_hex(&arguments),
+                        session_id: meta_str(&meta_strings, act_types::constants::META_SESSION_ID),
+                        agent_id: meta_str(&meta_strings, act_types::constants::META_AGENT_ID),
+                        request_id: meta_str(&meta_strings, act_types::constants::META_REQUEST_ID)
+                            .unwrap_or_else(new_request_id),
+                        traceparent: meta_str(
+                            &meta_strings,
+                            act_types::constants::META_TRACEPARENT,
+                        ),
+                        tracestate: meta_str(&meta_strings, act_types::constants::META_TRACESTATE),
+                        transport: audit.transport,
+                    });
+
                     let (done_tx, done_rx) = oneshot::channel::<()>();
 
                     let result = store
@@ -703,7 +809,18 @@ pub fn spawn_component_actor(
 
                             Ok::<_, wasmtime::Error>(())
                         })
+                        .instrument(audit_span.clone())
                         .await;
+
+                    // Neither branch below can observe a guest tool-error: a
+                    // mid-stream `tool-event::error` travels as a `SseEvent`
+                    // item, not through this Result. Every failure this arm
+                    // can see is host-side.
+                    let outcome = match &result {
+                        Ok(Ok(())) => act_audit::Outcome::Ok,
+                        Ok(Err(_)) | Err(_) => act_audit::Outcome::HostError,
+                    };
+                    act_audit::finish_tool_call(&audit_span, outcome, started.elapsed());
 
                     let terminal = match result {
                         Ok(Ok(())) => SseEvent::Done,
@@ -913,5 +1030,76 @@ impl StreamConsumer<HostState> for ForwardingConsumer {
         } else {
             Poll::Ready(Ok(StreamResult::Completed))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn well_known_metadata_keys_are_extracted_for_the_envelope() {
+        let md = vec![
+            ("std:session-id".to_string(), "abc123".to_string()),
+            ("std:agent-id".to_string(), "claude-code".to_string()),
+            ("std:traceparent".to_string(), "00-aa-bb-01".to_string()),
+            ("other".to_string(), "x".to_string()),
+        ];
+        assert_eq!(meta_str(&md, "std:session-id").as_deref(), Some("abc123"));
+        assert_eq!(
+            meta_str(&md, "std:agent-id").as_deref(),
+            Some("claude-code")
+        );
+        assert_eq!(
+            meta_str(&md, "std:traceparent").as_deref(),
+            Some("00-aa-bb-01")
+        );
+        assert_eq!(meta_str(&md, "std:request-id"), None);
+        assert_eq!(meta_str(&[], "std:session-id"), None);
+    }
+
+    #[test]
+    fn decode_meta_strings_reads_cbor_text_and_drops_everything_else() {
+        // The real call sites hand `meta_str` decoded metadata, not the raw
+        // WIT tuples — this is the seam between the two.
+        let raw: Vec<(String, Vec<u8>)> = vec![
+            (
+                "std:session-id".to_string(),
+                act_types::cbor::to_cbor(&"abc123".to_string()),
+            ),
+            (
+                "std:request-id".to_string(),
+                act_types::cbor::to_cbor(&42u64),
+            ),
+        ];
+        let decoded = decode_meta_strings(&raw);
+        assert_eq!(
+            meta_str(&decoded, "std:session-id").as_deref(),
+            Some("abc123")
+        );
+        // A non-string CBOR value is dropped rather than stringified.
+        assert_eq!(meta_str(&decoded, "std:request-id"), None);
+    }
+
+    #[test]
+    fn a_request_id_is_always_available() {
+        // Correlation must never depend on the caller having supplied an id.
+        let a = new_request_id();
+        let b = new_request_id();
+        assert_ne!(a, b);
+        assert!(a.starts_with("act-"));
+    }
+
+    #[test]
+    fn load_component_reports_the_digest_of_the_file_bytes() {
+        let engine = create_engine().expect("engine");
+        let path = std::path::Path::new("tests/fixtures/ask-canary.wasm");
+        if !path.exists() {
+            // Fixture-dependent; skip rather than fail on a fresh checkout.
+            return;
+        }
+        let bytes = std::fs::read(path).expect("read fixture");
+        let (_component, digest) = load_component(&engine, path).expect("load");
+        assert_eq!(digest, act_audit::sha256_hex(&bytes));
     }
 }
