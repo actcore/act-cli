@@ -70,3 +70,33 @@ cargo run --manifest-path ../../../../act-build/Cargo.toml --release -- \
 # Copy into the fixtures dir:
 cp target/wasm32-wasip2/release/fs_canary.wasm ../../fixtures/fs-canary.wasm
 ```
+
+## sockets-canary
+
+Sockets canary. Exports `act:tools/tool-provider` only, declares
+`wasi:sockets` with the widest possible ceiling (`host = "*"`, tcp) so a
+test's `--grant` is what actually narrows access. Its single tool, `connect`,
+opens a raw TCP connection to the `host`/`port` given in its arguments via
+plain `std::net::TcpStream::connect` — so every call drives the host's
+per-op capability decision in `runtime/mod.rs`'s `socket_addr_check` hook
+(the `wasi:sockets` counterpart to `fs-canary` for `wasi:filesystem` and
+`ask-canary` for `wasi:http`). Used by `tests/audit_cli.rs` to assert the
+audit trail's `sockets:` rollup clause and immediate deny/ask-deny lines
+against a real component. Pointed at a dead loopback port so an
+allowed-but-unreachable connect (`ConnectionRefused`, blocked at the
+transport) is distinguishable from a policy-denied one (`PermissionDenied`,
+blocked before the connect syscall) without standing up a server — the same
+trick `ask-canary` uses for HTTP.
+
+### Rebuild
+
+```bash
+cd tests/fixtures-src/sockets-canary
+cargo build --target wasm32-wasip2 --release
+# Pack metadata into the wasm:
+cargo run --manifest-path ../../../../act-build/Cargo.toml --release -- \
+    pack target/wasm32-wasip2/release/sockets_canary.wasm
+# Copy into the fixtures dir:
+cp target/wasm32-wasip2/release/sockets_canary.wasm \
+    ../../fixtures/sockets-canary.wasm
+```

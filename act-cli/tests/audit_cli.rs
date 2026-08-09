@@ -225,3 +225,271 @@ fn fs_ask_resolution_reaches_the_audit_trail() {
         "ask-deny line must carry the reason, got: {ask_line}"
     );
 }
+
+/// `http_policy.rs`'s `decide_uri` emits at the two points an HTTP decision
+/// actually resolves: the static ceiling classification (inline in
+/// `decide_uri`) and — for the deferred `ask` case — the point where the p2/p3
+/// `send_request` hooks resolve `cache.decide_cached(..)`. Everything else
+/// covering this (`http_policy.rs`'s own `mod tests`, `act-audit`'s
+/// `record.rs`/`render.rs`) exercises the record types directly, never these
+/// call sites — so this is the only test that would notice if `decide_uri`
+/// stopped calling `emit_cap_decision` at all.
+///
+/// Runs the real `ask-canary` fixture (declares `wasi:http` with an
+/// unbounded `host = "*"` ceiling, so a `--grant` is what actually narrows
+/// it) against a dead loopback port (`127.0.0.1:1`, nothing listens there).
+/// That makes an allowed-but-unreachable request (`ConnectionRefused`, blocked
+/// at the transport) distinguishable from a policy-denied one
+/// (`HttpRequestDenied`, blocked before the request leaves) without standing
+/// up a server — same trick `tests/ask_mcp_elicitation.rs` already relies on.
+#[test]
+fn http_decisions_reach_the_audit_trail() {
+    let fixture =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ask-canary.wasm");
+
+    // In-ceiling allow: the rollup line must carry the `http:` clause naming
+    // the matched rule, proving `decide_uri`'s `Allow` arm ran. The request
+    // itself still fails (nothing listens on port 1) — that failure is
+    // reported as a guest tool-error, not a policy denial, distinguishing an
+    // audited allow from an audited deny.
+    let out = act_bin()
+        .args([
+            "call",
+            fixture.to_str().expect("fixture path is utf-8"),
+            "fetch",
+            "--args",
+            r#"{"url":"http://127.0.0.1:1/"}"#,
+            "--grant",
+            r#"{"wasi:http":{"mode":"allowlist","allow":[{"host":"127.0.0.1"}]}}"#,
+        ])
+        .output()
+        .expect("ran act");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("ConnectionRefused"),
+        "an allowed request must reach the transport, got: {stderr}"
+    );
+    let rollup = stderr
+        .lines()
+        .find(|l| l.starts_with("audit: \u{25cf}"))
+        .unwrap_or_else(|| panic!("no rollup line in stderr: {stderr}"));
+    assert!(
+        rollup.contains("http:"),
+        "rollup must carry an http: clause, got: {rollup}"
+    );
+    assert!(
+        rollup.contains("under 127.0.0.1"),
+        "rollup must name the matched rule, got: {rollup}"
+    );
+
+    // Out-of-ceiling deny: an immediate `✗ deny` line must appear, proving
+    // `decide_uri`'s `Deny` arm ran — same grant shape, a host it doesn't
+    // cover. The request never leaves the host, so the guest sees
+    // `HttpRequestDenied` rather than a transport error.
+    let out = act_bin()
+        .args([
+            "call",
+            fixture.to_str().expect("fixture path is utf-8"),
+            "fetch",
+            "--args",
+            r#"{"url":"http://127.0.0.1:1/"}"#,
+            "--grant",
+            r#"{"wasi:http":{"mode":"allowlist","allow":[{"host":"10.0.0.1"}]}}"#,
+        ])
+        .output()
+        .expect("ran act");
+    assert!(
+        !out.status.success(),
+        "out-of-ceiling request must be denied: {out:?}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("HttpRequestDenied"),
+        "a denied request must be blocked before the transport, got: {stderr}"
+    );
+    let deny_line = stderr
+        .lines()
+        .find(|l| l.starts_with("audit: \u{2717} deny"))
+        .unwrap_or_else(|| panic!("no immediate deny line in stderr: {stderr}"));
+    assert!(
+        deny_line.contains("wasi:http"),
+        "deny line must name the capability, got: {deny_line}"
+    );
+    assert!(
+        deny_line.contains("outside ceiling"),
+        "deny line must carry the reason, got: {deny_line}"
+    );
+}
+
+/// The `Decision::Ask` arms of `send_request` (p2/p3) are the decision point
+/// `http_decisions_reach_the_audit_trail` above cannot reach: that test only
+/// runs under `allowlist`, and `Decision::Ask` — the only way `decide_uri`
+/// defers to the ask path — is returned only in `ask` mode. Confirmed by
+/// disabling the `emit_cap_decision` call in those arms and re-running: the
+/// other test still passes.
+///
+/// Runs `ask-canary` under an `ask`-mode grant with stdin closed. No prompt
+/// channel makes `main.rs`'s `tty_or_deny_prompter` pick `DenyPrompter`
+/// deterministically, so `ask` degrades to deny — but critically, the ask
+/// path still *runs* to produce that verdict, it isn't skipped.
+#[test]
+fn http_ask_resolution_reaches_the_audit_trail() {
+    let fixture =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ask-canary.wasm");
+
+    let out = act_bin()
+        .args([
+            "call",
+            fixture.to_str().expect("fixture path is utf-8"),
+            "fetch",
+            "--args",
+            r#"{"url":"http://127.0.0.1:1/"}"#,
+            "--grant",
+            r#"{"wasi:http":"ask"}"#,
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("ran act");
+    assert!(
+        !out.status.success(),
+        "headless ask with no prompt channel must degrade to deny: {out:?}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let ask_line = stderr
+        .lines()
+        .find(|l| l.starts_with("audit: ? ask-deny"))
+        .unwrap_or_else(|| panic!("no immediate ask-deny line in stderr: {stderr}"));
+    assert!(
+        ask_line.contains("wasi:http"),
+        "ask-deny line must name the capability, got: {ask_line}"
+    );
+    assert!(
+        ask_line.contains("denied by user"),
+        "ask-deny line must carry the reason, got: {ask_line}"
+    );
+}
+
+/// Mirrors `http_decisions_reach_the_audit_trail`, but for the sockets
+/// classify site in `runtime/mod.rs`'s `socket_addr_check` hook. Runs the
+/// `sockets-canary` fixture (declares `wasi:sockets` with an unbounded
+/// `host = "*"` ceiling) against the same dead loopback port trick: an
+/// allowed-but-unreachable connect surfaces `ConnectionRefused` (io error,
+/// reached the transport), a policy-denied one surfaces `PermissionDenied`
+/// (blocked by `socket_addr_check` before the connect syscall).
+#[test]
+fn sockets_decisions_reach_the_audit_trail() {
+    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/sockets-canary.wasm");
+
+    // In-ceiling allow: the rollup line must carry the `sockets:` clause,
+    // proving the `Decision::Allow` arm of the sockets classify ran.
+    let out = act_bin()
+        .args([
+            "call",
+            fixture.to_str().expect("fixture path is utf-8"),
+            "connect",
+            "--args",
+            r#"{"host":"127.0.0.1","port":1}"#,
+            "--grant",
+            r#"{"wasi:sockets":{"mode":"allowlist","allow":[{"host":"127.0.0.1"}]}}"#,
+        ])
+        .output()
+        .expect("ran act");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("ConnectionRefused"),
+        "an allowed connect must reach the transport, got: {stderr}"
+    );
+    let rollup = stderr
+        .lines()
+        .find(|l| l.starts_with("audit: \u{25cf}"))
+        .unwrap_or_else(|| panic!("no rollup line in stderr: {stderr}"));
+    assert!(
+        rollup.contains("sockets:"),
+        "rollup must carry a sockets: clause, got: {rollup}"
+    );
+
+    // Out-of-ceiling deny: an immediate `✗ deny` line must appear, proving
+    // the `Decision::Deny` arm ran — same grant shape, a host it doesn't
+    // cover. `socket_addr_check` blocks the connect before it reaches the
+    // OS, so the guest sees `PermissionDenied` rather than a transport error.
+    let out = act_bin()
+        .args([
+            "call",
+            fixture.to_str().expect("fixture path is utf-8"),
+            "connect",
+            "--args",
+            r#"{"host":"127.0.0.1","port":1}"#,
+            "--grant",
+            r#"{"wasi:sockets":{"mode":"allowlist","allow":[{"host":"10.0.0.1"}]}}"#,
+        ])
+        .output()
+        .expect("ran act");
+    assert!(
+        !out.status.success(),
+        "out-of-ceiling connect must be denied: {out:?}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("PermissionDenied"),
+        "a denied connect must be blocked before the transport, got: {stderr}"
+    );
+    let deny_line = stderr
+        .lines()
+        .find(|l| l.starts_with("audit: \u{2717} deny"))
+        .unwrap_or_else(|| panic!("no immediate deny line in stderr: {stderr}"));
+    assert!(
+        deny_line.contains("wasi:sockets"),
+        "deny line must name the capability, got: {deny_line}"
+    );
+    assert!(
+        deny_line.contains("outside ceiling"),
+        "deny line must carry the reason, got: {deny_line}"
+    );
+}
+
+/// The `Decision::Ask` arm of the sockets classify in `runtime/mod.rs` is the
+/// decision point `sockets_decisions_reach_the_audit_trail` above cannot
+/// reach: that test only runs under `allowlist`, and `Decision::Ask` is
+/// returned only in `ask` mode. Confirmed by disabling that arm's
+/// `emit_cap_decision` call and re-running: the other test still passes.
+///
+/// Runs `sockets-canary` under an `ask`-mode grant with stdin closed, which
+/// degrades to deny via `DenyPrompter` — the ask path still runs to produce
+/// that verdict.
+#[test]
+fn sockets_ask_resolution_reaches_the_audit_trail() {
+    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/sockets-canary.wasm");
+
+    let out = act_bin()
+        .args([
+            "call",
+            fixture.to_str().expect("fixture path is utf-8"),
+            "connect",
+            "--args",
+            r#"{"host":"127.0.0.1","port":1}"#,
+            "--grant",
+            r#"{"wasi:sockets":"ask"}"#,
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("ran act");
+    assert!(
+        !out.status.success(),
+        "headless ask with no prompt channel must degrade to deny: {out:?}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let ask_line = stderr
+        .lines()
+        .find(|l| l.starts_with("audit: ? ask-deny"))
+        .unwrap_or_else(|| panic!("no immediate ask-deny line in stderr: {stderr}"));
+    assert!(
+        ask_line.contains("wasi:sockets"),
+        "ask-deny line must name the capability, got: {ask_line}"
+    );
+    assert!(
+        ask_line.contains("denied by user"),
+        "ask-deny line must carry the reason, got: {ask_line}"
+    );
+}

@@ -30,6 +30,8 @@ use act_policy::Decision;
 use act_policy::consent::{ConsentAsk, ConsentPrompter, DecisionCache};
 use act_policy::provider::{CompiledCeiling, ResourceOp};
 
+use act_audit::{CapDecisionRecord, Decision4, emit_cap_decision};
+
 type P2ErrorCode = wasmtime_wasi_http::p2::bindings::http::types::ErrorCode;
 type P3ErrorCode = wasmtime_wasi_http::p3::bindings::http::types::ErrorCode;
 
@@ -71,7 +73,11 @@ impl PolicyHttpHooks {
         }
     }
 
-    /// Decide an HTTP request against the ceiling.
+    /// Decide an HTTP request against the ceiling. Emits an audit record for
+    /// `Allow`/`Deny`; `Ask` is deliberately silent here — the verdict does
+    /// not exist yet. It is emitted where the ask path actually resolves
+    /// (the `Decision::Ask` arms of `send_request` below), mirroring
+    /// `fs_policy::resolve_ask`.
     fn decide_uri(&self, method: Option<&str>, uri: &Uri) -> Decision {
         let host = uri.host().unwrap_or("");
         let scheme = uri.scheme_str().unwrap_or("https");
@@ -84,7 +90,32 @@ impl PolicyHttpHooks {
             action: method.unwrap_or("").to_string(),
             attrs: serde_json::json!({"scheme": scheme}),
         };
-        self.ceiling.classify(&op)
+        let explained = self.ceiling.classify_explained(&op);
+        let mode = self.ceiling.effective_mode().to_string();
+        match explained.decision {
+            Decision::Allow => {
+                emit_cap_decision(&CapDecisionRecord::statik(
+                    act_types::constants::CAP_HTTP,
+                    &op.key,
+                    &op.action,
+                    Decision4::Allow,
+                    &mode,
+                    explained.rule,
+                ));
+            }
+            Decision::Deny => {
+                emit_cap_decision(&CapDecisionRecord::statik(
+                    act_types::constants::CAP_HTTP,
+                    &op.key,
+                    &op.action,
+                    Decision4::Deny,
+                    &mode,
+                    explained.rule,
+                ));
+            }
+            Decision::Ask => {}
+        }
+        explained.decision
     }
 }
 
@@ -125,9 +156,16 @@ impl wasmtime_wasi_http::p2::WasiHttpHooks for PolicyHttpHooks {
                 let cache = self.cache.clone();
                 let prompter = self.prompter.clone();
                 let ask = Self::http_ask(method, &uri);
+                let ask_key = ask.key.clone();
                 let log_uri = uri.clone();
                 let handle = wasmtime_wasi::runtime::spawn(async move {
-                    if cache.decide_cached(&*prompter, ask).await {
+                    let allowed = cache.decide_cached(&*prompter, ask).await;
+                    emit_cap_decision(&CapDecisionRecord::answered(
+                        act_types::constants::CAP_HTTP,
+                        &ask_key,
+                        allowed,
+                    ));
+                    if allowed {
                         tracing::debug!(%log_uri, "http policy ask allowed (p2)");
                         Ok(client.send_p2(request, config).await)
                     } else {
@@ -191,9 +229,16 @@ impl wasmtime_wasi_http::p3::WasiHttpHooks for PolicyHttpHooks {
                 let cache = self.cache.clone();
                 let prompter = self.prompter.clone();
                 let ask = Self::http_ask(method.as_deref(), &uri);
+                let ask_key = ask.key.clone();
                 let log_uri = uri.clone();
                 Box::new(async move {
-                    if !cache.decide_cached(&*prompter, ask).await {
+                    let allowed = cache.decide_cached(&*prompter, ask).await;
+                    emit_cap_decision(&CapDecisionRecord::answered(
+                        act_types::constants::CAP_HTTP,
+                        &ask_key,
+                        allowed,
+                    ));
+                    if !allowed {
                         tracing::warn!(%log_uri, "http policy ask denied (p3)");
                         return Err(TrappableError::<P3ErrorCode>::from(
                             P3ErrorCode::HttpRequestDenied,
@@ -442,5 +487,36 @@ mod tests {
             h.decide_uri(Some("GET"), &uri("https://example.com/")),
             Decision::Deny
         );
+    }
+
+    #[test]
+    fn http_key_is_host_colon_port_and_action_is_the_method() {
+        let r = act_audit::CapDecisionRecord::statik(
+            act_types::constants::CAP_HTTP,
+            "api.example.com:443",
+            "GET",
+            act_audit::Decision4::Deny,
+            "ask",
+            None,
+        );
+        assert_eq!(r.key, "api.example.com:443");
+        assert_eq!(r.action, "GET");
+        assert_eq!(r.reason.as_deref(), Some("outside ceiling"));
+    }
+
+    #[test]
+    fn a_missing_http_method_becomes_an_empty_action() {
+        // `decide_uri` takes Option<&str>; the record must not invent a verb.
+        let r = act_audit::CapDecisionRecord::statik(
+            act_types::constants::CAP_HTTP,
+            "api.example.com:443",
+            "",
+            act_audit::Decision4::Allow,
+            "allowlist",
+            Some("*.example.com".into()),
+        );
+        assert_eq!(r.action, "");
+        assert_eq!(r.rule.as_deref(), Some("*.example.com"));
+        assert!(r.reason.is_none());
     }
 }

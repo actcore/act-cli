@@ -304,6 +304,7 @@ pub async fn create_store(
     prompter: Arc<dyn act_policy::consent::ConsentPrompter>,
     cache: Arc<act_policy::consent::DecisionCache>,
 ) -> Result<Store<HostState>> {
+    use act_audit::{CapDecisionRecord, Decision4, emit_cap_decision};
     use act_policy::grant::PolicyMode;
     use act_policy::provider::{CompiledCeiling, ProviderRegistry, ResourceOp};
 
@@ -397,25 +398,60 @@ pub async fn create_store(
                         SocketAddrUse::TcpBind | SocketAddrUse::TcpConnect => "tcp",
                         _ => "udp",
                     };
+                    let key = format!("{}:{}", addr.ip(), addr.port());
                     let op = ResourceOp {
                         cap_id: act_types::constants::CAP_SOCKETS.to_string(),
-                        key: format!("{}:{}", addr.ip(), addr.port()),
+                        key: key.clone(),
                         action: String::new(),
                         attrs: serde_json::json!({"protocol": proto}),
                     };
-                    match sockets_ceiling.classify(&op) {
-                        act_policy::Decision::Allow => true,
-                        act_policy::Decision::Deny => false,
+                    let explained = sockets_ceiling.classify_explained(&op);
+                    let mode = sockets_effective_mode.to_string();
+                    match explained.decision {
+                        act_policy::Decision::Allow => {
+                            emit_cap_decision(&CapDecisionRecord::statik(
+                                act_types::constants::CAP_SOCKETS,
+                                &key,
+                                &op.action,
+                                Decision4::Allow,
+                                &mode,
+                                explained.rule,
+                            ));
+                            true
+                        }
+                        act_policy::Decision::Deny => {
+                            emit_cap_decision(&CapDecisionRecord::statik(
+                                act_types::constants::CAP_SOCKETS,
+                                &key,
+                                &op.action,
+                                Decision4::Deny,
+                                &mode,
+                                explained.rule,
+                            ));
+                            false
+                        }
+                        // Deliberately silent: `ask` has not resolved yet. The
+                        // record is emitted below once the consent cache /
+                        // prompter answers, mirroring `fs_policy::resolve_ask`.
                         act_policy::Decision::Ask => {
                             use act_policy::consent::ConsentAsk;
                             let ask = ConsentAsk {
                                 cap_id: act_types::constants::CAP_SOCKETS.to_string(),
-                                key: addr.to_string(),
+                                key: key.clone(),
                                 summary: format!("socket {proto} {addr}"),
                             };
-                            tokio::spawn(async move { cache.decide_cached(&*prompter, ask).await })
+                            let allowed =
+                                tokio::spawn(
+                                    async move { cache.decide_cached(&*prompter, ask).await },
+                                )
                                 .await
-                                .unwrap_or(false)
+                                .unwrap_or(false);
+                            emit_cap_decision(&CapDecisionRecord::answered(
+                                act_types::constants::CAP_SOCKETS,
+                                &key,
+                                allowed,
+                            ));
+                            allowed
                         }
                     }
                 })
