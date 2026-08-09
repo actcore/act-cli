@@ -912,7 +912,7 @@ mod tests {
     /// re-test the layer itself (that's the audit module's job).
     #[derive(Clone, Default)]
     struct CapturingWriter(Arc<Mutex<Vec<String>>>);
-    impl crate::audit::AuditWriter for CapturingWriter {
+    impl crate::audit::layer::AuditWriter for CapturingWriter {
         fn write_line(&self, line: &str) {
             self.0.lock().unwrap().push(line.to_string());
         }

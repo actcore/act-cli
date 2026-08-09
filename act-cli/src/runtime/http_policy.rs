@@ -546,7 +546,7 @@ mod tests {
     /// runs the real binary against `ask-canary`, which is p3-only.
     #[tokio::test(flavor = "current_thread")]
     async fn p2_ask_arm_resolves_and_audits_the_denial() {
-        use crate::audit::AuditWriter;
+        use crate::audit::layer::AuditWriter;
         use http_body_util::{BodyExt, Empty};
         use std::sync::Mutex;
         use tracing_subscriber::prelude::*;

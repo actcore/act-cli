@@ -88,14 +88,14 @@ impl Rollup {
         self.counts.insert(key, 1);
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.counts.is_empty() && self.overflow == 0
-    }
-
+    // Exercised by `rollup_collapses_past_the_cap` below, which asserts on
+    // both to pin the cap/overflow behaviour — not dead, just test-only.
+    #[allow(dead_code)]
     pub fn groups(&self) -> usize {
         self.counts.len()
     }
 
+    #[allow(dead_code)]
     pub fn overflow(&self) -> u64 {
         self.overflow
     }

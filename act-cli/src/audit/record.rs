@@ -78,6 +78,11 @@ pub enum Outcome {
     ToolError,
     /// The host failed to run the call at all.
     HostError,
+    /// Not yet wired up: the host drops the stream handle and wasmtime
+    /// unwinds on cancellation, but that path doesn't record this outcome
+    /// yet. Kept — with its `Display` arm and the assertion below — to
+    /// record the intent for when it is.
+    #[allow(dead_code)]
     Cancelled,
 }
 

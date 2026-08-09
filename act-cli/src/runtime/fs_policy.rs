@@ -935,7 +935,7 @@ mod tests {
             None,
         );
         assert_eq!(deny.reason.as_deref(), Some("outside ceiling"));
-        assert_eq!(deny.actor, crate::audit::Actor::Static);
+        assert_eq!(deny.actor, crate::audit::record::Actor::Static);
     }
 
     #[test]
@@ -946,7 +946,7 @@ mod tests {
             false,
         );
         assert_eq!(r.decision, crate::audit::Decision4::AskDeny);
-        assert_eq!(r.actor, crate::audit::Actor::User);
+        assert_eq!(r.actor, crate::audit::record::Actor::User);
         assert_eq!(r.reason.as_deref(), Some("denied by user"));
 
         let r = crate::audit::CapDecisionRecord::answered(
@@ -955,7 +955,7 @@ mod tests {
             true,
         );
         assert_eq!(r.decision, crate::audit::Decision4::AskAllow);
-        assert_eq!(r.actor, crate::audit::Actor::User);
+        assert_eq!(r.actor, crate::audit::record::Actor::User);
     }
 }
 

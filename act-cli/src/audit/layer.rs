@@ -92,11 +92,6 @@ impl<W: AuditWriter> AuditLayer<W> {
         }
     }
 
-    pub fn with_rollup_cap(mut self, cap: usize) -> Self {
-        self.rollup_cap = cap;
-        self
-    }
-
     /// Never let a rendering or writing fault escape into enforcement.
     ///
     /// Takes a **closure**, not a `String`, deliberately: an argument would be

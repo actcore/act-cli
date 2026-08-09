@@ -3,14 +3,6 @@
 //! Two record kinds mirror the span/event split that OTLP wants: a tool call
 //! is a span, and the capability decisions it triggers are events inside it.
 
-// As a standalone crate this module's public surface was consumed entirely
-// by `act-cli`, so unused-here items were still "used" as library API. Now
-// that it is a module of the `act` binary, that justification is gone and
-// rustc's dead-code analysis is (correctly) stricter — some of the surface
-// below (kept intact per the fold, see the design doc) has no in-binary
-// caller today.
-#![allow(dead_code, unused_imports)]
-
 pub mod emit;
 pub mod layer;
 pub mod record;
@@ -19,14 +11,9 @@ pub mod render;
 pub use emit::{
     emit_cap_decision, emit_ceiling_class, finish_tool_call, instantiation_span, tool_call_span,
 };
-pub use layer::{AuditLayer, AuditWriter, Detail, StderrWriter};
+pub use layer::{AuditLayer, Detail};
 pub use record::{
-    Actor, CapDecisionRecord, CeilingClassRecord, Decision4, Outcome, ToolCallStart, Transport,
-    attr, duration_ms, sha256_hex,
-};
-pub use render::{
-    Rollup, SpanFields, render_declared_ask_blocked_warning, render_declared_ungranted_warning,
-    render_exception, render_header, render_rollup,
+    CapDecisionRecord, CeilingClassRecord, Decision4, Outcome, ToolCallStart, Transport, sha256_hex,
 };
 
 /// Target for host-authored audit records. The audit layer's filter is pinned
