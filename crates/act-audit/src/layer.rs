@@ -383,6 +383,42 @@ mod tests {
             "humanised duration missing, got {}",
             out[0]
         );
+        // Pins that SpanVisitor actually captured these off the real span
+        // (not just that render_rollup can format them when handed a
+        // hand-built SpanFields directly, which is all render.rs's own
+        // tests exercise).
+        assert!(
+            out[0].contains("args:9e21c4"),
+            "args_sha256 missing, got {}",
+            out[0]
+        );
+        assert!(
+            out[0].contains("req:req-1"),
+            "request_id missing, got {}",
+            out[0]
+        );
+    }
+
+    #[test]
+    fn a_real_session_id_is_captured_from_the_span_and_rendered() {
+        // Every other layer.rs fixture uses session_id: None, so the
+        // SESSION_ID capture arm in SpanVisitor::record_str is otherwise
+        // never exercised end-to-end: a broken capture and "no session on
+        // this call" render identically (no "session:" clause) unless a
+        // real, non-empty id is driven through the real span.
+        let mut s = start();
+        s.session_id = Some("sess-abc123def456".into());
+        let out = run(|| {
+            let span = tool_call_span(&s);
+            let _g = span.enter();
+            finish_tool_call(&span, Outcome::Ok, Duration::from_millis(5));
+        });
+        assert_eq!(out.len(), 1, "got {out:?}");
+        assert!(
+            out[0].contains("session:sess-abc"),
+            "session id missing, got {}",
+            out[0]
+        );
     }
 
     #[test]
