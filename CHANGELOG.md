@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-08-12
+
+### Changed
+
+- The audit trail moved out of the separate `act-audit` crate into `act-cli`
+  itself, as the `audit` module. It had one consumer and no external one; this
+  workspace keeps a crate separate when a second consumer exists — `act-policy`
+  has one in the browser runtime, `act-store` has one in act-toolserver — and
+  uses a module otherwise. Behaviour is unchanged.
+- `act-policy-wasm` is no longer published to crates.io. It is the wasm-bindgen
+  wrapper compiled into the browser runtime bundle, not a library anyone
+  depends on from the registry.
+
+### Fixed
+
+- **0.11.0 never reached crates.io.** Its publish step failed: trusted
+  publishing cannot create crates that do not yet exist, and both `act-audit`
+  and `act-policy-wasm` were new. `cargo install act-cli` consequently still
+  served 0.10.1. Folding one crate away and unpublishing the other removes both
+  from the registry path, so 0.11.1 is what delivers everything 0.11.0
+  announced to crates.io users. The npm package and the Docker images published
+  normally at 0.11.0 and are unaffected.
+
 ## [0.11.0] - 2026-08-11
 
 ### Added
@@ -646,3 +669,4 @@ Initial release of the ACT CLI host — loads WebAssembly components and exposes
 
 [0.1.0]: https://github.com/actcore/act-cli/tree/0.1.0
 [0.11.0]: https://github.com/actcore/act-cli/compare/0.10.1..0.11.0
+[0.11.1]: https://github.com/actcore/act-cli/compare/0.11.0..0.11.1
