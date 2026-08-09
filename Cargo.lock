@@ -49,6 +49,7 @@ dependencies = [
 name = "act-cli"
 version = "0.10.1"
 dependencies = [
+ "act-audit",
  "act-policy",
  "act-store",
  "act-types",

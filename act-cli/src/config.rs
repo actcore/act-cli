@@ -29,6 +29,8 @@ pub struct ConfigFile {
     pub policy: Option<PolicyConfig>,
     #[serde(default)]
     pub profile: HashMap<String, ProfileConfig>,
+    #[serde(default)]
+    pub audit: Option<AuditConfig>,
 }
 
 /// Uniform `[policy]` section: a global `default` mode + per-id/pattern grants.
@@ -38,6 +40,17 @@ pub struct PolicyConfig {
     pub default: Option<String>,
     #[serde(flatten)]
     pub entries: BTreeMap<String, GrantToml>,
+}
+
+/// `[audit]` — the trail is on by default; this section only turns it off or
+/// widens its detail.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AuditConfig {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// `"rollup"` (default) or `"full"`.
+    #[serde(default)]
+    pub detail: Option<String>,
 }
 
 /// A grant in TOML: shorthand mode string, or a structured table.

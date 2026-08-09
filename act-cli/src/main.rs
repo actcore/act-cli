@@ -44,6 +44,17 @@ struct CommonOpts {
     #[arg(long = "max-memory", value_parser = parse_max_memory)]
     max_memory: Option<usize>,
 
+    /// Disable the audit trail. This is the only way to silence it —
+    /// `RUST_LOG` and `log-level` deliberately cannot.
+    #[arg(long = "no-audit")]
+    no_audit: bool,
+
+    /// Record full tool-argument values in the audit trail instead of a
+    /// digest. Auth is carried in session args, so this can expose
+    /// credentials — it warns on startup.
+    #[arg(long = "audit-args")]
+    audit_args: bool,
+
     /// Use a named profile from the config file
     #[arg(long)]
     profile: Option<String>,
@@ -249,6 +260,28 @@ enum InspectCommand {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // Subcommands that carry `CommonOpts` (the ones that instantiate a guest);
+    // others get the flags' absent/false defaults. Extracted once here rather
+    // than duplicated per consumer — feeds both the log-filter fallback below
+    // and the audit settings, so config/flags apply regardless of which
+    // env_filter branch fires.
+    let (config_path, common_opts_no_audit, common_opts_audit_args) = match &cli.command {
+        Command::Run { opts, .. } | Command::Call { opts, .. } | Command::Info { opts, .. } => {
+            (opts.config.as_deref(), opts.no_audit, opts.audit_args)
+        }
+        Command::Skill { .. } | Command::Pull { .. } => (None, false, false),
+        Command::Session(sub) => match sub {
+            SessionCommand::OpenArgsSchema { opts, .. } => {
+                (opts.config.as_deref(), opts.no_audit, opts.audit_args)
+            }
+        },
+        Command::Store(_) | Command::Inspect(_) => (None, false, false),
+    };
+
+    // Best-effort config load (don't fail on missing config) — feeds both the
+    // log-level fallback and the audit settings below.
+    let config_file = config::load_config(config_path).ok();
+
     // Log-filter priority: RUST_LOG env > -v flag > config `log-level` > default.
     let env_filter = if std::env::var("RUST_LOG").is_ok() {
         tracing_subscriber::EnvFilter::from_default_env()
@@ -259,20 +292,7 @@ async fn main() -> Result<()> {
         };
         format!("act={level}").parse().expect("valid log filter")
     } else {
-        // Try loading config for an override (best effort — don't fail on missing config).
-        let config_path = match &cli.command {
-            Command::Run { opts, .. } | Command::Call { opts, .. } | Command::Info { opts, .. } => {
-                opts.config.as_deref()
-            }
-            Command::Skill { .. } | Command::Pull { .. } => None,
-            Command::Session(sub) => match sub {
-                SessionCommand::OpenArgsSchema { opts, .. } => opts.config.as_deref(),
-            },
-            Command::Store(_) | Command::Inspect(_) => None,
-        };
-        let log_level = config::load_config(config_path)
-            .ok()
-            .and_then(|c| c.log_level);
+        let log_level = config_file.as_ref().and_then(|c| c.log_level.clone());
         let directive = match log_level.as_deref() {
             Some(level) => format!("act={level}"),
             None => "act=info".to_string(),
@@ -280,10 +300,47 @@ async fn main() -> Result<()> {
         directive.parse().expect("valid log filter")
     };
 
-    tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
+    let audit_cfg = config_file.and_then(|c| c.audit);
+    let audit_cfg_enabled = audit_cfg.as_ref().and_then(|a| a.enabled);
+    let audit_cfg_detail = audit_cfg.and_then(|a| a.detail);
+    let audit_enabled = !common_opts_no_audit && audit_cfg_enabled.unwrap_or(true);
+
+    use tracing_subscriber::prelude::*;
+
+    // Audit detail: -v widens it, config can preset it.
+    let audit_detail = if cli.verbose > 0 || audit_cfg_detail.as_deref() == Some("full") {
+        act_audit::Detail::Full
+    } else {
+        act_audit::Detail::Rollup
+    };
+
+    let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
+        .with_filter(env_filter);
+
+    // The audit layer carries its own filter, pinned to the audit target.
+    // This is what makes the trail unreachable from RUST_LOG / -v / log-level:
+    // those only ever configure `env_filter` above.
+    let audit_layer = audit_enabled.then(|| {
+        act_audit::AuditLayer::stderr(audit_detail).with_filter(
+            tracing_subscriber::filter::Targets::new().with_target(
+                act_audit::TARGET_AUDIT,
+                tracing::level_filters::LevelFilter::INFO,
+            ),
+        )
+    });
+
+    tracing_subscriber::registry()
+        .with(fmt_layer)
+        .with(audit_layer)
         .init();
+
+    if common_opts_audit_args {
+        tracing::warn!(
+            "--audit-args records full tool arguments; session args are still \
+             excluded, but tool arguments may contain credentials"
+        );
+    }
 
     match cli.command {
         Command::Run {
