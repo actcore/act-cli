@@ -594,6 +594,16 @@ impl ActRmcpBridge {
             call_metadata.extend(act_types::types::Metadata::from(Value::Object(map)));
         }
         apply_transport_meta(&mut call_metadata, ctx_meta);
+        // Correlation keys (ACT-CONSTANTS §5, ACT-MCP §3.2.1): sourced from
+        // transport `_meta` only, never the argument channel — see
+        // `trace_metadata_from_meta`. Always yields `std:request-id`,
+        // falling back to the JSON-RPC request id when the client sent
+        // none, so every call is joinable to a client log line even when
+        // the caller never opted in to tracing.
+        let request_id = context.id.to_string();
+        for (key, value) in trace_metadata_from_meta(ctx_meta, &request_id) {
+            call_metadata.insert(key, value);
+        }
         // Session-of-1: force the pre-opened default id over any
         // client-supplied std:session-id so the façade stays stateless.
         force_session_id(&mut call_metadata, &self.default_session_id);
@@ -867,6 +877,60 @@ fn apply_transport_meta(
     }
 }
 
+/// Read one ACT metadata key out of transport `_meta`, honouring the same
+/// `std:*`-vs-`dev.actcore/*` precedence as [`apply_transport_meta`] rather
+/// than re-implementing key respelling.
+fn meta_lookup(meta: &rmcp::model::MetaObject, act_key: &str) -> Option<String> {
+    let mut merged = act_types::types::Metadata::default();
+    apply_transport_meta(&mut merged, meta);
+    merged
+        .get(act_key)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// Lift trace-context keys out of MCP `_meta`, falling back to the JSON-RPC
+/// request id for correlation when the client supplied none.
+///
+/// Per `ACT-CONSTANTS.md` §5, transport adapters SHOULD propagate
+/// `std:traceparent` / `std:tracestate` to/from MCP request extensions; this
+/// is that propagation for the MCP adapter (ACT-MCP §3.2.1). Reads only the
+/// transport `_meta` channel (`context.meta`), never the injected `_meta`
+/// **argument** (ACT-MCP §3.2): the argument channel is written by the
+/// model and is therefore attacker-influenceable under prompt injection, so
+/// it must never be trusted as a source of correlation data. A missing
+/// `std:traceparent` / `std:tracestate` / `std:agent-id` is left absent —
+/// never fabricated, since a synthetic value would silently misattribute
+/// the call. `std:request-id` is the one exception: correlation must never
+/// depend on the caller opting in, so it always ends up populated, falling
+/// back to the JSON-RPC request id.
+pub(crate) fn trace_metadata_from_meta(
+    meta: &rmcp::model::MetaObject,
+    request_id: &str,
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for key in [
+        act_types::constants::META_TRACEPARENT,
+        act_types::constants::META_TRACESTATE,
+        act_types::constants::META_AGENT_ID,
+        act_types::constants::META_REQUEST_ID,
+    ] {
+        if let Some(v) = meta_lookup(meta, key).filter(|v| !v.is_empty()) {
+            out.push((key.to_string(), v));
+        }
+    }
+    if !out
+        .iter()
+        .any(|(k, _)| k == act_types::constants::META_REQUEST_ID)
+    {
+        out.push((
+            act_types::constants::META_REQUEST_ID.to_string(),
+            request_id.to_string(),
+        ));
+    }
+    out
+}
+
 impl rmcp::ServerHandler for ActRmcpBridge {
     fn get_info(&self) -> rmcp::model::ServerInfo {
         rmcp::model::ServerInfo::new(
@@ -912,6 +976,57 @@ impl rmcp::ServerHandler for ActRmcpBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a transport `_meta` object (the real type read at
+    /// `context.meta`) from `std:*`-spelled pairs.
+    fn meta_with<const N: usize>(pairs: [(&str, &str); N]) -> rmcp::model::MetaObject {
+        let mut map = serde_json::Map::new();
+        for (k, v) in pairs {
+            map.insert(k.to_string(), Value::String(v.to_string()));
+        }
+        rmcp::model::MetaObject(map)
+    }
+
+    #[test]
+    fn mcp_meta_trace_keys_reach_call_metadata() {
+        let meta = meta_with([
+            ("std:traceparent", "00-aa-bb-01"),
+            ("std:agent-id", "claude-code"),
+        ]);
+        let md = trace_metadata_from_meta(&meta, "jsonrpc-7");
+        let get = |k: &str| md.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("std:traceparent"), Some("00-aa-bb-01"));
+        assert_eq!(get("std:agent-id"), Some("claude-code"));
+        // The JSON-RPC request id is the correlation id when the client
+        // supplied none of its own.
+        assert_eq!(get("std:request-id"), Some("jsonrpc-7"));
+    }
+
+    #[test]
+    fn a_client_supplied_request_id_wins_over_the_jsonrpc_id() {
+        let meta = meta_with([("std:request-id", "client-1")]);
+        let md = trace_metadata_from_meta(&meta, "jsonrpc-7");
+        let get = |k: &str| md.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("std:request-id"), Some("client-1"));
+    }
+
+    /// A missing `std:traceparent` / `std:tracestate` / `std:agent-id` must
+    /// stay absent — never synthesized. Only `std:request-id` gets a
+    /// fallback, since correlation must not depend on the caller opting in.
+    /// This is the one design invariant neither of the brief's two given
+    /// tests pins directly (both supply a traceparent, or don't check for
+    /// one), so a bug that started fabricating a placeholder traceparent
+    /// would slip through them unnoticed.
+    #[test]
+    fn absent_trace_context_is_never_fabricated() {
+        let meta = meta_with([]);
+        let md = trace_metadata_from_meta(&meta, "jsonrpc-9");
+        let get = |k: &str| md.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("std:traceparent"), None);
+        assert_eq!(get("std:tracestate"), None);
+        assert_eq!(get("std:agent-id"), None);
+        assert_eq!(get("std:request-id"), Some("jsonrpc-9"));
+    }
 
     #[test]
     fn transport_meta_drops_protocol_reserved_keys() {
