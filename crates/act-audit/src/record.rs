@@ -179,6 +179,27 @@ impl CapDecisionRecord {
         mode: &str,
         rule: Option<String>,
     ) -> Self {
+        Self::statik_with_reason(cap_id, key, action, decision, mode, rule, None)
+    }
+
+    /// `statik`, but lets the caller override the default `Deny` reason
+    /// ("outside ceiling"). Some decision points deny for a reason other
+    /// than "the operation didn't match the ceiling" — a redirect hop
+    /// leaving the allowed host, a DNS-resolved address landing in a
+    /// deny-CIDR — and an operator reading "outside ceiling" for both would
+    /// not be able to tell them apart from an ordinary allow/deny-list
+    /// mismatch. `None` reproduces `statik`'s default exactly. Still the
+    /// same shared shape and still no per-class builder: any capability
+    /// class can call this, not just HTTP.
+    pub fn statik_with_reason(
+        cap_id: &str,
+        key: &str,
+        action: &str,
+        decision: Decision4,
+        mode: &str,
+        rule: Option<String>,
+        reason: Option<&str>,
+    ) -> Self {
         Self {
             cap_id: cap_id.to_string(),
             key: key.to_string(),
@@ -186,7 +207,15 @@ impl CapDecisionRecord {
             decision,
             mode: mode.to_string(),
             actor: Actor::Static,
-            reason: (decision == Decision4::Deny).then(|| "outside ceiling".to_string()),
+            // Only a Deny carries a reason at all — same invariant `statik`
+            // enforces. A custom `reason` on a non-Deny call is dropped
+            // rather than surfaced, so an Allow record can never render as
+            // if something had been refused.
+            reason: (decision == Decision4::Deny).then(|| {
+                reason
+                    .map(str::to_string)
+                    .unwrap_or_else(|| "outside ceiling".to_string())
+            }),
             rule,
         }
     }
@@ -289,6 +318,48 @@ mod tests {
         let d =
             CapDecisionRecord::statik("wasi:http", "evil:443", "GET", Decision4::Deny, "ask", None);
         assert_eq!(d.reason.as_deref(), Some("outside ceiling"));
+    }
+
+    #[test]
+    fn statik_with_reason_overrides_the_default_deny_reason() {
+        let r = CapDecisionRecord::statik_with_reason(
+            "wasi:http",
+            "blocked.example:443",
+            "",
+            Decision4::Deny,
+            "allowlist",
+            None,
+            Some("redirect target outside ceiling"),
+        );
+        assert_eq!(r.reason.as_deref(), Some("redirect target outside ceiling"));
+    }
+
+    #[test]
+    fn statik_with_reason_none_falls_back_to_statiks_default() {
+        let with_none = CapDecisionRecord::statik_with_reason(
+            "wasi:http",
+            "k",
+            "",
+            Decision4::Deny,
+            "allowlist",
+            None,
+            None,
+        );
+        assert_eq!(with_none.reason.as_deref(), Some("outside ceiling"));
+
+        // An Allow is still never given a reason, even if the caller passes
+        // one — only Deny carries a reason at all, same invariant `statik`
+        // already enforces.
+        let allow_with_reason = CapDecisionRecord::statik_with_reason(
+            "wasi:http",
+            "k",
+            "",
+            Decision4::Allow,
+            "allowlist",
+            None,
+            Some("should be dropped"),
+        );
+        assert!(allow_with_reason.reason.is_none());
     }
 
     #[test]

@@ -123,6 +123,27 @@ fn deny_reason(method: Option<&str>, uri: &Uri) -> String {
     format!("blocked by ACT policy: {} {}", method.unwrap_or("?"), uri)
 }
 
+/// Resolve an `Ask`-mode HTTP decision via the interactive prompter (cached
+/// per `host:port`), and emit the resulting `ask-allow`/`ask-deny` record.
+/// Mirrors `fs_policy::resolve_ask`; shared by both the p2 and p3 hooks so
+/// there is exactly one place either arm can call to reach a verdict, and no
+/// way for them to drift from each other. Free function over owned data so
+/// the returned future is `Send` and usable from a spawned task.
+async fn resolve_http_ask(
+    cache: Arc<DecisionCache>,
+    prompter: Arc<dyn ConsentPrompter>,
+    ask: ConsentAsk,
+) -> bool {
+    let key = ask.key.clone();
+    let allowed = cache.decide_cached(&*prompter, ask).await;
+    emit_cap_decision(&CapDecisionRecord::answered(
+        act_types::constants::CAP_HTTP,
+        &key,
+        allowed,
+    ));
+    allowed
+}
+
 // ── p2 hook ───────────────────────────────────────────────────────────────
 
 impl wasmtime_wasi_http::p2::WasiHttpHooks for PolicyHttpHooks {
@@ -156,16 +177,9 @@ impl wasmtime_wasi_http::p2::WasiHttpHooks for PolicyHttpHooks {
                 let cache = self.cache.clone();
                 let prompter = self.prompter.clone();
                 let ask = Self::http_ask(method, &uri);
-                let ask_key = ask.key.clone();
                 let log_uri = uri.clone();
                 let handle = wasmtime_wasi::runtime::spawn(async move {
-                    let allowed = cache.decide_cached(&*prompter, ask).await;
-                    emit_cap_decision(&CapDecisionRecord::answered(
-                        act_types::constants::CAP_HTTP,
-                        &ask_key,
-                        allowed,
-                    ));
-                    if allowed {
+                    if resolve_http_ask(cache, prompter, ask).await {
                         tracing::debug!(%log_uri, "http policy ask allowed (p2)");
                         Ok(client.send_p2(request, config).await)
                     } else {
@@ -229,16 +243,9 @@ impl wasmtime_wasi_http::p3::WasiHttpHooks for PolicyHttpHooks {
                 let cache = self.cache.clone();
                 let prompter = self.prompter.clone();
                 let ask = Self::http_ask(method.as_deref(), &uri);
-                let ask_key = ask.key.clone();
                 let log_uri = uri.clone();
                 Box::new(async move {
-                    let allowed = cache.decide_cached(&*prompter, ask).await;
-                    emit_cap_decision(&CapDecisionRecord::answered(
-                        act_types::constants::CAP_HTTP,
-                        &ask_key,
-                        allowed,
-                    ));
-                    if !allowed {
+                    if !resolve_http_ask(cache, prompter, ask).await {
                         tracing::warn!(%log_uri, "http policy ask denied (p3)");
                         return Err(TrappableError::<P3ErrorCode>::from(
                             P3ErrorCode::HttpRequestDenied,
@@ -518,5 +525,128 @@ mod tests {
         assert_eq!(r.action, "");
         assert_eq!(r.rule.as_deref(), Some("*.example.com"));
         assert!(r.reason.is_none());
+    }
+
+    /// `p2::WasiHttpHooks::send_request`'s `Decision::Ask` arm is otherwise
+    /// unreached by anything in this repo: every real fixture that drives
+    /// outbound HTTP (`ask-canary`, `components/http-client`) goes through
+    /// the `wasi-fetch` crate, which imports `wasip3::http::*` exclusively —
+    /// so only the p3 hook ever fires for a real component, and a bug
+    /// confined to the p2 arm (this one, or a future edit) would be
+    /// invisible to `cargo test --workspace`. Drives `send_request` on the
+    /// real `p2::WasiHttpHooks` trait method directly, the same way
+    /// `decide_uri` is already driven directly by the tests above, and
+    /// captures the audit trail via a real `AuditLayer` (not just the
+    /// record constructors) so the assertion is on the actual emission,
+    /// not on `resolve_http_ask`'s return value alone — that would still
+    /// pass even if the `emit_cap_decision` call inside it were deleted.
+    ///
+    /// `p3`'s equivalent arm has its own independent coverage:
+    /// `tests/audit_cli.rs`'s `http_ask_resolution_reaches_the_audit_trail`
+    /// runs the real binary against `ask-canary`, which is p3-only.
+    #[tokio::test(flavor = "current_thread")]
+    async fn p2_ask_arm_resolves_and_audits_the_denial() {
+        use act_audit::AuditWriter;
+        use http_body_util::{BodyExt, Empty};
+        use std::sync::Mutex;
+        use tracing_subscriber::prelude::*;
+        use wasmtime_wasi_http::p2::WasiHttpHooks as _;
+        use wasmtime_wasi_http::p2::types::HostFutureIncomingResponse;
+
+        #[derive(Clone, Default)]
+        struct CapturingWriter(Arc<Mutex<Vec<String>>>);
+        impl AuditWriter for CapturingWriter {
+            fn write_line(&self, line: &str) {
+                self.0.lock().unwrap().push(line.to_string());
+            }
+        }
+
+        // Not `hooks_from`: it spins up its own throwaway current-thread
+        // runtime via `block_on` to resolve the (actually synchronous)
+        // `HttpProvider::resolve`, which is fine from a plain `#[test]` but
+        // panics ("Cannot start a runtime from within a runtime") called
+        // from inside this test's own `#[tokio::test]` runtime. `.await` it
+        // directly instead — we're already in an async context.
+        let grant = CapabilityGrant {
+            mode: PolicyMode::Ask,
+            allow: vec![json!({"host": "api.example.com"})],
+            ..Default::default()
+        };
+        let ceiling_box = act_policy::providers::http::HttpProvider
+            .resolve("wasi:http", &[json!({"host": "api.example.com"})], &grant)
+            .await
+            .expect("HttpProvider::resolve");
+        let ceiling: Arc<dyn CompiledCeiling> = Arc::from(ceiling_box);
+        let http_cfg = crate::config::HttpConfig {
+            mode: grant.mode,
+            ..Default::default()
+        };
+        let client = Arc::new(
+            crate::runtime::http_client::ActHttpClient::new(http_cfg).expect("client builds"),
+        );
+        let mut h = PolicyHttpHooks::new(
+            ceiling,
+            client,
+            Arc::new(act_policy::consent::DenyPrompter),
+            Arc::new(act_policy::consent::DecisionCache::new()),
+        );
+
+        let body: http_body_util::combinators::UnsyncBoxBody<bytes::Bytes, P2ErrorCode> =
+            Empty::<bytes::Bytes>::new()
+                .map_err(|_| unreachable!())
+                .boxed_unsync();
+        let request = hyper::Request::builder()
+            .method("GET")
+            .uri("https://api.example.com/")
+            .body(body)
+            .unwrap();
+        let config = wasmtime_wasi_http::p2::types::OutgoingRequestConfig {
+            use_tls: true,
+            connect_timeout: std::time::Duration::from_secs(5),
+            first_byte_timeout: std::time::Duration::from_secs(5),
+            between_bytes_timeout: std::time::Duration::from_secs(5),
+        };
+
+        let writer = CapturingWriter::default();
+        let sink = writer.0.clone();
+        let sub = tracing_subscriber::registry().with(act_audit::AuditLayer::new(
+            writer,
+            act_audit::Detail::Rollup,
+        ));
+        // A guard, not `with_default`'s closure form: the audit emission
+        // happens inside a task spawned via `wasmtime_wasi::runtime::spawn`,
+        // driven to completion below by `.await`ing its handle — the guard
+        // needs to stay live across that await point. Sound only because
+        // this test runs on `flavor = "current_thread"`: `spawn` finds an
+        // ambient tokio runtime already current and reuses it rather than
+        // its own multi-threaded static one, so the spawned task runs on
+        // this same OS thread and observes this thread-local default.
+        let _guard = tracing::subscriber::set_default(sub);
+
+        let pending = h
+            .send_request(request, config)
+            .expect("send_request returns a pending response for Ask");
+        let resolved = match pending {
+            HostFutureIncomingResponse::Pending(handle) => handle.await,
+            other => panic!("expected a Pending response for Ask, got {other:?}"),
+        };
+
+        drop(_guard);
+
+        // `hooks_from` wires up `DenyPrompter` (no interactive channel) —
+        // every ask degrades to deny deterministically, same as a headless
+        // `act call` with stdin closed.
+        assert!(
+            matches!(resolved, Ok(Err(P2ErrorCode::HttpRequestDenied))),
+            "expected the ask to degrade to a denied response, got {resolved:?}"
+        );
+
+        let lines = sink.lock().unwrap().clone();
+        let ask_line = lines
+            .iter()
+            .find(|l| l.contains("ask-deny"))
+            .unwrap_or_else(|| panic!("no ask-deny audit line reached the trail, got {lines:?}"));
+        assert!(ask_line.contains("wasi:http"), "got {ask_line}");
+        assert!(ask_line.contains("denied by user"), "got {ask_line}");
     }
 }

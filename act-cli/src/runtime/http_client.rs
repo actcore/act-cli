@@ -32,6 +32,7 @@ use wasmtime_wasi_http::p2::body::HyperIncomingBody;
 use wasmtime_wasi_http::p3::bindings::http::types::ErrorCode as P3ErrorCode;
 
 use crate::config::{HttpConfig, PolicyMode};
+use act_audit::{CapDecisionRecord, Decision4, emit_cap_decision};
 use act_policy::net::{self as network, NetworkRule};
 
 /// reqwest DNS resolver that filters resolved addresses against both deny
@@ -119,6 +120,30 @@ impl Resolve for PolicyDnsResolver {
                 "http policy dns resolve",
             );
             if filtered.is_empty() {
+                // One record per failed resolution, not one per dropped
+                // address: to the guest this is a single failure (the name
+                // didn't resolve to anything usable), and `ResourceOp`/
+                // `CapDecisionRecord` model one decision — emitting `total`
+                // records for what reads as one blocked lookup would flood
+                // the rollup without giving the operator anything a single
+                // line doesn't already say. `key` is the bare hostname: no
+                // port exists yet at DNS-resolution time (a name resolves
+                // independently of which port the caller will connect to).
+                if total > 0 {
+                    // Only a genuine "policy dropped everything" case gets a
+                    // deny record here — `total == 0` (the name itself
+                    // didn't resolve) is a DNS failure, not a policy
+                    // decision, and must not be misreported as one.
+                    emit_cap_decision(&CapDecisionRecord::statik_with_reason(
+                        act_types::constants::CAP_HTTP,
+                        &host,
+                        "",
+                        Decision4::Deny,
+                        &mode.to_string(),
+                        None,
+                        Some("all resolved addresses filtered by CIDR rule"),
+                    ));
+                }
                 return Err("all resolved addresses filtered by policy CIDR rules".into());
             }
             let iter: Addrs = Box::new(filtered.into_iter());
@@ -168,6 +193,16 @@ fn build_redirect_policy(cfg: Arc<HttpConfig>) -> redirect::Policy {
             act_policy::Decision::Ask => attempt.follow(),
             act_policy::Decision::Deny => {
                 tracing::warn!(%url, "http policy: redirect hop blocked");
+                let key = format!("{host}:{port}");
+                emit_cap_decision(&CapDecisionRecord::statik_with_reason(
+                    act_types::constants::CAP_HTTP,
+                    &key,
+                    "",
+                    Decision4::Deny,
+                    &cfg.mode.to_string(),
+                    None,
+                    Some("redirect target outside ceiling"),
+                ));
                 attempt.error("redirect target blocked by ACT policy")
             }
         }
@@ -519,6 +554,7 @@ mod tests {
     use http::Method;
     use http_body_util::combinators::UnsyncBoxBody;
     use http_body_util::{BodyExt, Empty};
+    use std::sync::Mutex;
     use wasmtime_wasi_http::p2::bindings::http::types::ErrorCode as P2ErrorCode;
 
     #[tokio::test(flavor = "current_thread")]
@@ -868,5 +904,201 @@ mod tests {
             .await
             .expect("example.com allowed via host rule");
         assert_eq!(incoming.resp.status().as_u16(), 200);
+    }
+
+    /// A capturing `AuditWriter`, local to this module — `act_audit`'s own
+    /// `TestWriter` (in `layer::tests`) isn't exported, and the point here
+    /// is to observe the real `AuditLayer` render a real emission, not to
+    /// re-test the layer itself (that's `act-audit`'s job).
+    #[derive(Clone, Default)]
+    struct CapturingWriter(Arc<Mutex<Vec<String>>>);
+    impl act_audit::AuditWriter for CapturingWriter {
+        fn write_line(&self, line: &str) {
+            self.0.lock().unwrap().push(line.to_string());
+        }
+    }
+
+    /// `build_redirect_policy`'s `Decision::Deny` arm used to only
+    /// `tracing::warn!` — a component granted its origin host but redirected
+    /// off it was blocked with nothing in the audit trail. Drives a real
+    /// redirect through a local raw-socket server (no external network) so
+    /// this exercises the actual `redirect::Policy` closure reqwest invokes,
+    /// not just `net::decide` in isolation (that's what
+    /// `redirect_policy_blocks_cross_host_hop` above already covers, and
+    /// continues to).
+    ///
+    /// Builds a bare `reqwest::Client` with `build_redirect_policy` directly,
+    /// rather than going through `ActHttpClient::send_p2`: `p2_to_reqwest`
+    /// wraps every outgoing body — even an empty GET's — via
+    /// `reqwest::Body::wrap_stream`, and reqwest silently declines to follow
+    /// a redirect at all when the original body isn't provably re-sendable,
+    /// so `send_p2` never reaches the redirect policy for *any* outcome
+    /// (allow or deny). That's a real, separate gap in the WASI conversion
+    /// layer — outside this task's scope (it would affect the redirect
+    /// *decision* on the allow side too, not just this audit gap) — noted in
+    /// the report rather than fixed here. A plain `.get()` has no body at
+    /// all, so it sidesteps that gap and exercises the redirect policy the
+    /// way a normal reqwest caller would.
+    #[tokio::test(flavor = "current_thread")]
+    async fn redirect_hop_denial_is_audited() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tracing_subscriber::prelude::*;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf).await; // drain the request line/headers
+            let resp = b"HTTP/1.1 302 Found\r\n\
+                          Location: http://blocked.example/\r\n\
+                          Content-Length: 0\r\n\
+                          Connection: close\r\n\r\n";
+            let _ = stream.write_all(resp).await;
+            let _ = stream.shutdown().await;
+        });
+
+        // Allows the origin (127.0.0.1, where the 302 comes from) but not
+        // the redirect target (blocked.example) — the redirect hop itself
+        // must be what gets denied, not the initial request.
+        let cfg = Arc::new(HttpConfig {
+            mode: PolicyMode::Allowlist,
+            allow: vec![act_policy::grant::HttpRule {
+                net: NetworkRule {
+                    host: Some("127.0.0.1".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            deny: vec![],
+        });
+        let client = reqwest::Client::builder()
+            .redirect(build_redirect_policy(cfg))
+            .build()
+            .expect("client builds");
+
+        let writer = CapturingWriter::default();
+        let sink = writer.0.clone();
+        let sub = tracing_subscriber::registry().with(act_audit::AuditLayer::new(
+            writer,
+            act_audit::Detail::Rollup,
+        ));
+        let _guard = tracing::subscriber::set_default(sub);
+
+        let result = client.get(format!("http://{addr}/")).send().await;
+
+        drop(_guard);
+        server.await.expect("server task");
+
+        let err = result.expect_err("redirect target denied, the request must fail");
+        assert!(
+            err.is_redirect(),
+            "expected a redirect-class error, got {err:?}"
+        );
+
+        let lines = sink.lock().unwrap().clone();
+        let deny_line = lines
+            .iter()
+            .find(|l| l.contains("blocked.example"))
+            .unwrap_or_else(|| panic!("no redirect-deny audit line, got {lines:?}"));
+        assert!(deny_line.contains("wasi:http"), "got {deny_line}");
+        assert!(
+            deny_line.contains("redirect target outside ceiling"),
+            "reason must distinguish this from an ordinary ceiling denial, got {deny_line}"
+        );
+    }
+
+    /// `PolicyDnsResolver::resolve`'s `filtered.is_empty()` arm used to just
+    /// return an `Err` — a component granted a host whose every resolved
+    /// address then got dropped by a deny-CIDR was blocked with nothing in
+    /// the audit trail, indistinguishable from a plain DNS failure. Denies
+    /// BOTH loopback families (`127.0.0.0/8` and `::1/128`) so `filtered` is
+    /// empty deterministically regardless of whether this host's resolver
+    /// returns v4, v6, or both for "localhost" — the flakiness the
+    /// neighbouring `dns_resolver_filters_denied_cidr` test above already
+    /// warns about in its own comment. The allow rule is host-anchored
+    /// (`host = "localhost"`, not a CIDR), so this is exactly the scenario
+    /// the review called out: the host itself was granted, but its resolved
+    /// address got filtered anyway.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dns_cidr_filtered_resolution_is_audited() {
+        use act_policy::grant::{HttpConfig as PolicyHttpConfig, HttpRule};
+        use act_policy::net::NetworkRule as PolicyNetworkRule;
+        use tracing_subscriber::prelude::*;
+
+        let cfg = PolicyHttpConfig {
+            mode: PolicyMode::Allowlist,
+            allow: vec![HttpRule {
+                net: PolicyNetworkRule {
+                    host: Some("localhost".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            deny: vec![
+                HttpRule {
+                    net: PolicyNetworkRule {
+                        cidr: Some("127.0.0.0/8".into()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                HttpRule {
+                    net: PolicyNetworkRule {
+                        cidr: Some("::1/128".into()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            ],
+        };
+        let client = ActHttpClient::new(cfg).expect("client builds");
+        let body: UnsyncBoxBody<bytes::Bytes, P2ErrorCode> = Empty::<bytes::Bytes>::new()
+            .map_err(|_| unreachable!())
+            .boxed_unsync();
+        let hyper_req = hyper::Request::builder()
+            .method(Method::GET)
+            .uri("http://localhost/")
+            .body(body)
+            .unwrap();
+        let config = wasmtime_wasi_http::p2::types::OutgoingRequestConfig {
+            use_tls: false,
+            connect_timeout: std::time::Duration::from_secs(5),
+            first_byte_timeout: std::time::Duration::from_secs(5),
+            between_bytes_timeout: std::time::Duration::from_secs(5),
+        };
+
+        let writer = CapturingWriter::default();
+        let sink = writer.0.clone();
+        let sub = tracing_subscriber::registry().with(act_audit::AuditLayer::new(
+            writer,
+            act_audit::Detail::Rollup,
+        ));
+        let _guard = tracing::subscriber::set_default(sub);
+
+        let err = client
+            .send_p2(hyper_req, config)
+            .await
+            .expect_err("both loopback families are denied, must fail at DNS");
+
+        drop(_guard);
+
+        assert!(
+            matches!(err, P2ErrorCode::DnsError(_)),
+            "expected DnsError, got {err:?}"
+        );
+
+        let lines = sink.lock().unwrap().clone();
+        let deny_line = lines
+            .iter()
+            .find(|l| l.contains("localhost"))
+            .unwrap_or_else(|| panic!("no dns-filtered deny audit line, got {lines:?}"));
+        assert!(deny_line.contains("wasi:http"), "got {deny_line}");
+        assert!(
+            deny_line.contains("all resolved addresses filtered by CIDR rule"),
+            "reason must distinguish this from an ordinary ceiling denial, got {deny_line}"
+        );
     }
 }
