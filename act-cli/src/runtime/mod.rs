@@ -112,7 +112,7 @@ pub fn create_engine() -> Result<Engine> {
 pub struct AuditContext {
     pub component_ref: String,
     pub digest: String,
-    pub transport: act_audit::Transport,
+    pub transport: crate::audit::Transport,
     /// Whether this run has any channel that can answer an interactive
     /// `ask` prompt — a real TTY (`TtyPrompter`) or an MCP client offering
     /// elicitation (`McpElicitationPrompter`). `false` for headless CLI
@@ -269,7 +269,7 @@ fn new_request_id() -> String {
 pub fn load_component(engine: &Engine, path: &std::path::Path) -> Result<(Component, String)> {
     let bytes = std::fs::read(path)
         .map_err(|e| anyhow::anyhow!("failed to read component {}: {e}", path.display()))?;
-    let digest = act_audit::sha256_hex(&bytes);
+    let digest = crate::audit::sha256_hex(&bytes);
     let component = Component::from_binary(engine, &bytes)
         .map_err(|e| anyhow::anyhow!("failed to load component from {}: {e}", path.display()))?;
     Ok((component, digest))
@@ -337,7 +337,7 @@ pub async fn create_store(
     Store<HostState>,
     Vec<(String, Arc<dyn act_policy::provider::CompiledCeiling>)>,
 )> {
-    use act_audit::{CapDecisionRecord, Decision4, emit_cap_decision};
+    use crate::audit::{CapDecisionRecord, Decision4, emit_cap_decision};
     use act_policy::grant::PolicyMode;
     use act_policy::provider::{CompiledCeiling, ProviderRegistry, ResourceOp};
 
@@ -761,11 +761,11 @@ pub async fn instantiate_component(
     // exactly like a tool call — a span with one event per capability class —
     // so the same layer machinery renders it and OTLP gets queryable per-class
     // attributes rather than a sentence.
-    let inst_span = act_audit::instantiation_span(&audit.component_ref, &audit.digest);
+    let inst_span = crate::audit::instantiation_span(&audit.component_ref, &audit.digest);
     {
         let _g = inst_span.enter();
         for (id, c) in &ceilings {
-            act_audit::emit_ceiling_class(&act_audit::CeilingClassRecord {
+            crate::audit::emit_ceiling_class(&crate::audit::CeilingClassRecord {
                 cap_id: id.clone(),
                 mode: c.effective_mode().to_string(),
                 declared: c.declared(),
@@ -839,11 +839,11 @@ pub fn spawn_component_actor(
 
                     let started = std::time::Instant::now();
                     let meta_strings = decode_meta_strings(&metadata);
-                    let audit_span = act_audit::tool_call_span(&act_audit::ToolCallStart {
+                    let audit_span = crate::audit::tool_call_span(&crate::audit::ToolCallStart {
                         component_ref: audit.component_ref.clone(),
                         digest: audit.digest.clone(),
                         tool: name.clone(),
-                        args_sha256: act_audit::sha256_hex(&arguments),
+                        args_sha256: crate::audit::sha256_hex(&arguments),
                         args_json: args_as_json(&arguments, audit.record_args),
                         session_id: meta_str(&meta_strings, act_types::constants::META_SESSION_ID),
                         agent_id: meta_str(&meta_strings, act_types::constants::META_AGENT_ID),
@@ -924,12 +924,14 @@ pub fn spawn_component_actor(
                         // `call-tool` reports a guest failure inside the event
                         // list, not via the outer Result — see
                         // `events_contain_error`.
-                        Ok(r) if events_contain_error(&r.events) => act_audit::Outcome::ToolError,
-                        Ok(_) => act_audit::Outcome::Ok,
-                        Err(ComponentError::Tool(_)) => act_audit::Outcome::ToolError,
-                        Err(_) => act_audit::Outcome::HostError,
+                        Ok(r) if events_contain_error(&r.events) => {
+                            crate::audit::Outcome::ToolError
+                        }
+                        Ok(_) => crate::audit::Outcome::Ok,
+                        Err(ComponentError::Tool(_)) => crate::audit::Outcome::ToolError,
+                        Err(_) => crate::audit::Outcome::HostError,
                     };
-                    act_audit::finish_tool_call(&audit_span, outcome, started.elapsed());
+                    crate::audit::finish_tool_call(&audit_span, outcome, started.elapsed());
                     let _ = reply.send(response);
                 }
                 ComponentRequest::CallToolStreaming {
@@ -942,11 +944,11 @@ pub fn spawn_component_actor(
 
                     let started = std::time::Instant::now();
                     let meta_strings = decode_meta_strings(&metadata);
-                    let audit_span = act_audit::tool_call_span(&act_audit::ToolCallStart {
+                    let audit_span = crate::audit::tool_call_span(&crate::audit::ToolCallStart {
                         component_ref: audit.component_ref.clone(),
                         digest: audit.digest.clone(),
                         tool: name.clone(),
-                        args_sha256: act_audit::sha256_hex(&arguments),
+                        args_sha256: crate::audit::sha256_hex(&arguments),
                         args_json: args_as_json(&arguments, audit.record_args),
                         session_id: meta_str(&meta_strings, act_types::constants::META_SESSION_ID),
                         agent_id: meta_str(&meta_strings, act_types::constants::META_AGENT_ID),
@@ -1013,12 +1015,12 @@ pub fn spawn_component_actor(
 
                     let outcome = match &result {
                         Ok(Ok(())) if saw_error.load(Ordering::Relaxed) => {
-                            act_audit::Outcome::ToolError
+                            crate::audit::Outcome::ToolError
                         }
-                        Ok(Ok(())) => act_audit::Outcome::Ok,
-                        Ok(Err(_)) | Err(_) => act_audit::Outcome::HostError,
+                        Ok(Ok(())) => crate::audit::Outcome::Ok,
+                        Ok(Err(_)) | Err(_) => crate::audit::Outcome::HostError,
                     };
-                    act_audit::finish_tool_call(&audit_span, outcome, started.elapsed());
+                    crate::audit::finish_tool_call(&audit_span, outcome, started.elapsed());
 
                     let terminal = match result {
                         Ok(Ok(())) => SseEvent::Done,
@@ -1366,6 +1368,6 @@ mod tests {
         }
         let bytes = std::fs::read(path).expect("read fixture");
         let (_component, digest) = load_component(&engine, path).expect("load");
-        assert_eq!(digest, act_audit::sha256_hex(&bytes));
+        assert_eq!(digest, crate::audit::sha256_hex(&bytes));
     }
 }

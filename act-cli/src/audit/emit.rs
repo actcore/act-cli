@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use tracing::field::Empty;
 
-use crate::TARGET_AUDIT;
-use crate::record::{
+use crate::audit::TARGET_AUDIT;
+use crate::audit::record::{
     CapDecisionRecord, CeilingClassRecord, Outcome, ToolCallStart, attr, duration_ms,
 };
 
@@ -104,7 +104,7 @@ mod tests {
     use tracing_subscriber::registry::LookupSpan;
 
     use super::*;
-    use crate::record::*;
+    use crate::audit::record::*;
 
     /// Captures `(field_name, value)` pairs off every event on the audit target.
     #[derive(Clone, Default)]
@@ -130,7 +130,7 @@ mod tests {
         S: tracing::Subscriber + for<'a> LookupSpan<'a>,
     {
         fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
-            if event.metadata().target() == crate::TARGET_AUDIT {
+            if event.metadata().target() == crate::audit::TARGET_AUDIT {
                 let mut v = self.clone();
                 event.record(&mut v);
             }

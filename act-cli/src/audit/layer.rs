@@ -17,9 +17,9 @@ use tracing::{Event, Subscriber, span};
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
 
-use crate::TARGET_AUDIT;
-use crate::record::{Actor, CapDecisionRecord, CeilingClassRecord, Decision4, attr};
-use crate::render::{
+use crate::audit::TARGET_AUDIT;
+use crate::audit::record::{Actor, CapDecisionRecord, CeilingClassRecord, Decision4, attr};
+use crate::audit::render::{
     Rollup, SpanFields, render_declared_ask_blocked_warning, render_declared_ungranted_warning,
     render_exception, render_header, render_rollup,
 };
@@ -432,10 +432,10 @@ mod tests {
     use tracing_subscriber::prelude::*;
 
     use super::*;
-    use crate::emit::{
+    use crate::audit::emit::{
         emit_cap_decision, emit_ceiling_class, finish_tool_call, instantiation_span, tool_call_span,
     };
-    use crate::record::*;
+    use crate::audit::record::*;
 
     #[derive(Clone, Default)]
     struct TestWriter(Arc<Mutex<Vec<String>>>);

@@ -47,7 +47,7 @@ use act_policy::consent::{ConsentAsk, ConsentPrompter, DecisionCache};
 use act_policy::fs_matcher::FsAccess;
 use act_policy::provider::{CompiledCeiling, ResourceOp};
 
-use act_audit::{CapDecisionRecord, Decision4, emit_cap_decision};
+use crate::audit::{CapDecisionRecord, Decision4, emit_cap_decision};
 
 // ── Mounts → preopens ─────────────────────────────────────────────────────
 
@@ -914,11 +914,11 @@ mod tests {
     #[test]
     fn fs_records_carry_the_matched_rule_and_a_reason_on_deny() {
         // Pure record construction — no wasmtime store needed.
-        let allow = act_audit::CapDecisionRecord::statik(
+        let allow = crate::audit::CapDecisionRecord::statik(
             act_types::constants::CAP_FILESYSTEM,
             "/data/app.db",
             "read",
-            act_audit::Decision4::Allow,
+            crate::audit::Decision4::Allow,
             "allowlist",
             Some("/data/**".into()),
         );
@@ -926,36 +926,36 @@ mod tests {
         assert_eq!(allow.rule.as_deref(), Some("/data/**"));
         assert!(allow.reason.is_none());
 
-        let deny = act_audit::CapDecisionRecord::statik(
+        let deny = crate::audit::CapDecisionRecord::statik(
             act_types::constants::CAP_FILESYSTEM,
             "/etc/passwd",
             "read",
-            act_audit::Decision4::Deny,
+            crate::audit::Decision4::Deny,
             "allowlist",
             None,
         );
         assert_eq!(deny.reason.as_deref(), Some("outside ceiling"));
-        assert_eq!(deny.actor, act_audit::Actor::Static);
+        assert_eq!(deny.actor, crate::audit::Actor::Static);
     }
 
     #[test]
     fn ask_resolution_attributes_the_decision_to_the_user() {
-        let r = act_audit::CapDecisionRecord::answered(
+        let r = crate::audit::CapDecisionRecord::answered(
             act_types::constants::CAP_FILESYSTEM,
             "/home/u/.ssh/id_ed25519",
             false,
         );
-        assert_eq!(r.decision, act_audit::Decision4::AskDeny);
-        assert_eq!(r.actor, act_audit::Actor::User);
+        assert_eq!(r.decision, crate::audit::Decision4::AskDeny);
+        assert_eq!(r.actor, crate::audit::Actor::User);
         assert_eq!(r.reason.as_deref(), Some("denied by user"));
 
-        let r = act_audit::CapDecisionRecord::answered(
+        let r = crate::audit::CapDecisionRecord::answered(
             act_types::constants::CAP_FILESYSTEM,
             "/home/u/notes.txt",
             true,
         );
-        assert_eq!(r.decision, act_audit::Decision4::AskAllow);
-        assert_eq!(r.actor, act_audit::Actor::User);
+        assert_eq!(r.decision, crate::audit::Decision4::AskAllow);
+        assert_eq!(r.actor, crate::audit::Actor::User);
     }
 }
 

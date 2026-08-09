@@ -5,7 +5,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
-use crate::record::{CapDecisionRecord, Decision4};
+use crate::audit::record::{CapDecisionRecord, Decision4};
 
 const PREFIX: &str = "audit: ";
 
@@ -333,7 +333,7 @@ pub fn render_rollup(span: &SpanFields, roll: &Rollup) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::record::*;
+    use crate::audit::record::*;
 
     fn span_fields() -> SpanFields {
         SpanFields {

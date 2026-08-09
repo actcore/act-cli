@@ -1,3 +1,4 @@
+mod audit;
 mod config;
 mod format;
 mod http;
@@ -270,14 +271,14 @@ enum InspectCommand {
 /// audit-line forgery hole `act-audit` already closed. `act::guest` is
 /// excluded for the same reason even though nothing emits on it yet — it is
 /// reserved for untrusted guest-authored telemetry (`wasi:otel`, deferred
-/// — see `act_audit::TARGET_GUEST`)
+/// — see `crate::audit::TARGET_GUEST`)
 /// that must never be rendered as though the host authored it.
 fn fmt_filter<S>(
     env_filter: tracing_subscriber::EnvFilter,
 ) -> impl tracing_subscriber::layer::Filter<S> {
     use tracing_subscriber::filter::{FilterExt, filter_fn};
     env_filter.and(filter_fn(|meta: &tracing::Metadata<'_>| {
-        meta.target() != act_audit::TARGET_AUDIT && meta.target() != act_audit::TARGET_GUEST
+        meta.target() != crate::audit::TARGET_AUDIT && meta.target() != crate::audit::TARGET_GUEST
     }))
 }
 
@@ -339,9 +340,9 @@ async fn main() -> Result<()> {
 
     // Audit detail: -v widens it, config can preset it.
     let audit_detail = if cli.verbose > 0 || audit_cfg_detail.as_deref() == Some("full") {
-        act_audit::Detail::Full
+        crate::audit::Detail::Full
     } else {
-        act_audit::Detail::Rollup
+        crate::audit::Detail::Rollup
     };
 
     let fmt_layer = tracing_subscriber::fmt::layer()
@@ -352,9 +353,9 @@ async fn main() -> Result<()> {
     // This is what makes the trail unreachable from RUST_LOG / -v / log-level:
     // those only ever configure `env_filter` above.
     let audit_layer = audit_enabled.then(|| {
-        act_audit::AuditLayer::stderr(audit_detail).with_filter(
+        crate::audit::AuditLayer::stderr(audit_detail).with_filter(
             tracing_subscriber::filter::Targets::new().with_target(
-                act_audit::TARGET_AUDIT,
+                crate::audit::TARGET_AUDIT,
                 tracing::level_filters::LevelFilter::INFO,
             ),
         )
@@ -591,7 +592,7 @@ async fn prepare_component(
     opts: &CommonOpts,
     prompter: Arc<dyn act_policy::consent::ConsentPrompter>,
     has_prompt_channel: bool,
-    transport: act_audit::Transport,
+    transport: crate::audit::Transport,
 ) -> Result<PreparedComponent> {
     prepare_component_with_consent(
         component,
@@ -613,7 +614,7 @@ async fn prepare_component_with_consent(
     prompter: Arc<dyn act_policy::consent::ConsentPrompter>,
     has_prompt_channel: bool,
     current_consent: Arc<runtime::elicit::CurrentConsentSink>,
-    transport: act_audit::Transport,
+    transport: crate::audit::Transport,
 ) -> Result<PreparedComponent> {
     let resolved = resolve_opts(opts)?;
 
@@ -754,7 +755,7 @@ async fn cmd_run(
             prompter,
             true,
             current_consent,
-            act_audit::Transport::Mcp,
+            crate::audit::Transport::Mcp,
         )
         .await?;
         let default_session_id = maybe_open_default_session(&pc, &session_args).await?;
@@ -786,7 +787,7 @@ async fn cmd_run(
             prompter,
             true,
             current_consent,
-            act_audit::Transport::Mcp,
+            crate::audit::Transport::Mcp,
         )
         .await?;
         let default_session_id = maybe_open_default_session(&pc, &session_args).await?;
@@ -815,7 +816,7 @@ async fn cmd_run(
             &opts,
             prompter,
             false,
-            act_audit::Transport::Http,
+            crate::audit::Transport::Http,
         )
         .await?;
         let default_session_id = maybe_open_default_session(&pc, &session_args).await?;
@@ -854,7 +855,7 @@ async fn cmd_call(
         &opts,
         prompter,
         has_prompt_channel,
-        act_audit::Transport::Cli,
+        crate::audit::Transport::Cli,
     )
     .await?;
 
@@ -1028,7 +1029,7 @@ async fn cmd_session_open_args_schema(component: ComponentRef, opts: CommonOpts)
         &opts,
         prompter,
         has_prompt_channel,
-        act_audit::Transport::Cli,
+        crate::audit::Transport::Cli,
     )
     .await?;
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
@@ -1090,7 +1091,7 @@ async fn cmd_inspect_tools(
         &opts,
         prompter,
         has_prompt_channel,
-        act_audit::Transport::Cli,
+        crate::audit::Transport::Cli,
     )
     .await?;
 
@@ -1142,7 +1143,7 @@ async fn cmd_info(
             &opts,
             prompter,
             has_prompt_channel,
-            act_audit::Transport::Cli,
+            crate::audit::Transport::Cli,
         )
         .await?;
 
@@ -1527,8 +1528,8 @@ mod tests {
         let sub = tracing_subscriber::registry().with(cap.with_filter(fmt_filter(env_filter)));
 
         tracing::subscriber::with_default(sub, || {
-            tracing::info!(target: act_audit::TARGET_AUDIT, "audit event");
-            tracing::info!(target: act_audit::TARGET_GUEST, "guest event");
+            tracing::info!(target: crate::audit::TARGET_AUDIT, "audit event");
+            tracing::info!(target: crate::audit::TARGET_GUEST, "guest event");
             tracing::info!(target: "act::runtime", "ordinary event");
         });
 

@@ -30,7 +30,7 @@ use act_policy::Decision;
 use act_policy::consent::{ConsentAsk, ConsentPrompter, DecisionCache};
 use act_policy::provider::{CompiledCeiling, ResourceOp};
 
-use act_audit::{CapDecisionRecord, Decision4, emit_cap_decision};
+use crate::audit::{CapDecisionRecord, Decision4, emit_cap_decision};
 
 type P2ErrorCode = wasmtime_wasi_http::p2::bindings::http::types::ErrorCode;
 type P3ErrorCode = wasmtime_wasi_http::p3::bindings::http::types::ErrorCode;
@@ -498,11 +498,11 @@ mod tests {
 
     #[test]
     fn http_key_is_host_colon_port_and_action_is_the_method() {
-        let r = act_audit::CapDecisionRecord::statik(
+        let r = crate::audit::CapDecisionRecord::statik(
             act_types::constants::CAP_HTTP,
             "api.example.com:443",
             "GET",
-            act_audit::Decision4::Deny,
+            crate::audit::Decision4::Deny,
             "ask",
             None,
         );
@@ -514,11 +514,11 @@ mod tests {
     #[test]
     fn a_missing_http_method_becomes_an_empty_action() {
         // `decide_uri` takes Option<&str>; the record must not invent a verb.
-        let r = act_audit::CapDecisionRecord::statik(
+        let r = crate::audit::CapDecisionRecord::statik(
             act_types::constants::CAP_HTTP,
             "api.example.com:443",
             "",
-            act_audit::Decision4::Allow,
+            crate::audit::Decision4::Allow,
             "allowlist",
             Some("*.example.com".into()),
         );
@@ -546,7 +546,7 @@ mod tests {
     /// runs the real binary against `ask-canary`, which is p3-only.
     #[tokio::test(flavor = "current_thread")]
     async fn p2_ask_arm_resolves_and_audits_the_denial() {
-        use act_audit::AuditWriter;
+        use crate::audit::AuditWriter;
         use http_body_util::{BodyExt, Empty};
         use std::sync::Mutex;
         use tracing_subscriber::prelude::*;
@@ -609,9 +609,9 @@ mod tests {
 
         let writer = CapturingWriter::default();
         let sink = writer.0.clone();
-        let sub = tracing_subscriber::registry().with(act_audit::AuditLayer::new(
+        let sub = tracing_subscriber::registry().with(crate::audit::AuditLayer::new(
             writer,
-            act_audit::Detail::Rollup,
+            crate::audit::Detail::Rollup,
         ));
         // A guard, not `with_default`'s closure form: the audit emission
         // happens inside a task spawned via `wasmtime_wasi::runtime::spawn`,

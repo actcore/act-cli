@@ -31,8 +31,8 @@ use wasmtime_wasi_http::p2::bindings::http::types::ErrorCode as P2ErrorCode;
 use wasmtime_wasi_http::p2::body::HyperIncomingBody;
 use wasmtime_wasi_http::p3::bindings::http::types::ErrorCode as P3ErrorCode;
 
+use crate::audit::{CapDecisionRecord, Decision4, emit_cap_decision};
 use crate::config::{HttpConfig, PolicyMode};
-use act_audit::{CapDecisionRecord, Decision4, emit_cap_decision};
 use act_policy::net::{self as network, NetworkRule};
 
 /// reqwest DNS resolver that filters resolved addresses against both deny
@@ -906,13 +906,13 @@ mod tests {
         assert_eq!(incoming.resp.status().as_u16(), 200);
     }
 
-    /// A capturing `AuditWriter`, local to this module — `act_audit`'s own
+    /// A capturing `AuditWriter`, local to this module — `crate::audit`'s own
     /// `TestWriter` (in `layer::tests`) isn't exported, and the point here
     /// is to observe the real `AuditLayer` render a real emission, not to
-    /// re-test the layer itself (that's `act-audit`'s job).
+    /// re-test the layer itself (that's the audit module's job).
     #[derive(Clone, Default)]
     struct CapturingWriter(Arc<Mutex<Vec<String>>>);
-    impl act_audit::AuditWriter for CapturingWriter {
+    impl crate::audit::AuditWriter for CapturingWriter {
         fn write_line(&self, line: &str) {
             self.0.lock().unwrap().push(line.to_string());
         }
@@ -981,9 +981,9 @@ mod tests {
 
         let writer = CapturingWriter::default();
         let sink = writer.0.clone();
-        let sub = tracing_subscriber::registry().with(act_audit::AuditLayer::new(
+        let sub = tracing_subscriber::registry().with(crate::audit::AuditLayer::new(
             writer,
-            act_audit::Detail::Rollup,
+            crate::audit::Detail::Rollup,
         ));
         let _guard = tracing::subscriber::set_default(sub);
 
@@ -1072,9 +1072,9 @@ mod tests {
 
         let writer = CapturingWriter::default();
         let sink = writer.0.clone();
-        let sub = tracing_subscriber::registry().with(act_audit::AuditLayer::new(
+        let sub = tracing_subscriber::registry().with(crate::audit::AuditLayer::new(
             writer,
-            act_audit::Detail::Rollup,
+            crate::audit::Detail::Rollup,
         ));
         let _guard = tracing::subscriber::set_default(sub);
 

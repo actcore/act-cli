@@ -3,15 +3,6 @@
 version = 4
 
 [[package]]
-name = "act-audit"
-version = "0.11.0"
-dependencies = [
- "sha2 0.11.0",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "act-build"
 version = "0.11.0"
 dependencies = [
@@ -48,7 +39,6 @@ dependencies = [
 name = "act-cli"
 version = "0.11.0"
 dependencies = [
- "act-audit",
  "act-policy",
  "act-store",
  "act-types",
