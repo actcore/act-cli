@@ -7,6 +7,11 @@ description = "wasm-bindgen wrapper exposing the act-policy PDP to the browser r
 repository = "https://github.com/actcore/act-cli"
 keywords = ["act", "capability", "policy", "wasm", "security"]
 
+# Not a library for external consumers: this is the wasm-bindgen wrapper that
+# gets compiled into the browser runtime bundle. Nothing depends on it from
+# crates.io, so it stays out of the registry.
+publish = false
+
 [lib]
 crate-type = ["cdylib", "rlib"]
 
