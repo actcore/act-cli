@@ -10,32 +10,172 @@ fn act_bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_act"))
 }
 
+/// Shared setup for the log-level-survival tests below: a temp file the
+/// grant actually covers, so the `read` call succeeds and a rollup line is
+/// guaranteed to fire (`check_path_sync`'s `Allow` arm) — a deterministic
+/// "audit: " occurrence to look for, rather than depending on a denial some
+/// future policy change could reroute differently.
+struct FsReadFixture {
+    _dir: tempfile::TempDir,
+    fixture: std::path::PathBuf,
+    target: std::path::PathBuf,
+    grant: String,
+}
+
+fn fs_read_fixture() -> FsReadFixture {
+    let fixture =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fs-canary.wasm");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let target = dir.path().join("ok.txt");
+    std::fs::write(&target, "content").expect("write fixture file");
+    let rule = format!("{}/**", dir.path().display());
+    let grant = format!(
+        r#"{{"wasi:filesystem":{{"mode":"allowlist","allow":[{{"path":"{rule}","mode":"rw"}}]}}}}"#
+    );
+    FsReadFixture {
+        _dir: dir,
+        fixture,
+        target,
+        grant,
+    }
+}
+
+impl FsReadFixture {
+    fn command(&self) -> Command {
+        let mut cmd = act_bin();
+        cmd.args([
+            "call",
+            self.fixture.to_str().expect("fixture path is utf-8"),
+            "read",
+            "--args",
+            &format!(r#"{{"path":"{}"}}"#, self.target.display()),
+            "--grant",
+            &self.grant,
+        ]);
+        cmd
+    }
+}
+
+/// `main.rs`'s `fmt_filter` carves the audit target out of whatever
+/// `env_filter` `RUST_LOG` builds, so a directive that would normally
+/// silence `act` entirely must still let the audit layer through — it is
+/// pinned to its own `Targets` filter, wired independently in `main.rs`.
 #[test]
-fn audit_flags_are_recognised() {
-    let out = act_bin()
-        .args(["call", "--help"])
+fn trail_survives_rust_log_off() {
+    let fx = fs_read_fixture();
+    let out = fx
+        .command()
+        .env("RUST_LOG", "off")
         .output()
         .expect("ran act");
-    let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("--no-audit"), "missing --no-audit in: {text}");
+    assert!(out.status.success(), "granted read must succeed: {out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        text.contains("--audit-args"),
-        "missing --audit-args in: {text}"
+        stderr.contains("audit: "),
+        "RUST_LOG=off must not silence the audit trail, got: {stderr}"
     );
 }
 
+/// Same guarantee, for a directive that raises the bar rather than turning
+/// logging off outright — `act=warn` would suppress `fmt`'s own `info!`
+/// output, but must not touch the audit layer's independent filter.
 #[test]
-fn rust_log_off_does_not_disable_the_audit_layer() {
-    // The trail must not be silenceable through log-level configuration.
-    // A missing component fails before instantiation, so we assert on the
-    // flag surface rather than on emitted records; record-level coverage
-    // lives in the component-backed test below.
-    let out = act_bin()
-        .env("RUST_LOG", "off")
-        .args(["call", "--help"])
+fn trail_survives_rust_log_act_warn() {
+    let fx = fs_read_fixture();
+    let out = fx
+        .command()
+        .env("RUST_LOG", "act=warn")
         .output()
         .expect("ran act");
-    assert!(out.status.success());
+    assert!(out.status.success(), "granted read must succeed: {out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("audit: "),
+        "RUST_LOG=act=warn must not silence the audit trail, got: {stderr}"
+    );
+}
+
+/// The third log-level knob: config `log-level`, which only ever feeds
+/// `env_filter`'s fallback branch (no `RUST_LOG`, no `-v`) the same way
+/// `RUST_LOG` and `-v` do — it must not reach the audit layer either.
+#[test]
+fn trail_survives_config_log_level_error() {
+    let fx = fs_read_fixture();
+    let config_dir = tempfile::TempDir::new().expect("tempdir");
+    let config_path = config_dir.path().join("config.toml");
+    std::fs::write(&config_path, "log-level = \"error\"\n").expect("write config file");
+
+    let out = fx
+        .command()
+        .args(["--config", config_path.to_str().expect("utf-8 path")])
+        .output()
+        .expect("ran act");
+    assert!(out.status.success(), "granted read must succeed: {out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("audit: "),
+        "config log-level = \"error\" must not silence the audit trail, got: {stderr}"
+    );
+}
+
+/// The other side of the same guarantee: none of the three knobs above
+/// disable the trail, but `--no-audit` must. Without this half, the three
+/// tests above could all be passing for the wrong reason — e.g. an audit
+/// layer that always fires regardless of any flag at all, `--no-audit`
+/// included, which would defeat the whole point of the flag.
+#[test]
+fn no_audit_is_the_only_flag_that_disables_the_trail() {
+    let fx = fs_read_fixture();
+
+    let out = fx.command().output().expect("ran act");
+    assert!(out.status.success(), "granted read must succeed: {out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("audit: "),
+        "the trail must be on by default, got: {stderr}"
+    );
+
+    let out = fx.command().arg("--no-audit").output().expect("ran act");
+    assert!(out.status.success(), "granted read must succeed: {out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("audit: "),
+        "--no-audit must silence the trail, got: {stderr}"
+    );
+}
+
+/// Regression guard for `act inspect tools`: `InspectCommand::Tools` carries
+/// `CommonOpts` (clap accepts `--no-audit` on it), but the option-extraction
+/// match in `main.rs` used to fall through the catch-all `Command::Inspect(_)`
+/// arm and never read it, so the flag was silently ignored — the
+/// instantiation header still printed. `act info --tools --no-audit`, the
+/// closest sibling command, already suppressed it correctly; this test pins
+/// `inspect tools` to the same behaviour.
+#[test]
+fn inspect_tools_no_audit_actually_silences_the_trail() {
+    let fixture =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fs-canary.wasm");
+
+    let out = act_bin()
+        .args([
+            "inspect",
+            "tools",
+            fixture.to_str().expect("fixture path is utf-8"),
+            "--no-audit",
+        ])
+        .output()
+        .expect("ran act");
+    assert!(out.status.success(), "inspect tools must succeed: {out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.trim().is_empty(),
+        "--no-audit must silence inspect tools too, got: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("\"tools\""),
+        "tool listing must still print on stdout, got: {stdout}"
+    );
 }
 
 /// `call-tool` never returns `result<tool-result, error>` — a guest failure
