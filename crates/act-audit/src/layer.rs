@@ -113,6 +113,10 @@ impl Visit for SpanVisitor {
             n if n == attr::COMPONENT_DIGEST => self.0.digest = v.to_string(),
             n if n == attr::TOOL_NAME => self.0.tool = v.to_string(),
             n if n == attr::TOOL_ARGS_SHA256 => self.0.args_sha256 = v.to_string(),
+            // AGENT_ID, TRACE_PARENT and TRACE_STATE are captured onto the
+            // span but stay unrendered by design; only REQUEST_ID reaches a
+            // line, so an operator can join it back to a client log line.
+            n if n == attr::REQUEST_ID => self.0.request_id = v.to_string(),
             n if n == attr::TRANSPORT => self.0.transport = v.to_string(),
             n if n == attr::OUTCOME => self.0.outcome = v.to_string(),
             n if n == attr::SESSION_ID && !v.is_empty() => {
@@ -129,10 +133,12 @@ impl Visit for SpanVisitor {
     }
 
     fn record_debug(&mut self, f: &Field, v: &dyn std::fmt::Debug) {
-        // `%value` fields arrive as Display-formatted debug output in some
-        // tracing versions; normalise by stripping surrounding quotes.
+        // Every field here is recorded with `%value` (Display), which
+        // tracing routes through `record_debug` with a wrapper whose `Debug`
+        // impl just forwards to `Display` — so `{v:?}` is already the plain,
+        // unquoted value. Do not strip quotes here: a guest-chosen value may
+        // legitimately start or end with one, and trimming it corrupts data.
         let s = format!("{v:?}");
-        let s = s.trim_matches('"').to_string();
         self.record_str(f, &s);
     }
 }
@@ -166,8 +172,9 @@ impl Visit for EventVisitor {
     }
 
     fn record_debug(&mut self, f: &Field, v: &dyn std::fmt::Debug) {
+        // See the identical comment on `SpanVisitor::record_debug`: these
+        // fields all arrive as `%value` and are already unquoted.
         let s = format!("{v:?}");
-        let s = s.trim_matches('"').to_string();
         self.record_str(f, &s);
     }
 }
@@ -250,12 +257,15 @@ where
             self.emit(|| render_exception(&record));
         }
         if !record.decision.is_exception() {
-            // Fold into the enclosing tool-call span, if there is one. A
-            // decision fired outside any call (instantiation) has nowhere to
-            // roll up, so it is printed instead of dropped.
-            let folded = ctx.event_span(event).is_some_and(|span| {
-                let mut ext = span.extensions_mut();
-                match ext.get_mut::<SpanState>() {
+            // Fold into the nearest enclosing tool-call span, if there is
+            // one. `SpanState` is installed only on TARGET_AUDIT spans, so a
+            // plain (non-audit) span nested between the event and the tool
+            // call would make a direct parent lookup miss it — walk the
+            // whole scope instead of just the immediate parent. A decision
+            // fired outside any call (instantiation) has nowhere to roll up,
+            // so it is printed instead of dropped.
+            let folded = ctx.event_scope(event).is_some_and(|mut scope| {
+                scope.any(|span| match span.extensions_mut().get_mut::<SpanState>() {
                     Some(state) => {
                         state
                             .rollup
@@ -263,8 +273,12 @@ where
                         true
                     }
                     None => false,
-                }
+                })
             });
+            // Carries the instantiation-time guarantee: an allow with
+            // nowhere to fold (no enclosing tool-call span) would otherwise
+            // be silently dropped under Detail::Rollup. Detail::Full already
+            // printed it above, so this only fires under Detail::Rollup.
             if !folded && self.detail != Detail::Full {
                 self.emit(|| render_exception(&record));
             }
@@ -361,6 +375,33 @@ mod tests {
         assert_eq!(out.len(), 1, "expected a single rollup line, got {out:?}");
         assert!(out[0].contains("12 read"), "got {}", out[0]);
         assert!(out[0].contains("run_python"));
+        // Pins that on_record actually landed the values finish_tool_call
+        // recorded, not just that some line got printed.
+        assert!(out[0].contains("ok"), "outcome missing, got {}", out[0]);
+        assert!(
+            out[0].contains("1.4s"),
+            "humanised duration missing, got {}",
+            out[0]
+        );
+    }
+
+    #[test]
+    fn an_allow_inside_a_non_audit_span_still_folds_into_the_enclosing_tool_call() {
+        // SpanState lives only on TARGET_AUDIT spans. A plain span nested
+        // between the event and the tool call must not break the fold — the
+        // host will instrument exactly this region in a later task.
+        let out = run(|| {
+            let span = tool_call_span(&start());
+            let _g = span.enter();
+            {
+                let inner = tracing::info_span!("some.other.span");
+                let _inner_g = inner.enter();
+                emit_cap_decision(&allow("read", "/data/**"));
+            }
+            finish_tool_call(&span, Outcome::Ok, Duration::from_millis(10));
+        });
+        assert_eq!(out.len(), 1, "expected a single rollup line, got {out:?}");
+        assert!(out[0].contains("1 read"), "got {}", out[0]);
     }
 
     #[test]
@@ -395,6 +436,12 @@ mod tests {
         });
         let out = sink.0.lock().unwrap().clone();
         assert_eq!(out.len(), 4, "3 ops + 1 rollup, got {out:?}");
+        // Three individual operations, each naming the capability, then the
+        // rollup — not e.g. three rollups plus one exception.
+        for line in &out[..3] {
+            assert!(line.contains("wasi:filesystem"), "got {out:?}");
+        }
+        assert!(out[3].contains("run_python"), "got {out:?}");
     }
 
     #[test]
@@ -404,6 +451,81 @@ mod tests {
         let out = run(|| emit_cap_decision(&deny()));
         assert_eq!(out.len(), 1, "got {out:?}");
         assert!(out[0].contains("deny"));
+    }
+
+    #[test]
+    fn an_allow_outside_any_tool_call_still_reaches_the_operator() {
+        // Same scenario as the deny case above, but for an allow: with no
+        // enclosing tool-call span there is nowhere to fold it, so it must
+        // print immediately rather than being silently dropped.
+        let out = run(|| emit_cap_decision(&allow("read", "/data/**")));
+        assert_eq!(out.len(), 1, "got {out:?}");
+        assert!(out[0].contains("wasi:filesystem"), "got {out:?}");
+    }
+
+    #[test]
+    fn ask_allow_and_ask_deny_decode_correctly() {
+        // `EventVisitor::into_record` matches "ask-allow" / "ask-deny" by
+        // string; a typo in either arm would delete every ask outcome from
+        // the trail with no test failing. `answered` also attributes both to
+        // Actor::User, exercising that decode arm too.
+        let out = run(|| {
+            emit_cap_decision(&CapDecisionRecord::answered(
+                "wasi:filesystem",
+                "/data/x",
+                true,
+            ));
+            emit_cap_decision(&CapDecisionRecord::answered(
+                "wasi:http",
+                "evil.example.com",
+                false,
+            ));
+        });
+        assert_eq!(out.len(), 2, "got {out:?}");
+        assert!(out[0].contains("ask-allow"), "got {out:?}");
+        assert!(out[1].contains("ask-deny"), "got {out:?}");
+    }
+
+    #[test]
+    fn a_quote_bearing_resource_key_survives_rendering_intact() {
+        // `%value` fields route through `record_debug`, whose `Debug` output
+        // is already the unquoted Display form. A prior `trim_matches('"')`
+        // there stripped real leading/trailing quote characters out of
+        // guest-controlled data instead of normalising anything.
+        let out = run(|| {
+            emit_cap_decision(&CapDecisionRecord {
+                cap_id: "wasi:filesystem".into(),
+                key: "\"payload\".json".into(),
+                action: "read".into(),
+                decision: Decision4::Deny,
+                mode: "ask".into(),
+                actor: Actor::Static,
+                reason: Some("outside ceiling".into()),
+                rule: None,
+            });
+        });
+        assert_eq!(out.len(), 1, "got {out:?}");
+        assert!(
+            out[0].contains("\"payload\".json"),
+            "quotes must survive intact, got {}",
+            out[0]
+        );
+    }
+
+    #[test]
+    fn a_call_that_never_finishes_renders_as_incomplete() {
+        // A span created and entered but closed without finish_tool_call
+        // ever being called (early return, or dropped) is exactly the case
+        // an auditor cares about — it must not render as if outcome "" and
+        // duration_ms 0 were a real completed call.
+        let out = run(|| {
+            let span = tool_call_span(&start());
+            let _g = span.enter();
+            emit_cap_decision(&allow("read", "/data/**"));
+            // Deliberately never call finish_tool_call.
+        });
+        assert_eq!(out.len(), 1, "got {out:?}");
+        assert!(out[0].contains("incomplete"), "got {}", out[0]);
     }
 
     #[test]

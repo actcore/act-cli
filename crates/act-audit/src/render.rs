@@ -5,13 +5,13 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
-use crate::record::CapDecisionRecord;
+use crate::record::{CapDecisionRecord, Decision4};
 
 const PREFIX: &str = "audit: ";
 
 /// The envelope-span fields the layer captures at span open and completes at
 /// span close.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct SpanFields {
     pub component_ref: String,
     pub digest: String,
@@ -19,8 +19,31 @@ pub struct SpanFields {
     pub args_sha256: String,
     pub session_id: Option<String>,
     pub transport: String,
+    /// Defaults to `"incomplete"`, never empty: a span that closes without
+    /// `finish_tool_call` ever recording an outcome (dropped early, never
+    /// entered) must not render as if the call had actually completed.
     pub outcome: String,
     pub duration_ms: u64,
+    /// `std:request-id`, or a host-generated id. Rendered truncated and
+    /// escaped — it is the only way an operator can join one audit line
+    /// back to a client log line.
+    pub request_id: String,
+}
+
+impl Default for SpanFields {
+    fn default() -> Self {
+        Self {
+            component_ref: String::new(),
+            digest: String::new(),
+            tool: String::new(),
+            args_sha256: String::new(),
+            session_id: None,
+            transport: String::new(),
+            outcome: "incomplete".to_string(),
+            duration_ms: 0,
+            request_id: String::new(),
+        }
+    }
 }
 
 /// Accumulated allows for one tool call, grouped by `(cap_id, action, rule)`.
@@ -138,12 +161,14 @@ pub fn render_header(component_ref: &str, digest: &str, modes: &[(String, String
     )
 }
 
-/// A denial or an ask — printed the moment it resolves, never batched.
+/// A denial or an ask — printed the moment it resolves, never batched. Also
+/// reused (from the layer) for an allow that has nowhere to fold, e.g. one
+/// fired at instantiation time, before any tool-call span exists.
 pub fn render_exception(r: &CapDecisionRecord) -> String {
-    let marker = if r.decision == crate::Decision4::Deny {
-        "\u{2717}"
-    } else {
-        "?"
+    let marker = match r.decision {
+        Decision4::Deny => "\u{2717}",
+        Decision4::Allow => "\u{2713}",
+        Decision4::AskAllow | Decision4::AskDeny => "?",
     };
     let action_escaped = escape_audit_field(&r.action);
     let key_escaped = escape_audit_field(&r.key);
@@ -170,12 +195,17 @@ pub fn render_exception(r: &CapDecisionRecord) -> String {
 /// The per-call summary, flushed when the envelope span closes.
 pub fn render_rollup(span: &SpanFields, roll: &Rollup) -> String {
     let tool_escaped = escape_audit_field(&span.tool);
+    // Truncate the caller-supplied request id before escaping, same order as
+    // the session id below: `take_bytes` yields whole characters, whereas
+    // escaping first could cut an escape sequence in half.
+    let req_escaped = escape_audit_field(take_bytes(&span.request_id, 6));
     let mut line = format!(
-        "{PREFIX}\u{25cf} {}  {} {}  args:{}",
+        "{PREFIX}\u{25cf} {}  {} {}  args:{}  req:{}",
         tool_escaped,
         span.outcome,
         humanise_ms(span.duration_ms),
-        take_bytes(&span.args_sha256, 6)
+        take_bytes(&span.args_sha256, 6),
+        req_escaped,
     );
     if let Some(sid) = &span.session_id {
         let sid_trunc = take_bytes(sid, 8);
@@ -244,6 +274,7 @@ mod tests {
             transport: "cli".into(),
             outcome: "ok".into(),
             duration_ms: 1400,
+            request_id: "req-9f8e7d6c5b4a".into(),
         }
     }
 
@@ -310,6 +341,10 @@ mod tests {
         assert!(line.contains("2 write"));
         assert!(line.contains("/data/**"));
         assert!(line.contains("pypi.org"));
+        assert!(
+            line.contains("req:req-9f"),
+            "expected truncated request id, got {line}"
+        );
     }
 
     #[test]
@@ -574,6 +609,45 @@ mod tests {
         assert!(
             line.contains("\\n"),
             "expected escaped newline in component_ref, got {line}"
+        );
+    }
+
+    #[test]
+    fn render_exception_marks_allow_distinctly_from_ask() {
+        // An allow rendered by render_exception (e.g. one with nowhere to
+        // fold) must not be marked with "?", which means "a human was
+        // asked" — a statically-allowed operation is not that.
+        let r = CapDecisionRecord {
+            cap_id: "wasi:filesystem".into(),
+            key: "/data/x".into(),
+            action: "read".into(),
+            decision: Decision4::Allow,
+            mode: "allowlist".into(),
+            actor: Actor::Static,
+            reason: None,
+            rule: Some("/data/**".into()),
+        };
+        let line = render_exception(&r);
+        assert!(
+            !line.starts_with("audit: ? "),
+            "allow must not render the ask marker, got {line}"
+        );
+        assert!(line.contains("allow"), "got {line}");
+    }
+
+    #[test]
+    fn render_escapes_control_character_in_request_id() {
+        // The request id is caller-supplied and outside our control, same as
+        // the session id.
+        let mut sf = span_fields();
+        sf.request_id = "req\naudit: forged".to_string();
+        let roll = Rollup::new(64);
+
+        let line = render_rollup(&sf, &roll);
+        assert_eq!(line.matches('\n').count(), 0, "got {line}");
+        assert!(
+            line.contains("\\n"),
+            "expected escaped newline in request id, got {line}"
         );
     }
 }
