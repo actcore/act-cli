@@ -67,9 +67,12 @@ fn a_guest_tool_error_is_audited_as_tool_error_not_ok() {
         .expect("ran act");
 
     let stderr = String::from_utf8_lossy(&out.stderr);
+    // The instantiation header (Task 10) also starts with "audit: ", now the
+    // first line in this stream — match the rollup marker specifically, same
+    // as every other test below that looks for the per-call summary line.
     let audit_line = stderr
         .lines()
-        .find(|l| l.starts_with("audit: "))
+        .find(|l| l.starts_with("audit: \u{25cf}"))
         .unwrap_or_else(|| panic!("no audit rollup line in stderr: {stderr}"));
     assert!(
         audit_line.contains("tool-error"),
@@ -366,6 +369,117 @@ fn http_ask_resolution_reaches_the_audit_trail() {
     assert!(
         ask_line.contains("denied by user"),
         "ask-deny line must carry the reason, got: {ask_line}"
+    );
+}
+
+/// The instantiation header (`instantiate_component`, Task 10): what is
+/// running and under what modes, rendered from `act_audit::instantiation_span`
+/// and `emit_ceiling_class` before the tool-call span for the first call even
+/// opens. Reuses `fs-canary` (declares `wasi:filesystem`) under a scoped
+/// grant so the header's per-class clause has a real, non-deny mode to show.
+///
+/// Asserted as the very first stderr line (not just "present somewhere") —
+/// that is what proves it precedes the rollup line the same call also
+/// produces, and precedes the tool's own stdout content, which never reaches
+/// the guest until instantiation (and this header) has already completed.
+#[test]
+fn instantiation_header_precedes_any_tool_output() {
+    let fixture =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fs-canary.wasm");
+
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let target = dir.path().join("ok.txt");
+    std::fs::write(&target, "content").expect("write fixture file");
+    let rule = format!("{}/**", dir.path().display());
+    let grant = format!(
+        r#"{{"wasi:filesystem":{{"mode":"allowlist","allow":[{{"path":"{rule}","mode":"rw"}}]}}}}"#
+    );
+
+    let out = act_bin()
+        .args([
+            "call",
+            fixture.to_str().expect("fixture path is utf-8"),
+            "read",
+            "--args",
+            &format!(r#"{{"path":"{}"}}"#, target.display()),
+            "--grant",
+            &grant,
+        ])
+        .output()
+        .expect("ran act");
+    assert!(out.status.success(), "granted read must succeed: {out:?}");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let first_line = stderr
+        .lines()
+        .next()
+        .unwrap_or_else(|| panic!("no stderr output at all: {stderr}"));
+    assert!(
+        first_line.starts_with("audit: ") && first_line.contains("sha256:"),
+        "expected the instantiation header as the first stderr line, got: {stderr}"
+    );
+    assert!(
+        first_line.contains("wasi:filesystem=allowlist"),
+        "header must show the resolved mode for a declared class, got: {first_line}"
+    );
+
+    // The guest's own output belongs on stdout, untouched by the audit trail.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout.trim_end(),
+        "content",
+        "tool content must land on stdout only"
+    );
+    assert!(
+        !stdout.contains("audit: "),
+        "no audit line may leak onto stdout, got: {stdout}"
+    );
+}
+
+/// Complements the test above: a declared capability that resolves to `deny`
+/// (here, explicitly via `--deny`, not just "never declared") must produce a
+/// second stderr line — right after the header — naming it as declared but
+/// not granted. `layer.rs`'s unit tests already cover the render_header /
+/// warning-line logic directly; this is the one test that would notice if
+/// `instantiate_component` stopped calling `emit_ceiling_class` with a real
+/// `declared` value at all.
+#[test]
+fn instantiation_header_warns_when_a_declared_capability_is_denied() {
+    let fixture =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fs-canary.wasm");
+
+    let out = act_bin()
+        .args([
+            "call",
+            fixture.to_str().expect("fixture path is utf-8"),
+            "read",
+            "--args",
+            r#"{"path":"/nonexistent"}"#,
+            "--deny",
+            "wasi:filesystem",
+        ])
+        .output()
+        .expect("ran act");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let mut lines = stderr.lines();
+    let header = lines
+        .next()
+        .unwrap_or_else(|| panic!("no stderr output at all: {stderr}"));
+    assert!(
+        header.starts_with("audit: ") && header.contains("wasi:filesystem=deny"),
+        "expected the header with filesystem denied first, got: {stderr}"
+    );
+    let warning = lines
+        .next()
+        .unwrap_or_else(|| panic!("no second stderr line (warning) after header: {stderr}"));
+    assert!(
+        warning.starts_with("audit: ") && warning.contains("not granted"),
+        "expected the declared-but-ungranted warning right after the header, got: {warning}"
+    );
+    assert!(
+        warning.contains("wasi:filesystem"),
+        "warning must name the ungranted class, got: {warning}"
     );
 }
 

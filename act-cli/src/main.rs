@@ -627,6 +627,14 @@ async fn prepare_component_with_consent(
     let engine = runtime::create_engine()?;
     let (wasm, digest) = runtime::load_component(&engine, &component_path)?;
     let linker = runtime::create_linker(&engine)?;
+    // Built before instantiation (rather than after, as before) so
+    // `instantiate_component` can thread it into the instantiation audit
+    // header without reconstructing component_ref/digest a second time.
+    let audit = runtime::AuditContext {
+        component_ref: component.to_string(),
+        digest,
+        transport,
+    };
     let (instance, session_provider, store) = runtime::instantiate_component(
         &engine,
         &wasm,
@@ -637,14 +645,10 @@ async fn prepare_component_with_consent(
         max_memory,
         prompter,
         cache,
+        &audit,
     )
     .await?;
     let has_sessions = session_provider.is_some();
-    let audit = runtime::AuditContext {
-        component_ref: component.to_string(),
-        digest,
-        transport,
-    };
     let handle =
         runtime::spawn_component_actor(instance, session_provider, store, current_consent, audit);
 

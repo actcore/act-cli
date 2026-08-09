@@ -18,8 +18,16 @@ use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
 
 use crate::TARGET_AUDIT;
-use crate::record::{Actor, CapDecisionRecord, Decision4, attr};
-use crate::render::{Rollup, SpanFields, render_exception, render_rollup};
+use crate::record::{Actor, CapDecisionRecord, CeilingClassRecord, Decision4, attr};
+use crate::render::{
+    Rollup, SpanFields, render_declared_ungranted_warning, render_exception, render_header,
+    render_rollup,
+};
+
+/// Name of the tool-call envelope span, set by `emit::tool_call_span`.
+const SPAN_TOOL_CALL: &str = "act.tool_call";
+/// Name of the instantiation envelope span, set by `emit::instantiation_span`.
+const SPAN_INSTANTIATION: &str = "act.instantiation";
 
 /// Default cap on distinct rollup groups per tool call. Chosen to comfortably
 /// cover a well-behaved component; past it, new groups collapse into a count.
@@ -143,7 +151,10 @@ impl Visit for SpanVisitor {
     }
 }
 
-/// Collects one capability-decision event back into a record.
+/// Collects one capability-decision event — or one ceiling-class event, from
+/// an instantiation span — back into a record. The two share a visitor
+/// because both carry `act.capability.id`; `into_record` / the `declared`
+/// field is how the layer tells them apart (see `on_event`).
 #[derive(Default)]
 struct EventVisitor {
     cap_id: String,
@@ -154,6 +165,7 @@ struct EventVisitor {
     actor: String,
     reason: String,
     rule: String,
+    declared: bool,
 }
 
 impl Visit for EventVisitor {
@@ -168,6 +180,18 @@ impl Visit for EventVisitor {
             n if n == attr::POLICY_REASON => self.reason = v.to_string(),
             n if n == attr::POLICY_RULE => self.rule = v.to_string(),
             _ => {}
+        }
+    }
+
+    fn record_bool(&mut self, f: &Field, v: bool) {
+        // `act.capability.declared` is the only bool field this crate emits.
+        // Without this override, tracing's default `Visit::record_bool`
+        // routes a bool to `record_debug`, whose output ("true"/"false")
+        // doesn't match any `record_str` arm above — the field would be
+        // silently dropped and the declared-but-ungranted warning could
+        // never fire.
+        if f.name() == attr::CAPABILITY_DECLARED {
+            self.declared = v;
         }
     }
 
@@ -214,6 +238,15 @@ struct SpanState {
     rollup: Rollup,
 }
 
+/// Per-instantiation-span state: the envelope identity plus every capability
+/// class resolved for this component load, collected as `emit_ceiling_class`
+/// events arrive.
+struct InstantiationState {
+    component_ref: String,
+    digest: String,
+    classes: Vec<CeilingClassRecord>,
+}
+
 impl<S, W> Layer<S> for AuditLayer<W>
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
@@ -226,10 +259,28 @@ where
         let Some(span) = ctx.span(id) else { return };
         let mut v = SpanVisitor::default();
         attrs.record(&mut v);
-        span.extensions_mut().insert(SpanState {
-            fields: v.0,
-            rollup: Rollup::new(self.rollup_cap),
-        });
+        // Two envelope kinds share this target: a tool call gets the rollup
+        // state it always had; an instantiation gets a plain vec of ceiling
+        // classes. Branching on the span *name* (not just target) matters —
+        // every audit-target span used to get a tool-call `SpanState`
+        // unconditionally, which would make an instantiation span render as
+        // a bogus tool call once it started reaching this layer at all.
+        match attrs.metadata().name() {
+            SPAN_TOOL_CALL => {
+                span.extensions_mut().insert(SpanState {
+                    fields: v.0,
+                    rollup: Rollup::new(self.rollup_cap),
+                });
+            }
+            SPAN_INSTANTIATION => {
+                span.extensions_mut().insert(InstantiationState {
+                    component_ref: v.0.component_ref,
+                    digest: v.0.digest,
+                    classes: Vec::new(),
+                });
+            }
+            _ => {}
+        }
     }
 
     fn on_record(&self, id: &span::Id, values: &span::Record<'_>, ctx: Context<'_, S>) {
@@ -249,6 +300,33 @@ where
         }
         let mut v = EventVisitor::default();
         event.record(&mut v);
+
+        // A ceiling-class record (from `emit_ceiling_class`, inside an
+        // instantiation span) carries a capability id but no `act.decision`
+        // — a capability decision always carries both. That's the only
+        // signal available at this point to tell the two event shapes
+        // apart, so check it before falling through to `into_record`, which
+        // requires a decision and would otherwise just drop this event.
+        if !v.cap_id.is_empty() && v.decision.is_empty() {
+            let record = CeilingClassRecord {
+                cap_id: v.cap_id,
+                mode: v.mode,
+                declared: v.declared,
+            };
+            let _ = ctx.event_scope(event).is_some_and(|mut scope| {
+                scope.any(
+                    |span| match span.extensions_mut().get_mut::<InstantiationState>() {
+                        Some(state) => {
+                            state.classes.push(record.clone());
+                            true
+                        }
+                        None => false,
+                    },
+                )
+            });
+            return;
+        }
+
         let Some(record) = v.into_record() else {
             return;
         };
@@ -287,9 +365,36 @@ where
 
     fn on_close(&self, id: span::Id, ctx: Context<'_, S>) {
         let Some(span) = ctx.span(&id) else { return };
-        let state = span.extensions_mut().remove::<SpanState>();
-        let Some(state) = state else { return };
-        self.emit(|| render_rollup(&state.fields, &state.rollup));
+        let mut ext = span.extensions_mut();
+        if let Some(state) = ext.remove::<SpanState>() {
+            drop(ext);
+            self.emit(|| render_rollup(&state.fields, &state.rollup));
+            return;
+        }
+        let Some(state) = ext.remove::<InstantiationState>() else {
+            return;
+        };
+        drop(ext);
+        let modes: Vec<(String, String)> = state
+            .classes
+            .iter()
+            .map(|c| (c.cap_id.clone(), c.mode.clone()))
+            .collect();
+        self.emit(|| render_header(&state.component_ref, &state.digest, &modes));
+        // Only a class the component actually declared, that still resolved
+        // to deny, is worth a warning — every undeclared class also resolves
+        // to deny, and flagging all of those would bury the one signal an
+        // operator needs: a capability the component asked for that nothing
+        // granted.
+        let ungranted: Vec<String> = state
+            .classes
+            .iter()
+            .filter(|c| c.declared && c.mode == "deny")
+            .map(|c| c.cap_id.clone())
+            .collect();
+        if !ungranted.is_empty() {
+            self.emit(|| render_declared_ungranted_warning(&ungranted));
+        }
     }
 }
 
@@ -301,7 +406,9 @@ mod tests {
     use tracing_subscriber::prelude::*;
 
     use super::*;
-    use crate::emit::{emit_cap_decision, finish_tool_call, tool_call_span};
+    use crate::emit::{
+        emit_cap_decision, emit_ceiling_class, finish_tool_call, instantiation_span, tool_call_span,
+    };
     use crate::record::*;
 
     #[derive(Clone, Default)]
@@ -575,6 +682,64 @@ mod tests {
         let layer = AuditLayer::new(Silent, Detail::Rollup);
         layer.emit(|| panic!("render exploded"));
         // Reaching here without unwinding is the assertion.
+    }
+
+    #[test]
+    fn an_instantiation_span_renders_one_header_line() {
+        let out = run(|| {
+            let span = instantiation_span("python-eval@0.16.0", "1f3a9c4e");
+            let _g = span.enter();
+            emit_ceiling_class(&CeilingClassRecord {
+                cap_id: "wasi:filesystem".into(),
+                mode: "allowlist".into(),
+                declared: true,
+            });
+            emit_ceiling_class(&CeilingClassRecord {
+                cap_id: "wasi:http".into(),
+                mode: "ask".into(),
+                declared: true,
+            });
+        });
+        assert_eq!(out.len(), 1, "got {out:?}");
+        assert!(
+            out[0].contains("wasi:filesystem=allowlist"),
+            "got {}",
+            out[0]
+        );
+        assert!(out[0].contains("wasi:http=ask"));
+        assert!(out[0].contains("sha256:1f3a9c"));
+    }
+
+    #[test]
+    fn a_declared_but_denied_class_produces_a_warning_line() {
+        let out = run(|| {
+            let span = instantiation_span("c@1", "abcdef01");
+            let _g = span.enter();
+            emit_ceiling_class(&CeilingClassRecord {
+                cap_id: "wasi:http".into(),
+                mode: "deny".into(),
+                declared: true,
+            });
+        });
+        assert_eq!(out.len(), 2, "header + warning, got {out:?}");
+        assert!(out[1].contains("wasi:http"));
+        assert!(out[1].contains("not granted"), "got {}", out[1]);
+    }
+
+    #[test]
+    fn an_undeclared_denied_class_produces_no_warning() {
+        // Every class the component never asked for resolves to deny. Warning
+        // on those would bury the one signal that matters.
+        let out = run(|| {
+            let span = instantiation_span("c@1", "abcdef01");
+            let _g = span.enter();
+            emit_ceiling_class(&CeilingClassRecord {
+                cap_id: "wasi:sockets".into(),
+                mode: "deny".into(),
+                declared: false,
+            });
+        });
+        assert_eq!(out.len(), 1, "header only, got {out:?}");
     }
 
     #[test]

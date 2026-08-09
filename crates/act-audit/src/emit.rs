@@ -9,7 +9,9 @@ use std::time::Duration;
 use tracing::field::Empty;
 
 use crate::TARGET_AUDIT;
-use crate::record::{CapDecisionRecord, Outcome, ToolCallStart, attr, duration_ms};
+use crate::record::{
+    CapDecisionRecord, CeilingClassRecord, Outcome, ToolCallStart, attr, duration_ms,
+};
 
 /// Open the envelope span for one tool call. `act.outcome` and
 /// `act.duration_ms` are declared empty and filled by `finish_tool_call`.
@@ -59,6 +61,35 @@ pub fn emit_cap_decision(r: &CapDecisionRecord) {
             { attr::POLICY_RULE } = r.rule.as_deref().unwrap_or(""),
         },
         "act.cap_decision",
+    );
+}
+
+/// Open the envelope span for one component instantiation. One span per
+/// component load; one `emit_ceiling_class` event per capability class inside
+/// it. Modelled exactly like `tool_call_span` / `emit_cap_decision` so the
+/// same layer machinery renders it and an OTLP exporter gets queryable
+/// per-class attributes instead of a pre-formatted sentence.
+pub fn instantiation_span(component_ref: &str, digest: &str) -> tracing::Span {
+    tracing::info_span!(
+        target: TARGET_AUDIT,
+        "act.instantiation",
+        { attr::COMPONENT_REF } = %component_ref,
+        { attr::COMPONENT_DIGEST } = %digest,
+    )
+}
+
+/// One resolved capability class, as seen at instantiation. Carries no
+/// decision — that is what distinguishes it from a `CapDecisionRecord` event
+/// at the layer, which decodes strictly by presence of `act.decision`.
+pub fn emit_ceiling_class(r: &CeilingClassRecord) {
+    tracing::info!(
+        target: TARGET_AUDIT,
+        {
+            { attr::CAPABILITY_ID } = %r.cap_id,
+            { attr::POLICY_MODE } = %r.mode,
+            { attr::CAPABILITY_DECLARED } = r.declared,
+        },
+        "act.ceiling_class",
     );
 }
 

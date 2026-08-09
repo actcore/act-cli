@@ -161,6 +161,23 @@ pub fn render_header(component_ref: &str, digest: &str, modes: &[(String, String
     )
 }
 
+/// A second line, printed right after the header, naming capability classes
+/// the component declared in `act.toml` that resolved to `deny` anyway (no
+/// grant covered them, or an operator explicitly denied them). Restricted to
+/// `declared == true` classes by the caller — every class a component never
+/// asked for also resolves to deny, and warning on those would bury the one
+/// signal an operator actually needs to see.
+pub fn render_declared_ungranted_warning(ids: &[String]) -> String {
+    let escaped: Vec<String> = ids
+        .iter()
+        .map(|id| escape_audit_field(id).to_string())
+        .collect();
+    format!(
+        "{PREFIX}\u{26a0} declared but not granted: {}",
+        escaped.join(", ")
+    )
+}
+
 /// A denial or an ask — printed the moment it resolves, never batched. Also
 /// reused (from the layer) for an allow that has nowhere to fold, e.g. one
 /// fired at instantiation time, before any tool-call span exists.

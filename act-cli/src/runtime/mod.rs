@@ -303,7 +303,10 @@ pub async fn create_store(
     max_memory: Option<usize>,
     prompter: Arc<dyn act_policy::consent::ConsentPrompter>,
     cache: Arc<act_policy::consent::DecisionCache>,
-) -> Result<Store<HostState>> {
+) -> Result<(
+    Store<HostState>,
+    Vec<(String, Arc<dyn act_policy::provider::CompiledCeiling>)>,
+)> {
     use act_audit::{CapDecisionRecord, Decision4, emit_cap_decision};
     use act_policy::grant::PolicyMode;
     use act_policy::provider::{CompiledCeiling, ProviderRegistry, ResourceOp};
@@ -360,6 +363,25 @@ pub async fn create_store(
             .map_err(|e| anyhow::anyhow!("sockets policy: {e}"))?,
     );
     let sockets_effective_mode = sockets_ceiling.effective_mode();
+
+    // Captured for the instantiation audit header (Task 10), before any of
+    // the three get moved into `HostState` / the hooks / the sockets
+    // closure below — an `Arc` clone here is cheap and keeps this function's
+    // enforcement wiring below untouched.
+    let ceilings: Vec<(String, Arc<dyn CompiledCeiling>)> = vec![
+        (
+            act_types::constants::CAP_FILESYSTEM.to_string(),
+            fs_ceiling.clone(),
+        ),
+        (
+            act_types::constants::CAP_HTTP.to_string(),
+            http_ceiling.clone(),
+        ),
+        (
+            act_types::constants::CAP_SOCKETS.to_string(),
+            sockets_ceiling.clone(),
+        ),
+    ];
 
     let mut builder = WasiCtxBuilder::new();
     let mut preopen_pairs = Vec::with_capacity(preopens.len());
@@ -504,7 +526,7 @@ pub async fn create_store(
     // `memory.grow` fails (the guest typically traps OOM) instead of letting the
     // host process balloon. No-op when `max_memory` is None (default limits).
     store.limiter(|state| &mut state.limits);
-    Ok(store)
+    Ok((store, ceilings))
 }
 
 // ── Component info from custom section ──
@@ -656,6 +678,7 @@ pub async fn instantiate_component(
     max_memory: Option<usize>,
     prompter: Arc<dyn act_policy::consent::ConsentPrompter>,
     cache: Arc<act_policy::consent::DecisionCache>,
+    audit: &AuditContext,
 ) -> Result<(
     ToolProvider,
     Option<sessions::SessionProvider>,
@@ -664,7 +687,7 @@ pub async fn instantiate_component(
     use exports::act::sessions::session_provider::GuestIndices as SessionGuestIndices;
     use exports::act::tools::tool_provider::GuestIndices as ToolGuestIndices;
 
-    let mut store = create_store(
+    let (mut store, ceilings) = create_store(
         engine,
         preopens,
         grant_policy,
@@ -703,6 +726,25 @@ pub async fn instantiate_component(
         }
         None => None,
     };
+
+    // Audit at instantiation: what is running, and under what modes. Modelled
+    // exactly like a tool call — a span with one event per capability class —
+    // so the same layer machinery renders it and OTLP gets queryable per-class
+    // attributes rather than a sentence.
+    let inst_span = act_audit::instantiation_span(&audit.component_ref, &audit.digest);
+    {
+        let _g = inst_span.enter();
+        for (id, c) in &ceilings {
+            act_audit::emit_ceiling_class(&act_audit::CeilingClassRecord {
+                cap_id: id.clone(),
+                mode: c.effective_mode().to_string(),
+                declared: c.declared(),
+            });
+        }
+    }
+    // Dropping the span closes it; the layer renders the header line and, when
+    // a declared class resolved to deny, the declared-but-ungranted warning.
+    drop(inst_span);
 
     Ok((tool_provider, session_provider, store))
 }
