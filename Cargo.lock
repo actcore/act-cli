@@ -6,7 +6,6 @@ version = 4
 name = "act-audit"
 version = "0.10.1"
 dependencies = [
- "act-policy",
  "sha2 0.11.0",
  "tracing",
  "tracing-subscriber",

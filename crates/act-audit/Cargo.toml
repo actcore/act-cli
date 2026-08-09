@@ -9,7 +9,6 @@ homepage = "https://actcore.dev"
 keywords = ["act", "audit", "observability", "tracing", "security"]
 
 [dependencies]
-act-policy = { path = "../act-policy" }
 sha2.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
