@@ -167,3 +167,61 @@ fn fs_decisions_reach_the_audit_trail() {
         "deny line must carry the reason, got: {deny_line}"
     );
 }
+
+/// `resolve_ask`'s `emit_cap_decision` call is the third decision point and
+/// the one `fs_decisions_reach_the_audit_trail` above cannot reach: that
+/// test only runs under `allowlist`, and `Decision::Ask` — the only way
+/// `check_path_sync` reaches the `Ask` arm and defers to `resolve_ask` — is
+/// returned only in `ask` mode. Confirmed by disabling `resolve_ask`'s
+/// `emit_cap_decision` call and re-running: the other test still passes.
+///
+/// Runs `fs-canary` under an `ask`-mode grant with stdin closed. No prompt
+/// channel makes `main.rs`'s `tty_or_deny_prompter` pick `DenyPrompter`
+/// deterministically (`std::io::IsTerminal::is_terminal` on a null stdin is
+/// always `false`), so `ask` degrades to deny — but critically,
+/// `resolve_ask` still *runs* to produce that verdict, it isn't skipped.
+#[test]
+fn fs_ask_resolution_reaches_the_audit_trail() {
+    let fixture =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fs-canary.wasm");
+
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let target = dir.path().join("ok.txt");
+    std::fs::write(&target, "content").expect("write fixture file");
+
+    // Bare "ask" mode with no allow list: the wasi:filesystem provider
+    // special-cases `ask` to inherit the component's DECLARED ceiling
+    // wholesale (fs-canary declares `**`, rw) rather than intersecting
+    // against an empty user allow list, so this path still lands in-ceiling
+    // (`Ask`), not an immediate out-of-ceiling deny.
+    let out = act_bin()
+        .args([
+            "call",
+            fixture.to_str().expect("fixture path is utf-8"),
+            "read",
+            "--args",
+            &format!(r#"{{"path":"{}"}}"#, target.display()),
+            "--grant",
+            r#"{"wasi:filesystem":"ask"}"#,
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("ran act");
+    assert!(
+        !out.status.success(),
+        "headless ask with no prompt channel must degrade to deny: {out:?}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let ask_line = stderr
+        .lines()
+        .find(|l| l.starts_with("audit: ? ask-deny"))
+        .unwrap_or_else(|| panic!("no immediate ask-deny line in stderr: {stderr}"));
+    assert!(
+        ask_line.contains("wasi:filesystem"),
+        "ask-deny line must name the capability, got: {ask_line}"
+    );
+    assert!(
+        ask_line.contains("denied by user"),
+        "ask-deny line must carry the reason, got: {ask_line}"
+    );
+}

@@ -154,45 +154,80 @@ fn events_contain_error(events: &[act::tools::types::ToolEvent]) -> bool {
         .any(|e| matches!(e, act::tools::types::ToolEvent::Error(_)))
 }
 
+/// Width of the visible request-id's counter field, in bits. See
+/// `pack_visible_request_id` for why this trades off against
+/// `SALT_BITS` rather than being widened freely.
+const REQUEST_ID_COUNTER_BITS: u32 = 9; // 512 values
+
+/// Width of the visible request-id's salt field, in bits. Together with
+/// `COUNTER_BITS` this must sum to 24 (`render_rollup` shows the id's first
+/// 6 hex digits = 24 bits — the hard ceiling on how many values can ever be
+/// visually distinguishable, no matter how the id is built).
+const REQUEST_ID_SALT_BITS: u32 = 24 - REQUEST_ID_COUNTER_BITS; // 15 bits, 32768 values
+
+/// Pack a per-call counter and a per-process salt into the 24-bit value
+/// rendered as `new_request_id`'s leading 6 hex digits — the only part
+/// `render_rollup`'s 6-byte truncation shows an operator. A prior fix
+/// (`format!("act-{:x}", hash_of(pid, counter, time))`) spent 4 of those 6
+/// bytes on the literal `act-` and left only 2 hex digits (256 values) of
+/// real entropy visible; a standalone repro of that exact algorithm hit a
+/// birthday collision at call #23 of 40. This packs the full 24 visible
+/// bits productively instead, split so both properties the review asked
+/// for hold within that hard ceiling:
+///
+/// - the high `COUNTER_BITS` bits are the per-process call counter, so two
+///   different calls in the SAME process render deterministically distinct
+///   visible prefixes — not probabilistically, as long as fewer than
+///   `2^COUNTER_BITS` calls have been made in this process. A *fixed-width*
+///   bit field is what makes this a guarantee: a variable-width
+///   counter-then-salt string (e.g. `format!("{:x}{}", counter, salt)`)
+///   can have a short counter's digits absorbed into what looks like a
+///   longer counter's leading digits when the salt happens to repeat the
+///   right digit — confirmed a real instance by brute-force search rather
+///   than asserting it from intuition: `counter=1` and `counter=0x11`
+///   both render `"111111"` under that scheme at `salt=0x11111`. Bit
+///   packing can't do this — the counter occupies fixed bit positions no
+///   salt value can shift into.
+/// - the low `SALT_BITS` bits are a per-process random salt, so two
+///   different PROCESSES — the dominant real-world case, since most `act
+///   call` invocations make exactly one request and so always have
+///   counter == 0 — usually render different visible prefixes too.
+fn pack_visible_request_id(counter: u64, salt: u32) -> u32 {
+    let counter_field = (counter as u32) & ((1 << REQUEST_ID_COUNTER_BITS) - 1);
+    let salt_field = salt & ((1 << REQUEST_ID_SALT_BITS) - 1);
+    (counter_field << REQUEST_ID_SALT_BITS) | salt_field
+}
+
 /// Host-generated correlation id, used when the caller supplied no
 /// `std:request-id`. Keeping this non-optional is what makes every audit line
 /// joinable to a client log line.
 ///
-/// `render_rollup` renders this truncated to 6 bytes, so the id's *leading*
-/// bytes are the only part an operator actually sees. A literal `act-` prefix
-/// followed by `{pid}-{counter}` put the discriminating part last: for the
-/// common single-call `act call` process the counter is always 0, so the
-/// truncated render showed only `act-` plus a couple of pid digits — and
-/// short-lived processes launched back to back from the same shell routinely
-/// get the same pid reused by the OS, so those first bytes collided across
-/// genuinely different invocations.
-///
-/// Fix: hash the counter, pid, and a timestamp through `RandomState`'s
-/// hasher. `RandomState::new()` reads OS randomness once per thread and
-/// mixes in a per-call increment, so a fresh process gets an independently
-/// random seed (fixing the cross-process collision) while a long-lived
-/// process serving many calls still gets a different hash each time (the
-/// seed increments and the hashed counter/timestamp change). All std, no new
-/// dependency. The full 64-bit hash goes straight into the id, so entropy is
-/// spread evenly rather than living past the point the render truncates.
+/// The visible (6-hex-digit) part comes from `pack_visible_request_id`; see
+/// its doc comment for why it's split into a counter field and a salt
+/// field. `salt` is drawn once per process, from `RandomState`'s
+/// OS-seeded-per-thread hasher (no new dependency); `counter` is the usual
+/// per-process monotonic count. The full, un-truncated counter is appended
+/// after the visible portion too, so the untruncated id (used verbatim as
+/// the `act.request.id` span attribute for OTLP export, never truncated
+/// there) stays globally unique for the lifetime of the process regardless
+/// of the 6-byte display ceiling.
 fn new_request_id() -> String {
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hasher};
+    use std::sync::OnceLock;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static SALT: OnceLock<u32> = OnceLock::new();
+    let salt = *SALT.get_or_init(|| {
+        let mut hasher = RandomState::new().build_hasher();
+        hasher.write_u32(std::process::id());
+        hasher.finish() as u32
+    });
 
     static N: AtomicU64 = AtomicU64::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
 
-    let mut hasher = RandomState::new().build_hasher();
-    hasher.write_u32(std::process::id());
-    hasher.write_u64(n);
-    hasher.write_u128(nanos);
-    format!("act-{:x}", hasher.finish())
+    format!("{:06x}-{n:x}", pack_visible_request_id(n, salt))
 }
 
 /// Load a .wasm component from a file path and report the SHA-256 of its
@@ -1118,23 +1153,58 @@ mod tests {
     }
 
     #[test]
-    fn request_ids_differ_within_the_first_six_bytes() {
-        // `render_rollup` truncates the rendered id to 6 bytes (`req:` +
-        // `take_bytes(&span.request_id, 6)`), so only the id's leading bytes
-        // are ever visible to an operator. Two ids minted back to back —
-        // the common case for a long-lived host serving several calls, and
-        // the degenerate case of `counter == 0` for every single-call `act
-        // call` process — must diverge inside that window, or two different
-        // calls render as the same `req:` and the trail is no longer
-        // joinable to a client log line.
-        let a = new_request_id();
-        let b = new_request_id();
-        assert_ne!(a, b, "two host-generated ids must not be identical");
-        let cut = |s: &str| s.bytes().take(6).collect::<Vec<u8>>();
+    fn visible_request_id_prefixes_are_distinct_for_hundreds_of_counters_at_one_salt() {
+        // Exercises `pack_visible_request_id` directly with explicit inputs,
+        // not `new_request_id`'s real global counter: that counter is one
+        // `static` shared by every test in this binary (integration tests
+        // in `tests/*.rs` are separate processes and don't share it, but
+        // other unit tests in this same file might), so drawing "several
+        // hundred" real ids and asserting they're distinct would only be
+        // true assuming nothing else increments the counter concurrently —
+        // a coin flip with different odds, exactly what this test replaces.
+        // Fixed-width bit-packing makes the counter-side of the property
+        // deterministic instead: for a FIXED salt, every counter from 0 up
+        // to `2^REQUEST_ID_COUNTER_BITS - 1` (512) must pack to a distinct
+        // 24-bit value — provably, not "usually" — so this holds for any
+        // salt, any interleaving, any number of parallel test threads.
+        let salt = 0x1234;
+        let mut seen = std::collections::HashSet::new();
+        for counter in 0..500u64 {
+            let visible = pack_visible_request_id(counter, salt);
+            assert!(
+                seen.insert(visible),
+                "counter {counter} collided with an earlier one at salt {salt:#x}: \
+                 visible={visible:#08x}"
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_width_packing_avoids_a_confirmed_variable_width_collision() {
+        // Brute-force search found a genuine collision in the rejected
+        // variable-width scheme `format!("{:x}{}", counter, salt)`: counter
+        // 1 and counter 0x11 both render "111111" (their first 6 chars) at
+        // salt 0x11111 — the counter's own digit happens to match a run of
+        // repeated digits in the salt, so a short counter's representation
+        // is silently absorbed into a longer counter's leading digits.
+        let naive = |counter: u64, salt: u32| -> String {
+            let s = format!("{counter:x}{salt:x}");
+            s.chars().take(6).collect()
+        };
+        assert_eq!(
+            naive(1, 0x11111),
+            naive(0x11, 0x11111),
+            "sanity check: this is the confirmed collision in the naive scheme"
+        );
+
+        // The real, fixed-width bit-packed scheme cannot exhibit this: the
+        // counter always occupies the same bit positions, so no salt value
+        // can shift a shorter counter's digits into a longer one's.
+        let a = format!("{:06x}", pack_visible_request_id(1, 0x11111));
+        let b = format!("{:06x}", pack_visible_request_id(0x11, 0x11111));
         assert_ne!(
-            cut(&a),
-            cut(&b),
-            "ids must differ within the rendered 6-byte window: {a} vs {b}"
+            a, b,
+            "fixed-width packing must not reproduce the naive collision"
         );
     }
 
@@ -1163,11 +1233,16 @@ mod tests {
 
     #[test]
     fn a_request_id_is_always_available() {
-        // Correlation must never depend on the caller having supplied an id.
+        // Correlation must never depend on the caller having supplied an
+        // id. No literal prefix is asserted here (dropped in the request-id
+        // rework — a fixed `act-` literal ate 4 of the 6 bytes
+        // `render_rollup` actually shows, which was the root of the
+        // collision this fixed); the format is non-normative, only
+        // "always present and non-repeating" is.
         let a = new_request_id();
         let b = new_request_id();
         assert_ne!(a, b);
-        assert!(a.starts_with("act-"));
+        assert!(!a.is_empty());
     }
 
     #[test]
