@@ -110,17 +110,41 @@ fn take_bytes(s: &str, n: usize) -> &str {
     &s[..e]
 }
 
-/// Escape control characters to prevent audit-line forgery. Components can inject
-/// newlines and ANSI sequences into guest-controlled fields. This sanitizes them
+/// Characters that must be escaped before a guest-controlled value reaches
+/// an audit line. `char::is_control()` only covers Unicode category Cc
+/// (U+0000-001F, U+007F-009F) — it misses the Cf format/bidi-control
+/// characters (U+200E/200F, U+202A-202E, U+2066-2069) and the line/paragraph
+/// separators (U+2028/U+2029). A right-to-left override (U+202E) in
+/// particular lets a component make a terminal *display* a different string
+/// than the one it actually supplied — e.g. in the rule string `render_rollup`
+/// substitutes from the component's own `act.toml` declaration under `ask`/
+/// `open` grants, which is entirely author-chosen and need not correspond to
+/// anything real.
+fn needs_escape(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{200e}'
+                | '\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{2028}'
+                | '\u{2029}'
+        )
+}
+
+/// Escape control and bidi-override characters to prevent audit-line
+/// forgery. Components can inject newlines, ANSI sequences, and Unicode
+/// directional overrides into guest-controlled fields. This sanitizes them
 /// uniformly at the rendering point: \n, \r, \t as their literal forms; other
-/// control chars as \u{...}. Returns the original string if no escaping needed.
+/// escaped chars as \u{...}. Returns the original string if no escaping needed.
 fn escape_audit_field(s: &str) -> Cow<'_, str> {
-    if !s.chars().any(|c| c.is_control()) {
+    if !s.chars().any(needs_escape) {
         return Cow::Borrowed(s);
     }
     let mut out = String::new();
     for c in s.chars() {
-        if c.is_control() {
+        if needs_escape(c) {
             match c {
                 '\n' => out.push_str("\\n"),
                 '\r' => out.push_str("\\r"),
@@ -612,6 +636,28 @@ mod tests {
         assert!(
             !line.contains("\u{1b}[31m"),
             "ANSI sequence should not appear raw"
+        );
+    }
+
+    #[test]
+    fn render_escapes_bidi_override() {
+        // U+202E (right-to-left override) is Cf, not Cc — `char::is_control()`
+        // alone misses it. Undetected, a component-declared rule string
+        // (guest-authored, as `render_rollup` substitutes verbatim from the
+        // component's own `act.toml` under `ask`/`open` grants) can make a
+        // terminal *display* a path different from the one actually granted.
+        let mut roll = Rollup::new(64);
+        roll.add("wasi:filesystem", "read", Some("/tmp/safe/\u{202e}txt.exe"));
+
+        let line = render_rollup(&span_fields(), &roll);
+        // Must be escaped as \u{202e}, not appear as a raw override.
+        assert!(
+            line.contains("\\u{202e}"),
+            "expected escaped RLO, got {line}"
+        );
+        assert!(
+            !line.contains('\u{202e}'),
+            "raw bidi override should not appear, got {line}"
         );
     }
 
