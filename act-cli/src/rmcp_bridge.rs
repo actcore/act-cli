@@ -20,8 +20,21 @@ const VIRTUAL_CLOSE_SESSION: &str = "close_session";
 /// WIT `metadata` parameter.
 const ARG_META_KEY: &str = "_meta";
 
+// `std:traceparent` is deliberately absent from this list: advertising it as
+// a recognised argument-channel key would invite exactly the forgery
+// `strip_trace_keys` below closes off. Trace context is transport-only.
 const ARG_META_DESCRIPTION: &str = "ACT metadata. Include {\"std:session-id\": \"<id from open_session>\"} for \
-     session-bound tools. Other recognized keys: std:traceparent, std:locale.";
+     session-bound tools. Other recognized keys: std:locale.";
+
+/// Trace-context / correlation keys that must be sourced from the transport
+/// `_meta` channel exclusively — see `trace_metadata_from_meta` and
+/// `strip_trace_keys`.
+const TRACE_META_KEYS: [&str; 4] = [
+    act_types::constants::META_TRACEPARENT,
+    act_types::constants::META_TRACESTATE,
+    act_types::constants::META_AGENT_ID,
+    act_types::constants::META_REQUEST_ID,
+];
 
 /// ACT's MCP `_meta` prefix — reverse-DNS form of `actcore.dev`, per the
 /// MCP `_meta` SHOULD ("Implementations SHOULD use reverse DNS notation").
@@ -590,7 +603,19 @@ impl ActRmcpBridge {
         let arg_meta = arguments_obj.remove(ARG_META_KEY);
 
         let mut call_metadata = self.metadata.clone();
-        if let Some(Value::Object(map)) = arg_meta {
+        if let Some(Value::Object(mut map)) = arg_meta {
+            // The argument channel is tool-call JSON, written by the model
+            // turn — under prompt injection, attacker-controlled. Nothing
+            // server-side validates it (no JSON Schema validator in this
+            // host; `get_tool` is rmcp's unvalidated default), so a forged
+            // `std:traceparent`/`std:agent-id` here would otherwise survive
+            // untouched whenever transport stays silent on the same key,
+            // letting a prompt-injected model splice a call into someone
+            // else's trace or misattribute it to another agent. Strip the
+            // trace-context keys before they ever reach `call_metadata` —
+            // `trace_metadata_from_meta` below is the only path allowed to
+            // populate them, from the transport channel exclusively.
+            strip_trace_keys(&mut map);
             call_metadata.extend(act_types::types::Metadata::from(Value::Object(map)));
         }
         apply_transport_meta(&mut call_metadata, ctx_meta);
@@ -877,16 +902,23 @@ fn apply_transport_meta(
     }
 }
 
-/// Read one ACT metadata key out of transport `_meta`, honouring the same
-/// `std:*`-vs-`dev.actcore/*` precedence as [`apply_transport_meta`] rather
-/// than re-implementing key respelling.
-fn meta_lookup(meta: &rmcp::model::MetaObject, act_key: &str) -> Option<String> {
-    let mut merged = act_types::types::Metadata::default();
-    apply_transport_meta(&mut merged, meta);
-    merged
-        .get(act_key)
-        .and_then(Value::as_str)
-        .map(str::to_string)
+/// Strip the trace-context / correlation keys (`TRACE_META_KEYS`) out of an
+/// argument-`_meta` object before it is folded into `call_metadata`.
+///
+/// The argument channel (ACT-MCP §3.2) is tool-call JSON, written by the
+/// model turn — under prompt injection, attacker-controlled — and nothing
+/// server-side validates it (this host has no JSON Schema validator;
+/// `get_tool` is left at rmcp's unvalidated default). `trace_metadata_from_meta`
+/// below already never *reads* these keys from the argument channel, but
+/// that alone doesn't stop a value the argument channel already inserted
+/// into `call_metadata` from surviving untouched when transport is silent
+/// on the same key. Without this strip, a prompt-injected model could forge
+/// `std:traceparent`/`std:tracestate` to splice a call into someone else's
+/// trace, or `std:agent-id` to misattribute it to another agent.
+fn strip_trace_keys(map: &mut serde_json::Map<String, Value>) {
+    for key in TRACE_META_KEYS {
+        map.remove(key);
+    }
 }
 
 /// Lift trace-context keys out of MCP `_meta`, falling back to the JSON-RPC
@@ -908,15 +940,20 @@ pub(crate) fn trace_metadata_from_meta(
     meta: &rmcp::model::MetaObject,
     request_id: &str,
 ) -> Vec<(String, String)> {
+    // One merge, honouring the same `std:*`-vs-`dev.actcore/*` precedence as
+    // `apply_transport_meta`, then four lookups against it — rather than
+    // re-merging transport `_meta` from scratch per key.
+    let mut merged = act_types::types::Metadata::default();
+    apply_transport_meta(&mut merged, meta);
+
     let mut out = Vec::new();
-    for key in [
-        act_types::constants::META_TRACEPARENT,
-        act_types::constants::META_TRACESTATE,
-        act_types::constants::META_AGENT_ID,
-        act_types::constants::META_REQUEST_ID,
-    ] {
-        if let Some(v) = meta_lookup(meta, key).filter(|v| !v.is_empty()) {
-            out.push((key.to_string(), v));
+    for key in TRACE_META_KEYS {
+        if let Some(v) = merged
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|v| !v.is_empty())
+        {
+            out.push((key.to_string(), v.to_string()));
         }
     }
     if !out
@@ -1573,11 +1610,15 @@ mod tests {
 
     #[test]
     fn arguments_meta_supplies_keys_absent_from_transport() {
-        // When a key is only in argument _meta, it survives the merge.
+        // When an ordinary key is only in argument _meta, it survives the
+        // merge. A plain application key here, not one of `TRACE_META_KEYS`
+        // (see `argument_meta_cannot_forge_trace_context_keys` below for
+        // those — they are the one category `strip_trace_keys` deliberately
+        // keeps out of this path).
         let mut call_metadata = act_types::types::Metadata::default();
         call_metadata.extend(act_types::types::Metadata::from(serde_json::json!({
             "std:session-id": "abc",
-            "std:traceparent": "00-...-...",
+            "std:locale": "en-US",
         })));
         // Transport carries an unrelated key.
         let ctx = rmcp::model::MetaObject(
@@ -1594,8 +1635,55 @@ mod tests {
                 .as_deref(),
             Some("abc")
         );
-        assert!(call_metadata.contains_key("std:traceparent"));
+        assert!(call_metadata.contains_key("std:locale"));
         assert!(call_metadata.contains_key("std:request-id"));
+    }
+
+    /// The vulnerability `strip_trace_keys` closes: without it, a
+    /// prompt-injected model writing `arguments._meta` (ACT-MCP §3.2, never
+    /// server-validated — this host has no JSON Schema validator) could
+    /// forge `std:traceparent`/`std:tracestate`/`std:agent-id` straight into
+    /// `call_metadata`, and nothing would strip them back out when transport
+    /// stayed silent on the same key (only `std:request-id` was safe, by the
+    /// accident of `trace_metadata_from_meta` unconditionally overwriting
+    /// it). Reproduces the exact sequence `call_tool_impl` runs — strip,
+    /// then extend, then merge transport (silent on all four keys, as an
+    /// ordinary call with no tracing opted in) — and confirms none of the
+    /// four keys survive, while an ordinary argument-channel key
+    /// (`std:session-id`) still does.
+    #[test]
+    fn argument_meta_cannot_forge_trace_context_keys() {
+        let mut arg_meta = serde_json::json!({
+            "std:session-id": "abc",
+            "std:traceparent": "00-forged-forged-01",
+            "std:tracestate": "forged=1",
+            "std:agent-id": "forged-by-model",
+            "std:request-id": "forged-request-id",
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        strip_trace_keys(&mut arg_meta);
+
+        let mut call_metadata = act_types::types::Metadata::default();
+        call_metadata.extend(act_types::types::Metadata::from(Value::Object(arg_meta)));
+
+        let ctx = rmcp::model::MetaObject(serde_json::Map::new());
+        apply_transport_meta(&mut call_metadata, &ctx);
+
+        assert_eq!(
+            call_metadata
+                .get_as::<String>(act_types::constants::META_SESSION_ID)
+                .as_deref(),
+            Some("abc"),
+            "ordinary argument-channel keys must still survive"
+        );
+        for key in TRACE_META_KEYS {
+            assert!(
+                !call_metadata.contains_key(key),
+                "argument channel must not be able to forge {key}, got: {call_metadata:?}"
+            );
+        }
     }
 
     use crate::runtime::CallToolResult as ActCallToolResult;
