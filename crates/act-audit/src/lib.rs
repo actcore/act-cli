@@ -17,8 +17,8 @@ pub use record::{
     attr, duration_ms, sha256_hex,
 };
 pub use render::{
-    Rollup, SpanFields, render_declared_ungranted_warning, render_exception, render_header,
-    render_rollup,
+    Rollup, SpanFields, render_declared_ask_blocked_warning, render_declared_ungranted_warning,
+    render_exception, render_header, render_rollup,
 };
 
 /// Target for host-authored audit records. The audit layer's filter is pinned

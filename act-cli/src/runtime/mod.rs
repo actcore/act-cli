@@ -113,6 +113,15 @@ pub struct AuditContext {
     pub component_ref: String,
     pub digest: String,
     pub transport: act_audit::Transport,
+    /// Whether this run has any channel that can answer an interactive
+    /// `ask` prompt — a real TTY (`TtyPrompter`) or an MCP client offering
+    /// elicitation (`McpElicitationPrompter`). `false` for headless CLI
+    /// invocations and ACT-HTTP (`DenyPrompter`), where every `ask`
+    /// decision degrades to deny before a human is ever involved. Decided
+    /// once, at the same point the concrete prompter is chosen, and carried
+    /// here so `instantiate_component` never has to infer it from the
+    /// prompter's type.
+    pub has_prompt_channel: bool,
 }
 
 /// Pull a well-known `std:` key out of decoded call metadata for the audit
@@ -739,6 +748,7 @@ pub async fn instantiate_component(
                 cap_id: id.clone(),
                 mode: c.effective_mode().to_string(),
                 declared: c.declared(),
+                has_prompt_channel: audit.has_prompt_channel,
             });
         }
     }

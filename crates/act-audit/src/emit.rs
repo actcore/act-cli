@@ -88,6 +88,7 @@ pub fn emit_ceiling_class(r: &CeilingClassRecord) {
             { attr::CAPABILITY_ID } = %r.cap_id,
             { attr::POLICY_MODE } = %r.mode,
             { attr::CAPABILITY_DECLARED } = r.declared,
+            { attr::CONSENT_PROMPT_CHANNEL } = r.has_prompt_channel,
         },
         "act.ceiling_class",
     );

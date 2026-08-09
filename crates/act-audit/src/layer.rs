@@ -20,8 +20,8 @@ use tracing_subscriber::registry::LookupSpan;
 use crate::TARGET_AUDIT;
 use crate::record::{Actor, CapDecisionRecord, CeilingClassRecord, Decision4, attr};
 use crate::render::{
-    Rollup, SpanFields, render_declared_ungranted_warning, render_exception, render_header,
-    render_rollup,
+    Rollup, SpanFields, render_declared_ask_blocked_warning, render_declared_ungranted_warning,
+    render_exception, render_header, render_rollup,
 };
 
 /// Name of the tool-call envelope span, set by `emit::tool_call_span`.
@@ -166,6 +166,7 @@ struct EventVisitor {
     reason: String,
     rule: String,
     declared: bool,
+    has_prompt_channel: bool,
 }
 
 impl Visit for EventVisitor {
@@ -184,14 +185,16 @@ impl Visit for EventVisitor {
     }
 
     fn record_bool(&mut self, f: &Field, v: bool) {
-        // `act.capability.declared` is the only bool field this crate emits.
-        // Without this override, tracing's default `Visit::record_bool`
-        // routes a bool to `record_debug`, whose output ("true"/"false")
-        // doesn't match any `record_str` arm above — the field would be
-        // silently dropped and the declared-but-ungranted warning could
-        // never fire.
-        if f.name() == attr::CAPABILITY_DECLARED {
-            self.declared = v;
+        // `act.capability.declared` and `act.consent.prompt_channel` are the
+        // only bool fields this crate emits. Without this override,
+        // tracing's default `Visit::record_bool` routes a bool to
+        // `record_debug`, whose output ("true"/"false") doesn't match any
+        // `record_str` arm above — the field would be silently dropped and
+        // neither instantiation warning could ever fire.
+        match f.name() {
+            n if n == attr::CAPABILITY_DECLARED => self.declared = v,
+            n if n == attr::CONSENT_PROMPT_CHANNEL => self.has_prompt_channel = v,
+            _ => {}
         }
     }
 
@@ -312,18 +315,18 @@ where
                 cap_id: v.cap_id,
                 mode: v.mode,
                 declared: v.declared,
+                has_prompt_channel: v.has_prompt_channel,
             };
-            let _ = ctx.event_scope(event).is_some_and(|mut scope| {
-                scope.any(
-                    |span| match span.extensions_mut().get_mut::<InstantiationState>() {
-                        Some(state) => {
-                            state.classes.push(record.clone());
-                            true
-                        }
-                        None => false,
-                    },
-                )
-            });
+            // Walk the enclosing spans looking for the instantiation span's
+            // state; stop at the first match. A `for` loop, not
+            // `Iterator::any`, because there's no boolean result anyone
+            // reads — this is a search-and-push, not a predicate.
+            for span in ctx.event_scope(event).into_iter().flatten() {
+                if let Some(state) = span.extensions_mut().get_mut::<InstantiationState>() {
+                    state.classes.push(record.clone());
+                    break;
+                }
+            }
             return;
         }
 
@@ -394,6 +397,24 @@ where
             .collect();
         if !ungranted.is_empty() {
             self.emit(|| render_declared_ungranted_warning(&ungranted));
+        }
+        // A declared class configured as `ask` is not actually reachable
+        // when this run has no prompt channel at all (headless / ACT-HTTP):
+        // every access degrades to deny before a human is ever asked. The
+        // header keeps showing `ask` — that is genuinely the configured
+        // policy — but this second, distinct warning names the outcome the
+        // operator will actually see, the same way the deny warning above
+        // does for a hard deny. A declared `ask` class backed by a real
+        // prompt channel (TTY / MCP elicitation) is not warned about here:
+        // nothing has been refused yet at instantiation time.
+        let ask_blocked: Vec<String> = state
+            .classes
+            .iter()
+            .filter(|c| c.declared && c.mode == "ask" && !c.has_prompt_channel)
+            .map(|c| c.cap_id.clone())
+            .collect();
+        if !ask_blocked.is_empty() {
+            self.emit(|| render_declared_ask_blocked_warning(&ask_blocked));
         }
     }
 }
@@ -693,11 +714,17 @@ mod tests {
                 cap_id: "wasi:filesystem".into(),
                 mode: "allowlist".into(),
                 declared: true,
+                has_prompt_channel: true,
             });
+            // A declared `ask` class backed by a real prompt channel: not a
+            // warning case (see `a_declared_ask_class_with_a_prompt_channel_does_not_warn`)
+            // — `has_prompt_channel: true` here is what keeps this test at
+            // exactly one line.
             emit_ceiling_class(&CeilingClassRecord {
                 cap_id: "wasi:http".into(),
                 mode: "ask".into(),
                 declared: true,
+                has_prompt_channel: true,
             });
         });
         assert_eq!(out.len(), 1, "got {out:?}");
@@ -719,6 +746,7 @@ mod tests {
                 cap_id: "wasi:http".into(),
                 mode: "deny".into(),
                 declared: true,
+                has_prompt_channel: true,
             });
         });
         assert_eq!(out.len(), 2, "header + warning, got {out:?}");
@@ -737,6 +765,52 @@ mod tests {
                 cap_id: "wasi:sockets".into(),
                 mode: "deny".into(),
                 declared: false,
+                has_prompt_channel: true,
+            });
+        });
+        assert_eq!(out.len(), 1, "header only, got {out:?}");
+    }
+
+    #[test]
+    fn a_declared_ask_class_with_no_prompt_channel_produces_a_warning_line() {
+        // Headless / ACT-HTTP: `ask` is the configured mode, but there is no
+        // channel to ever answer one — every access degrades to deny before
+        // a human is asked. The header must still show `ask` unchanged (that
+        // is genuinely the configured policy); the warning is what names the
+        // real outcome.
+        let out = run(|| {
+            let span = instantiation_span("c@1", "abcdef01");
+            let _g = span.enter();
+            emit_ceiling_class(&CeilingClassRecord {
+                cap_id: "wasi:http".into(),
+                mode: "ask".into(),
+                declared: true,
+                has_prompt_channel: false,
+            });
+        });
+        assert_eq!(out.len(), 2, "header + warning, got {out:?}");
+        assert!(out[0].contains("wasi:http=ask"), "got {}", out[0]);
+        assert!(out[1].contains("wasi:http"), "got {}", out[1]);
+        assert!(
+            out[1].contains("denied"),
+            "warning must name the reason, got {}",
+            out[1]
+        );
+    }
+
+    #[test]
+    fn a_declared_ask_class_with_a_prompt_channel_does_not_warn() {
+        // A TTY or an MCP client offering elicitation means an `ask` really
+        // can reach a human — nothing has been refused yet at instantiation
+        // time, so this must not warn.
+        let out = run(|| {
+            let span = instantiation_span("c@1", "abcdef01");
+            let _g = span.enter();
+            emit_ceiling_class(&CeilingClassRecord {
+                cap_id: "wasi:filesystem".into(),
+                mode: "ask".into(),
+                declared: true,
+                has_prompt_channel: true,
             });
         });
         assert_eq!(out.len(), 1, "header only, got {out:?}");

@@ -178,6 +178,23 @@ pub fn render_declared_ungranted_warning(ids: &[String]) -> String {
     )
 }
 
+/// A sibling warning for a declared class configured as `ask` when this run
+/// has no interactive prompt channel at all (headless / ACT-HTTP). The
+/// header still shows the configured mode (`ask`) unchanged — that really is
+/// the policy — but every access to a class like this resolves through
+/// `DenyPrompter` before a human is ever asked, so the operator needs the
+/// outcome spelled out, not just the mode.
+pub fn render_declared_ask_blocked_warning(ids: &[String]) -> String {
+    let escaped: Vec<String> = ids
+        .iter()
+        .map(|id| escape_audit_field(id).to_string())
+        .collect();
+    format!(
+        "{PREFIX}\u{26a0} declared ask, no prompt channel — every access will be denied: {}",
+        escaped.join(", ")
+    )
+}
+
 /// A denial or an ask — printed the moment it resolves, never batched. Also
 /// reused (from the layer) for an allow that has nowhere to fold, e.g. one
 /// fired at instantiation time, before any tool-call span exists.

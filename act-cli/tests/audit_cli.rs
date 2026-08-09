@@ -483,6 +483,72 @@ fn instantiation_header_warns_when_a_declared_capability_is_denied() {
     );
 }
 
+/// The scenario the two tests above sidestep with an explicit `--grant`/
+/// `--deny`, and the one that matters most: a headless invocation with **no
+/// grant flags at all**. The host is ask-by-default, so the header still
+/// shows `wasi:filesystem=ask` (that really is the configured policy, and
+/// must not change) — but headless has no prompt channel, so
+/// `tty_or_deny_prompter()` picks `DenyPrompter` and every `ask` decision
+/// degrades to deny before anyone is asked. Without the fix this test pins,
+/// the header showed `ask` and nothing warned that the component would in
+/// practice get nothing — the one signal this feature exists to deliver,
+/// silent in the single most common invocation shape (CI, automation, an
+/// agent driving the CLI).
+#[test]
+fn instantiation_header_warns_when_declared_ask_has_no_prompt_channel() {
+    let fixture =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fs-canary.wasm");
+
+    let out = act_bin()
+        .args([
+            "call",
+            fixture.to_str().expect("fixture path is utf-8"),
+            "read",
+            "--args",
+            r#"{"path":"/nonexistent"}"#,
+        ])
+        // No --grant / --allow / --deny at all: this is the default,
+        // ask-by-default policy. Explicit null stdin makes the "no prompt
+        // channel" condition deterministic regardless of how the test
+        // harness itself was invoked (matches `fs_ask_resolution_reaches_the_audit_trail`'s
+        // existing pattern for the same reason).
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("ran act");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let mut lines = stderr.lines();
+    let header = lines
+        .next()
+        .unwrap_or_else(|| panic!("no stderr output at all: {stderr}"));
+    assert!(
+        header.starts_with("audit: ") && header.contains("wasi:filesystem=ask"),
+        "header must keep showing the configured mode (ask), unchanged, got: {stderr}"
+    );
+    let warning = lines
+        .next()
+        .unwrap_or_else(|| panic!("no second stderr line (warning) after header: {stderr}"));
+    // Deliberately specific: a per-access "? ask-deny ... denied by user"
+    // exception line (from the actual failed read) also starts with
+    // "audit: ", also names wasi:filesystem, and also contains "denied" —
+    // so a looser assertion here would pass even with the instantiation-time
+    // warning entirely disabled, as long as an unrelated per-access denial
+    // happened to land as line two. "no prompt channel" is wording only the
+    // new warning uses.
+    assert!(
+        warning.starts_with("audit: ") && warning.contains("no prompt channel"),
+        "expected the ask-but-no-prompt-channel warning right after the header, got: {warning}"
+    );
+    assert!(
+        warning.contains("wasi:filesystem"),
+        "warning must name the affected class, got: {warning}"
+    );
+    assert!(
+        warning.contains("denied"),
+        "warning must name the reason (every access will be denied), got: {warning}"
+    );
+}
+
 /// Mirrors `http_decisions_reach_the_audit_trail`, but for the sockets
 /// classify site in `runtime/mod.rs`'s `socket_addr_check` hook. Runs the
 /// `sockets-canary` fixture (declares `wasi:sockets` with an unbounded

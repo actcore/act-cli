@@ -38,6 +38,13 @@ pub mod attr {
     pub const POLICY_RULE: &str = "act.policy.rule";
     /// Whether the component declared this capability class in `act.toml`.
     pub const CAPABILITY_DECLARED: &str = "act.capability.declared";
+    /// Whether this run has any channel that can answer an interactive `ask`
+    /// prompt at all (a real TTY, or an MCP client offering elicitation) —
+    /// as opposed to headless / ACT-HTTP, where every `ask` decision
+    /// degrades to deny before a human is ever involved. A per-run fact,
+    /// repeated on every `act.ceiling_class` event so the layer never has to
+    /// infer it from anything but typed fields.
+    pub const CONSENT_PROMPT_CHANNEL: &str = "act.consent.prompt_channel";
 }
 
 /// Which transport dispatched the call.
@@ -253,6 +260,14 @@ pub struct CeilingClassRecord {
     pub mode: String,
     /// Whether the component declared this class in `act.toml`.
     pub declared: bool,
+    /// Whether this run has an interactive prompt channel at all. `mode ==
+    /// "ask"` alone does not mean an `ask` will ever reach a human: headless
+    /// / ACT-HTTP has no channel, so every `ask` decision degrades to deny
+    /// before anyone is asked. Same value on every class in one
+    /// instantiation — it describes the run, not the capability — but
+    /// carried per-record so the layer never needs anything but this event's
+    /// own typed fields to decide whether to warn.
+    pub has_prompt_channel: bool,
 }
 
 /// Lowercase hex SHA-256, no `sha256:` prefix.
@@ -300,6 +315,7 @@ mod tests {
         assert_eq!(attr::POLICY_REASON, "act.policy.reason");
         assert_eq!(attr::POLICY_RULE, "act.policy.rule");
         assert_eq!(attr::CAPABILITY_DECLARED, "act.capability.declared");
+        assert_eq!(attr::CONSENT_PROMPT_CHANNEL, "act.consent.prompt_channel");
     }
 
     #[test]

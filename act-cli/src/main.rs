@@ -496,11 +496,17 @@ fn parse_max_memory(s: &str) -> Result<usize, String> {
 
 /// Select the consent prompter for non-MCP invocations: interactive (y/N
 /// on the terminal) when stdin is a TTY; otherwise headless deny (fail-safe).
-fn tty_or_deny_prompter() -> Arc<dyn act_policy::consent::ConsentPrompter> {
+///
+/// Returns the prompter alongside whether it is actually backed by a prompt
+/// channel — the same decision, made once, instead of a second call site
+/// re-deriving it (and risking disagreement with the prompter actually
+/// selected). `instantiate_component` needs this fact for the instantiation
+/// audit header's declared-but-unreachable-`ask` warning.
+fn tty_or_deny_prompter() -> (Arc<dyn act_policy::consent::ConsentPrompter>, bool) {
     if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        Arc::new(runtime::consent::TtyPrompter)
+        (Arc::new(runtime::consent::TtyPrompter), true)
     } else {
-        Arc::new(act_policy::consent::DenyPrompter)
+        (Arc::new(act_policy::consent::DenyPrompter), false)
     }
 }
 
@@ -569,16 +575,24 @@ struct PreparedComponent {
 /// - MCP stdio: `McpElicitationPrompter` (forwards to the connected MCP client)
 /// - interactive TTY: `TtyPrompter` (y/N on stderr/stdin)
 /// - headless / ACT-HTTP: `DenyPrompter` (fail-safe deny)
+///
+/// `has_prompt_channel` must agree with `prompter`'s actual kind — `true`
+/// for `TtyPrompter` / `McpElicitationPrompter`, `false` for `DenyPrompter`.
+/// It flows into the instantiation audit header's declared-but-unreachable-
+/// `ask` warning; callers pick both together (`tty_or_deny_prompter()`
+/// returns them as a pair for exactly this reason).
 async fn prepare_component(
     component: &ComponentRef,
     opts: &CommonOpts,
     prompter: Arc<dyn act_policy::consent::ConsentPrompter>,
+    has_prompt_channel: bool,
     transport: act_audit::Transport,
 ) -> Result<PreparedComponent> {
     prepare_component_with_consent(
         component,
         opts,
         prompter,
+        has_prompt_channel,
         Arc::new(runtime::elicit::CurrentConsentSink::new()),
         transport,
     )
@@ -592,6 +606,7 @@ async fn prepare_component_with_consent(
     component: &ComponentRef,
     opts: &CommonOpts,
     prompter: Arc<dyn act_policy::consent::ConsentPrompter>,
+    has_prompt_channel: bool,
     current_consent: Arc<runtime::elicit::CurrentConsentSink>,
     transport: act_audit::Transport,
 ) -> Result<PreparedComponent> {
@@ -634,6 +649,7 @@ async fn prepare_component_with_consent(
         component_ref: component.to_string(),
         digest,
         transport,
+        has_prompt_channel,
     };
     let (instance, session_provider, store) = runtime::instantiate_component(
         &engine,
@@ -724,11 +740,13 @@ async fn cmd_run(
             runtime::elicit::McpElicitationPrompter::new(current_consent.clone()),
         );
         // Still MCP wire protocol (rmcp_bridge), just carried over an HTTP
-        // listener instead of stdio — audited as Mcp, not Http.
+        // listener instead of stdio — audited as Mcp, not Http. A connected
+        // MCP client is a real prompt channel.
         let pc = prepare_component_with_consent(
             &component,
             &opts,
             prompter,
+            true,
             current_consent,
             act_audit::Transport::Mcp,
         )
@@ -750,7 +768,8 @@ async fn cmd_run(
             anyhow::bail!("--listen requires --http (MCP stdio has no listen address)");
         }
         // MCP over stdio: use MCP elicitation so the connected MCP client
-        // can approve/deny capability requests interactively.
+        // can approve/deny capability requests interactively — a real
+        // prompt channel.
         let current_consent = Arc::new(runtime::elicit::CurrentConsentSink::new());
         let prompter: Arc<dyn act_policy::consent::ConsentPrompter> = Arc::new(
             runtime::elicit::McpElicitationPrompter::new(current_consent.clone()),
@@ -759,6 +778,7 @@ async fn cmd_run(
             &component,
             &opts,
             prompter,
+            true,
             current_consent,
             act_audit::Transport::Mcp,
         )
@@ -780,10 +800,18 @@ async fn cmd_run(
             None => "[::1]:3000".parse().unwrap(),
         };
 
-        // ACT-HTTP: no MCP peer, no TTY; use DenyPrompter (fail-safe).
+        // ACT-HTTP: no MCP peer, no TTY; use DenyPrompter (fail-safe) — no
+        // prompt channel exists.
         let prompter: Arc<dyn act_policy::consent::ConsentPrompter> =
             Arc::new(act_policy::consent::DenyPrompter);
-        let pc = prepare_component(&component, &opts, prompter, act_audit::Transport::Http).await?;
+        let pc = prepare_component(
+            &component,
+            &opts,
+            prompter,
+            false,
+            act_audit::Transport::Http,
+        )
+        .await?;
         let default_session_id = maybe_open_default_session(&pc, &session_args).await?;
 
         let state = Arc::new(http::AppState {
@@ -814,8 +842,15 @@ async fn cmd_call(
     session_args: Option<String>,
     opts: CommonOpts,
 ) -> Result<()> {
-    let prompter = tty_or_deny_prompter();
-    let pc = prepare_component(&component, &opts, prompter, act_audit::Transport::Cli).await?;
+    let (prompter, has_prompt_channel) = tty_or_deny_prompter();
+    let pc = prepare_component(
+        &component,
+        &opts,
+        prompter,
+        has_prompt_channel,
+        act_audit::Transport::Cli,
+    )
+    .await?;
 
     let arguments: serde_json::Value =
         serde_json::from_str(&args).context("invalid --args JSON")?;
@@ -981,10 +1016,12 @@ async fn close_session_best_effort(pc: &PreparedComponent, session_id: String) {
 // ── Session subcommands ────────────────────────────────────────────────────
 
 async fn cmd_session_open_args_schema(component: ComponentRef, opts: CommonOpts) -> Result<()> {
+    let (prompter, has_prompt_channel) = tty_or_deny_prompter();
     let pc = prepare_component(
         &component,
         &opts,
-        tty_or_deny_prompter(),
+        prompter,
+        has_prompt_channel,
         act_audit::Transport::Cli,
     )
     .await?;
@@ -1041,10 +1078,12 @@ async fn cmd_inspect_tools(
 ) -> Result<()> {
     // `list-tools` runs component code, so this leaf instantiates (same
     // capability handling as `act info --tools`).
+    let (prompter, has_prompt_channel) = tty_or_deny_prompter();
     let pc = prepare_component(
         &component,
         &opts,
-        tty_or_deny_prompter(),
+        prompter,
+        has_prompt_channel,
         act_audit::Transport::Cli,
     )
     .await?;
@@ -1091,10 +1130,12 @@ async fn cmd_info(
     let component_info = runtime::read_component_info(&wasm_bytes)?;
 
     let tools = if show_tools {
+        let (prompter, has_prompt_channel) = tty_or_deny_prompter();
         let pc = prepare_component(
             &component,
             &opts,
-            tty_or_deny_prompter(),
+            prompter,
+            has_prompt_channel,
             act_audit::Transport::Cli,
         )
         .await?;
