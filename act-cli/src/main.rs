@@ -300,7 +300,12 @@ async fn main() -> Result<()> {
                 (opts.config.as_deref(), opts.no_audit, opts.audit_args)
             }
         },
-        Command::Store(_) | Command::Inspect(_) => (None, false, false),
+        Command::Inspect(InspectCommand::Tools { opts, .. }) => {
+            (opts.config.as_deref(), opts.no_audit, opts.audit_args)
+        }
+        Command::Store(_) | Command::Inspect(InspectCommand::ComponentManifest { .. }) => {
+            (None, false, false)
+        }
     };
 
     // Best-effort config load (don't fail on missing config) — feeds both the
