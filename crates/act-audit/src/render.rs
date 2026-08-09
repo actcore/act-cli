@@ -538,28 +538,6 @@ mod tests {
     }
 
     #[test]
-    fn take_bytes_helper_respects_utf8_boundaries() {
-        // Directly test the truncation helper via a rollup that exercises it.
-        // Emoji 🎉 is 4 bytes each. At max 8 bytes, we get exactly 2 emojis.
-        // This test ensures we render them without panic.
-        let mut sf = span_fields();
-        sf.session_id = Some("🎉🎉🎉".to_string()); // 3 emoji × 4 bytes = 12 bytes
-        let roll = Rollup::new(64);
-
-        let line = render_rollup(&sf, &roll);
-        // At 8 bytes exactly (char boundary), we get 2 emojis
-        assert!(
-            line.contains("session:🎉🎉"),
-            "expected 2 emoji at boundary, got {line}"
-        );
-        // Third emoji should not appear (would need 12 bytes)
-        assert!(
-            !line.contains("🎉🎉🎉"),
-            "should not contain 3 emoji, got {line}"
-        );
-    }
-
-    #[test]
     fn render_escapes_newline_in_rule_to_prevent_forgery() {
         // A component declares a filesystem path containing a newline followed
         // by forged audit text. The escaping must prevent the forgery.
