@@ -366,12 +366,11 @@ impl<'a> PolicyFilesystemCtxView<'a> {
         };
         let explained = self.ceiling.classify_explained(&op);
         let mode = self.ceiling.effective_mode().to_string();
-        let key = canonical.display().to_string();
         match explained.decision {
             Decision::Allow => {
                 emit_cap_decision(&CapDecisionRecord::statik(
                     act_types::constants::CAP_FILESYSTEM,
-                    &key,
+                    &op.key,
                     &op.action,
                     Decision4::Allow,
                     &mode,
@@ -382,7 +381,7 @@ impl<'a> PolicyFilesystemCtxView<'a> {
             Decision::Deny => {
                 emit_cap_decision(&CapDecisionRecord::statik(
                     act_types::constants::CAP_FILESYSTEM,
-                    &key,
+                    &op.key,
                     &op.action,
                     Decision4::Deny,
                     &mode,

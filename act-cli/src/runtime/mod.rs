@@ -157,16 +157,42 @@ fn events_contain_error(events: &[act::tools::types::ToolEvent]) -> bool {
 /// Host-generated correlation id, used when the caller supplied no
 /// `std:request-id`. Keeping this non-optional is what makes every audit line
 /// joinable to a client log line.
+///
+/// `render_rollup` renders this truncated to 6 bytes, so the id's *leading*
+/// bytes are the only part an operator actually sees. A literal `act-` prefix
+/// followed by `{pid}-{counter}` put the discriminating part last: for the
+/// common single-call `act call` process the counter is always 0, so the
+/// truncated render showed only `act-` plus a couple of pid digits — and
+/// short-lived processes launched back to back from the same shell routinely
+/// get the same pid reused by the OS, so those first bytes collided across
+/// genuinely different invocations.
+///
+/// Fix: hash the counter, pid, and a timestamp through `RandomState`'s
+/// hasher. `RandomState::new()` reads OS randomness once per thread and
+/// mixes in a per-call increment, so a fresh process gets an independently
+/// random seed (fixing the cross-process collision) while a long-lived
+/// process serving many calls still gets a different hash each time (the
+/// seed increments and the hashed counter/timestamp change). All std, no new
+/// dependency. The full 64-bit hash goes straight into the id, so entropy is
+/// spread evenly rather than living past the point the render truncates.
 fn new_request_id() -> String {
-    // Monotonic counter + process id: no new dependency, unique within a host
-    // process, and cheap enough to sit on the call path.
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     static N: AtomicU64 = AtomicU64::new(0);
-    format!(
-        "act-{}-{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::Relaxed)
-    )
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+
+    let mut hasher = RandomState::new().build_hasher();
+    hasher.write_u32(std::process::id());
+    hasher.write_u64(n);
+    hasher.write_u128(nanos);
+    format!("act-{:x}", hasher.finish())
 }
 
 /// Load a .wasm component from a file path and report the SHA-256 of its
@@ -1089,6 +1115,27 @@ mod tests {
         );
         assert_eq!(meta_str(&md, "std:request-id"), None);
         assert_eq!(meta_str(&[], "std:session-id"), None);
+    }
+
+    #[test]
+    fn request_ids_differ_within_the_first_six_bytes() {
+        // `render_rollup` truncates the rendered id to 6 bytes (`req:` +
+        // `take_bytes(&span.request_id, 6)`), so only the id's leading bytes
+        // are ever visible to an operator. Two ids minted back to back —
+        // the common case for a long-lived host serving several calls, and
+        // the degenerate case of `counter == 0` for every single-call `act
+        // call` process — must diverge inside that window, or two different
+        // calls render as the same `req:` and the trail is no longer
+        // joinable to a client log line.
+        let a = new_request_id();
+        let b = new_request_id();
+        assert_ne!(a, b, "two host-generated ids must not be identical");
+        let cut = |s: &str| s.bytes().take(6).collect::<Vec<u8>>();
+        assert_ne!(
+            cut(&a),
+            cut(&b),
+            "ids must differ within the rendered 6-byte window: {a} vs {b}"
+        );
     }
 
     #[test]

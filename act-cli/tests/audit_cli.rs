@@ -80,3 +80,90 @@ fn a_guest_tool_error_is_audited_as_tool_error_not_ok() {
         "guest failure must not audit as ok: {audit_line}"
     );
 }
+
+/// `fs_policy.rs` emits a `CapDecisionRecord` at each of the two points a
+/// filesystem decision actually resolves: the static ceiling classification
+/// (`check_path_sync`) and the deferred `ask` resolution (`resolve_ask`).
+/// Everything else covering that wiring (`fs_policy.rs`'s own `mod tests`,
+/// `act-audit`'s `record.rs`/`render.rs`) exercises the record types and
+/// the renderer directly, never the two call sites themselves — so this is
+/// the only test that would notice if `check_path_sync` or `resolve_ask`
+/// stopped calling `emit_cap_decision` at all. Runs the real `fs-canary`
+/// fixture (declares `wasi:filesystem` with an unbounded ceiling, so a
+/// `--grant` is what actually narrows it) through both outcomes in one
+/// process: a granted read and an out-of-ceiling read.
+#[test]
+fn fs_decisions_reach_the_audit_trail() {
+    let fixture =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fs-canary.wasm");
+
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let allowed = dir.path().join("ok.txt");
+    std::fs::write(&allowed, "granted content").expect("write fixture file");
+    let rule = format!("{}/**", dir.path().display());
+    let grant = format!(
+        r#"{{"wasi:filesystem":{{"mode":"allowlist","allow":[{{"path":"{rule}","mode":"rw"}}]}}}}"#
+    );
+
+    // In-ceiling read: the rollup line must carry the `filesystem:` clause
+    // naming the matched rule, proving `check_path_sync`'s `Allow` arm ran.
+    let out = act_bin()
+        .args([
+            "call",
+            fixture.to_str().expect("fixture path is utf-8"),
+            "read",
+            "--args",
+            &format!(r#"{{"path":"{}"}}"#, allowed.display()),
+            "--grant",
+            &grant,
+        ])
+        .output()
+        .expect("ran act");
+    assert!(out.status.success(), "granted read must succeed: {out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let rollup = stderr
+        .lines()
+        .find(|l| l.starts_with("audit: \u{25cf}"))
+        .unwrap_or_else(|| panic!("no rollup line in stderr: {stderr}"));
+    assert!(
+        rollup.contains("filesystem:"),
+        "rollup must carry a filesystem: clause, got: {rollup}"
+    );
+    assert!(
+        rollup.contains(&format!("under {rule}")),
+        "rollup must name the matched rule, got: {rollup}"
+    );
+
+    // Out-of-ceiling read: an immediate `✗ deny` line must appear, proving
+    // `check_path_sync`'s `Deny` arm ran — same grant, a path it doesn't cover.
+    let outside = std::path::Path::new("/etc/passwd");
+    let out = act_bin()
+        .args([
+            "call",
+            fixture.to_str().expect("fixture path is utf-8"),
+            "read",
+            "--args",
+            &format!(r#"{{"path":"{}"}}"#, outside.display()),
+            "--grant",
+            &grant,
+        ])
+        .output()
+        .expect("ran act");
+    assert!(
+        !out.status.success(),
+        "out-of-ceiling read must be denied: {out:?}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let deny_line = stderr
+        .lines()
+        .find(|l| l.starts_with("audit: \u{2717} deny"))
+        .unwrap_or_else(|| panic!("no immediate deny line in stderr: {stderr}"));
+    assert!(
+        deny_line.contains("wasi:filesystem"),
+        "deny line must name the capability, got: {deny_line}"
+    );
+    assert!(
+        deny_line.contains("outside ceiling"),
+        "deny line must carry the reason, got: {deny_line}"
+    );
+}

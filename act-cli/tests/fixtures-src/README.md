@@ -47,3 +47,26 @@ cargo run --manifest-path ../../../../act-build/Cargo.toml --release -- \
 # Copy into the fixtures dir:
 cp target/wasm32-wasip2/release/ask_canary.wasm ../../fixtures/ask-canary.wasm
 ```
+
+## fs-canary
+
+Filesystem canary. Exports `act:tools/tool-provider` only, declares
+`wasi:filesystem` with the widest possible ceiling (`**`, rw) so a test's
+`--grant` is what actually narrows access. Its single tool, `read`, reads the
+`path` given in its arguments via plain `std::fs::read_to_string` — so every
+call drives the host's per-op capability decision in `runtime/fs_policy.rs`.
+Used by `tests/audit_cli.rs` to assert the audit trail's `fs:` rollup clause
+and immediate deny line against a real component, not just against
+`CapDecisionRecord`'s constructors directly.
+
+### Rebuild
+
+```bash
+cd tests/fixtures-src/fs-canary
+cargo build --target wasm32-wasip2 --release
+# Pack metadata into the wasm:
+cargo run --manifest-path ../../../../act-build/Cargo.toml --release -- \
+    pack target/wasm32-wasip2/release/fs_canary.wasm
+# Copy into the fixtures dir:
+cp target/wasm32-wasip2/release/fs_canary.wasm ../../fixtures/fs-canary.wasm
+```
