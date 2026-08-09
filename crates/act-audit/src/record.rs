@@ -17,6 +17,11 @@ pub mod attr {
     pub const COMPONENT_DIGEST: &str = "act.component.digest";
     pub const TOOL_NAME: &str = "act.tool.name";
     pub const TOOL_ARGS_SHA256: &str = "act.tool.args_sha256";
+    /// Full tool-argument values, only present when `--audit-args` is set.
+    /// `TOOL_ARGS_SHA256` above is still emitted alongside it — this field
+    /// widens the envelope, it never replaces the digest. Session args are
+    /// never carried by either field: `ToolCallStart` has no such member.
+    pub const TOOL_ARGS: &str = "act.tool.args";
     pub const SESSION_ID: &str = "act.session.id";
     // Caller and call identity. Key names come from ACT-CONSTANTS.md §5,
     // which already reserves std:agent-id / std:request-id / std:traceparent
@@ -146,6 +151,10 @@ pub struct ToolCallStart {
     pub digest: String,
     pub tool: String,
     pub args_sha256: String,
+    /// Full arguments rendered as JSON, present only when `--audit-args` is
+    /// set. `None` by default, in which case only `args_sha256` is emitted —
+    /// this is the field that keeps the default path a digest, never values.
+    pub args_json: Option<String>,
     pub session_id: Option<String>,
     pub transport: Transport,
     /// `std:agent-id` — informational caller identity, never a principal.
@@ -298,6 +307,7 @@ mod tests {
         assert_eq!(attr::COMPONENT_DIGEST, "act.component.digest");
         assert_eq!(attr::TOOL_NAME, "act.tool.name");
         assert_eq!(attr::TOOL_ARGS_SHA256, "act.tool.args_sha256");
+        assert_eq!(attr::TOOL_ARGS, "act.tool.args");
         assert_eq!(attr::SESSION_ID, "act.session.id");
         assert_eq!(attr::AGENT_ID, "act.agent.id");
         assert_eq!(attr::REQUEST_ID, "act.request.id");

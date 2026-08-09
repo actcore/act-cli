@@ -549,6 +549,93 @@ fn instantiation_header_warns_when_declared_ask_has_no_prompt_channel() {
     );
 }
 
+/// Auth is carried in session args (`ACT-AUTH.md`): a component that needs a
+/// token gets it through `open-session`, never through tool-call arguments.
+/// The audit trail writes to stderr, which an operator watches and which
+/// MCP clients capture into their server-log pane — if a token could reach
+/// that stream, every ACT user's terminal scrollback and every MCP client's
+/// log file would become a credential store. This must hold with
+/// `--audit-args` too: that flag widens tool arguments, never session args.
+/// Uses `sessions-canary` (the fixture that actually takes session args) so
+/// there is a real `open-session` call in the path, not a hypothetical one.
+#[test]
+fn session_args_never_appear_in_the_audit_trail() {
+    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/sessions-canary.wasm");
+    const SECRET: &str = "sk-do-not-log-me-0123456789";
+    for extra in [vec![], vec!["--audit-args"]] {
+        let mut cmd = act_bin();
+        cmd.args([
+            "call",
+            fixture.to_str().expect("fixture path is utf-8"),
+            "read",
+            "--args",
+            "{}",
+        ]);
+        cmd.args(["--session-args", &format!(r#"{{"token":"{SECRET}"}}"#)]);
+        cmd.args(&extra);
+        let out = cmd.output().expect("ran act");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !err.contains(SECRET),
+            "session arg leaked into audit output (extra={extra:?}): {err}"
+        );
+    }
+}
+
+/// The default-path half of the credential-safety guarantee: without
+/// `--audit-args`, a tool-call argument value must never reach stderr, only
+/// its digest. `sessions-canary`'s `read` tool ignores its arguments
+/// entirely and declares no capabilities, so nothing else in this call
+/// (no capability resource key, no session-open args) could legitimately
+/// carry the marker either — isolating this to the tool-argument path alone.
+#[test]
+fn tool_arguments_are_digested_by_default() {
+    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/sessions-canary.wasm");
+    const MARKER: &str = "zzmarkerzz";
+    let out = act_bin()
+        .args([
+            "call",
+            fixture.to_str().expect("fixture path is utf-8"),
+            "read",
+            "--args",
+            &format!(r#"{{"name":"{MARKER}"}}"#),
+        ])
+        .output()
+        .expect("ran act");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains(MARKER), "argument value leaked: {err}");
+    assert!(err.contains("args:"), "expected an args digest: {err}");
+}
+
+/// The other half: `--audit-args` must actually widen the envelope. Without
+/// this test, `tool_arguments_are_digested_by_default` above would keep
+/// passing even if `--audit-args` were silently a no-op — it only proves the
+/// default is safe, not that the flag does anything.
+#[test]
+fn audit_args_records_the_full_tool_argument_value() {
+    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/sessions-canary.wasm");
+    const MARKER: &str = "zzmarkerzz";
+    let out = act_bin()
+        .args([
+            "call",
+            fixture.to_str().expect("fixture path is utf-8"),
+            "read",
+            "--args",
+            &format!(r#"{{"name":"{MARKER}"}}"#),
+            "--audit-args",
+        ])
+        .output()
+        .expect("ran act");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains(MARKER),
+        "expected the full argument value with --audit-args set: {err}"
+    );
+}
+
 /// Mirrors `http_decisions_reach_the_audit_trail`, but for the sockets
 /// classify site in `runtime/mod.rs`'s `socket_addr_check` hook. Runs the
 /// `sockets-canary` fixture (declares `wasi:sockets` with an unbounded

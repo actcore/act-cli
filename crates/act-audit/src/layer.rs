@@ -121,6 +121,11 @@ impl Visit for SpanVisitor {
             n if n == attr::COMPONENT_DIGEST => self.0.digest = v.to_string(),
             n if n == attr::TOOL_NAME => self.0.tool = v.to_string(),
             n if n == attr::TOOL_ARGS_SHA256 => self.0.args_sha256 = v.to_string(),
+            // Empty means --audit-args was not set for this call — same
+            // "absent means empty string on the wire" convention SESSION_ID
+            // uses below, so render_rollup's `Option` check can tell "no
+            // value recorded" apart from "recorded as an empty string".
+            n if n == attr::TOOL_ARGS && !v.is_empty() => self.0.args_json = Some(v.to_string()),
             // AGENT_ID, TRACE_PARENT and TRACE_STATE are captured onto the
             // span but stay unrendered by design; only REQUEST_ID reaches a
             // line, so an operator can join it back to a client log line.
@@ -447,6 +452,7 @@ mod tests {
             digest: "1f3a9c4e5d6b7a8c".into(),
             tool: "run_python".into(),
             args_sha256: "9e21c4aa".into(),
+            args_json: None,
             session_id: None,
             transport: Transport::Cli,
             agent_id: None,
@@ -523,6 +529,33 @@ mod tests {
         assert!(
             out[0].contains("req:req-1"),
             "request_id missing, got {}",
+            out[0]
+        );
+    }
+
+    #[test]
+    fn audit_args_replaces_the_digest_with_full_values_in_the_rollup() {
+        // Same fixture-capture concern as the session-id test below: this
+        // proves SpanVisitor's TOOL_ARGS arm actually reads the real field
+        // off the real span, not just that render_rollup can format an
+        // args_json field when handed one directly (render.rs's own tests
+        // already cover that in isolation).
+        let mut s = start();
+        s.args_json = Some(r#"{"path":"/tmp/secret.txt"}"#.into());
+        let out = run(|| {
+            let span = tool_call_span(&s);
+            let _g = span.enter();
+            finish_tool_call(&span, Outcome::Ok, Duration::from_millis(5));
+        });
+        assert_eq!(out.len(), 1, "got {out:?}");
+        assert!(
+            out[0].contains(r#"args:{"path":"/tmp/secret.txt"}"#),
+            "full args missing, got {}",
+            out[0]
+        );
+        assert!(
+            !out[0].contains("args:9e21c4"),
+            "digest prefix must not also appear once full args are shown, got {}",
             out[0]
         );
     }

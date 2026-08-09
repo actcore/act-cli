@@ -23,6 +23,7 @@ pub fn tool_call_span(start: &ToolCallStart) -> tracing::Span {
         { attr::COMPONENT_DIGEST } = %start.digest,
         { attr::TOOL_NAME } = %start.tool,
         { attr::TOOL_ARGS_SHA256 } = %start.args_sha256,
+        { attr::TOOL_ARGS } = start.args_json.as_deref().unwrap_or(""),
         { attr::SESSION_ID } = start.session_id.as_deref().unwrap_or(""),
         { attr::AGENT_ID } = start.agent_id.as_deref().unwrap_or(""),
         { attr::REQUEST_ID } = %start.request_id,

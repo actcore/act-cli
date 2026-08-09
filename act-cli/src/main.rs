@@ -650,6 +650,7 @@ async fn prepare_component_with_consent(
         digest,
         transport,
         has_prompt_channel,
+        record_args: opts.audit_args,
     };
     let (instance, session_provider, store) = runtime::instantiate_component(
         &engine,

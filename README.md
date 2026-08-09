@@ -33,7 +33,7 @@ act info --tools ghcr.io/actpkg/sqlite:0.1.0
 act call ghcr.io/actpkg/sqlite:0.1.0 query \
   --args '{"sql":"SELECT sqlite_version()"}' \
   -m database_path=/data/app.db \
-  --allow-dir /data:./data
+  --grant '{"wasi:filesystem":{"mode":"allowlist","allow":[{"path":"/data/**","mode":"rw"}]}}'
 
 # Serve over HTTP
 act run -l ghcr.io/actpkg/sqlite:0.1.0
@@ -57,6 +57,19 @@ Remote components are cached in `~/.cache/act/components/`.
 | `call`  | Call a tool directly, print result to stdout |
 | `info`  | Show component metadata, tools, and schemas (`--tools`, `--format text\|json\|toon`) |
 | `pull`  | Download a component from OCI or HTTP to local file |
+
+### Audit trail
+
+`run` and `call` write a structured audit trail to stderr: what component is running and under what capability modes, every capability decision as it resolves, and a per-call summary. It is on by default and independent of `RUST_LOG` — only `--no-audit` (or `[audit] enabled = false` in the config file) turns it off.
+
+```
+audit: act-cli/tests/fixtures/fs-canary.wasm sha256:92342c │ wasi:filesystem=ask wasi:http=deny wasi:sockets=deny
+audit: ⚠ declared ask, no prompt channel — every access will be denied: wasi:filesystem
+audit: ? ask-deny  wasi:filesystem  /tmp/probe.txt   denied by user
+audit: ● read  tool-error 1ms  args:43ebc7  req:00392e
+```
+
+That's a real, captured transcript of one headless call with no `--grant`: the first line is the instantiation header (component, digest, resolved mode per capability class); the second warns that a declared `ask` capability has no prompt channel to answer it, so every access degrades to deny; the third is the immediate denial (denials and asks print the moment they resolve, never batched); the fourth is the per-call rollup — outcome, duration, an `args:` digest of the tool arguments (or the full values with `--audit-args`), and a `req:` id for joining this line back to a client log. Allowed operations coalesce into that rollup line instead of one line each, e.g. `filesystem: 12 read under /data/**`.
 
 ### HTTP Endpoints (`run -l`)
 

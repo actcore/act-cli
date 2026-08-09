@@ -17,6 +17,10 @@ pub struct SpanFields {
     pub digest: String,
     pub tool: String,
     pub args_sha256: String,
+    /// Full arguments, present only when `--audit-args` was set for this run.
+    /// `render_rollup` shows this instead of the digest when present — the
+    /// digest is still captured above, just not the thing printed.
+    pub args_json: Option<String>,
     pub session_id: Option<String>,
     pub transport: String,
     /// Defaults to `"incomplete"`, never empty: a span that closes without
@@ -37,6 +41,7 @@ impl Default for SpanFields {
             digest: String::new(),
             tool: String::new(),
             args_sha256: String::new(),
+            args_json: None,
             session_id: None,
             transport: String::new(),
             outcome: "incomplete".to_string(),
@@ -233,12 +238,20 @@ pub fn render_rollup(span: &SpanFields, roll: &Rollup) -> String {
     // the session id below: `take_bytes` yields whole characters, whereas
     // escaping first could cut an escape sequence in half.
     let req_escaped = escape_audit_field(take_bytes(&span.request_id, 6));
+    // `--audit-args` swaps this token from a digest prefix to the full,
+    // escaped argument values — the digest is still captured on the span
+    // (for OTLP / correlation), just not what this line shows once the full
+    // values are available to show instead.
+    let args_display: Cow<'_, str> = match &span.args_json {
+        Some(json) => escape_audit_field(json),
+        None => Cow::Borrowed(take_bytes(&span.args_sha256, 6)),
+    };
     let mut line = format!(
         "{PREFIX}\u{25cf} {}  {} {}  args:{}  req:{}",
         tool_escaped,
         span.outcome,
         humanise_ms(span.duration_ms),
-        take_bytes(&span.args_sha256, 6),
+        args_display,
         req_escaped,
     );
     if let Some(sid) = &span.session_id {
@@ -304,6 +317,7 @@ mod tests {
             digest: "1f3a9c4e5d6b7a8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c".into(),
             tool: "run_python".into(),
             args_sha256: "9e21c4aa00000000".into(),
+            args_json: None,
             session_id: None,
             transport: "cli".into(),
             outcome: "ok".into(),
@@ -378,6 +392,23 @@ mod tests {
         assert!(
             line.contains("req:req-9f"),
             "expected truncated request id, got {line}"
+        );
+    }
+
+    #[test]
+    fn rollup_shows_full_args_instead_of_the_digest_when_present() {
+        let mut sf = span_fields();
+        sf.args_json = Some(r#"{"name":"zzmarkerzz"}"#.to_string());
+        let roll = Rollup::new(64);
+
+        let line = render_rollup(&sf, &roll);
+        assert!(
+            line.contains(r#"args:{"name":"zzmarkerzz"}"#),
+            "expected full args, got {line}"
+        );
+        assert!(
+            !line.contains("args:9e21c4"),
+            "digest prefix must not also appear, got {line}"
         );
     }
 
@@ -527,6 +558,20 @@ mod tests {
     fn render_escapes_newline_in_tool_name() {
         let mut sf = span_fields();
         sf.tool = "run\naudit: forged".to_string();
+        let roll = Rollup::new(64);
+
+        let line = render_rollup(&sf, &roll);
+        assert_eq!(line.matches('\n').count(), 0, "got {line}");
+        assert!(line.contains("\\n"), "expected escaped newline, got {line}");
+    }
+
+    #[test]
+    fn render_escapes_newline_in_full_args() {
+        // Full argument values are caller/agent-controlled the same way the
+        // tool name and rule string are — a value carrying a newline plus
+        // forged `audit:` text must not be able to inject a second line.
+        let mut sf = span_fields();
+        sf.args_json = Some(r#"{"note":"line1\naudit: forged line"}"#.to_string());
         let roll = Rollup::new(64);
 
         let line = render_rollup(&sf, &roll);

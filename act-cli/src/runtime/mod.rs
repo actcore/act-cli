@@ -122,6 +122,11 @@ pub struct AuditContext {
     /// here so `instantiate_component` never has to infer it from the
     /// prompter's type.
     pub has_prompt_channel: bool,
+    /// `--audit-args`: record full tool-argument values in the envelope
+    /// alongside the digest, instead of the digest alone. Never applies to
+    /// session args — those are carried only as `session_id` regardless of
+    /// this flag; see `args_as_json`, which this only gates.
+    pub record_args: bool,
 }
 
 /// Pull a well-known `std:` key out of decoded call metadata for the audit
@@ -148,6 +153,22 @@ fn decode_meta_strings(metadata: &[(String, Vec<u8>)]) -> Vec<(String, String)> 
             value.as_str().map(|s| (k.clone(), s.to_string()))
         })
         .collect()
+}
+
+/// Render tool-call arguments (dCBOR bytes) as a JSON string for the audit
+/// envelope, gated by `--audit-args`. Returns `None` when the flag is unset
+/// (the default — `args_sha256` is all that is ever recorded then) or when
+/// the arguments fail to decode; either way the call itself proceeds
+/// unaffected, since the audit trail must never influence enforcement.
+/// Session args never pass through this function — `open_session_for_call`
+/// only ever forwards a `session_id` into the envelope, never the args that
+/// produced it.
+fn args_as_json(arguments: &[u8], record_args: bool) -> Option<String> {
+    if !record_args {
+        return None;
+    }
+    let value = act_types::cbor::cbor_to_json(arguments).ok()?;
+    serde_json::to_string(&value).ok()
 }
 
 /// True if any event in a completed call's result signals a guest tool-level
@@ -823,6 +844,7 @@ pub fn spawn_component_actor(
                         digest: audit.digest.clone(),
                         tool: name.clone(),
                         args_sha256: act_audit::sha256_hex(&arguments),
+                        args_json: args_as_json(&arguments, audit.record_args),
                         session_id: meta_str(&meta_strings, act_types::constants::META_SESSION_ID),
                         agent_id: meta_str(&meta_strings, act_types::constants::META_AGENT_ID),
                         request_id: meta_str(&meta_strings, act_types::constants::META_REQUEST_ID)
@@ -925,6 +947,7 @@ pub fn spawn_component_actor(
                         digest: audit.digest.clone(),
                         tool: name.clone(),
                         args_sha256: act_audit::sha256_hex(&arguments),
+                        args_json: args_as_json(&arguments, audit.record_args),
                         session_id: meta_str(&meta_strings, act_types::constants::META_SESSION_ID),
                         agent_id: meta_str(&meta_strings, act_types::constants::META_AGENT_ID),
                         request_id: meta_str(&meta_strings, act_types::constants::META_REQUEST_ID)
