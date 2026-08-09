@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "act-audit"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "sha2 0.11.0",
  "tracing",
@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "act-build"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "act-types",
  "anyhow",
@@ -46,7 +46,7 @@ dependencies = [
 
 [[package]]
 name = "act-cli"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "act-audit",
  "act-policy",
@@ -98,7 +98,7 @@ dependencies = [
 
 [[package]]
 name = "act-policy"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "act-types",
  "async-trait",
@@ -114,7 +114,7 @@ dependencies = [
 
 [[package]]
 name = "act-policy-wasm"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "act-policy",
  "futures",
@@ -125,7 +125,7 @@ dependencies = [
 
 [[package]]
 name = "act-store"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "chrono",
  "dirs",

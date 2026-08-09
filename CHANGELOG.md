@@ -7,10 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-11
+
+### Added
+
+- **Structured audit trail.** A new `act-audit` crate records what a component
+  actually did: every tool call opens an envelope span, every capability
+  decision (`wasi:filesystem`, `wasi:http`, `wasi:sockets`) is logged with the
+  rule that matched, and the ceiling resolved at instantiation is recorded up
+  front. It is on by default and writes to stderr, filtered independently of
+  `RUST_LOG` — only `--no-audit` or `[audit] enabled = false` turns it off.
+  `--audit-args` records full tool arguments instead of a digest; session
+  arguments are never recorded. Audit lines escape control characters, Unicode
+  bidi controls and every interpolated value, so a component cannot forge one.
+- **W3C trace context propagation** from MCP `_meta` into audit records, with
+  key-forgery protection on the argument metadata channel.
+- **Compressed OCI blob pulls** — `Accept` negotiation, gzip/brotli/zstd
+  decompression, digest verification, and connection reuse over HTTP/2.
+- **Browser policy engine** — `act-policy` is wrapped as a policy decision
+  point for the web runtime.
+
 ### Changed
 
-- Upgraded wasmtime to 47 (`wasmtime`, `wasmtime-wasi`, `wasmtime-wasi-http`).
-  No host API changes were required; MSRV stays at Rust 1.94.
+- **The ACT → MCP projection is now lossless.** `error.kind` and error metadata
+  survive both error paths under `dev.actcore/error-kind` — in `ErrorData.data`
+  for an early error and in the result's `_meta` for a mid-stream one — so a
+  client can finally tell a denied capability from an internal fault. A single
+  structured content part decoding to a JSON object also populates
+  `structuredContent`, and each content block carries its part's mime type and
+  metadata in its own `_meta`. Metadata keys in the `std:` namespace are
+  respelled to the `dev.actcore/` prefix when they cross into MCP's `_meta`
+  field, whose grammar does not admit `:`; the argument metadata channel is
+  exempt and keeps `std:` spellings, and the legacy `std:session-id` spelling
+  is still accepted inbound.
+- **Wire change:** the synthesized `open_session` / `close_session` tools now
+  publish `_meta.dev.actcore/session-op` instead of `std:session-op`. The old
+  spelling was not a valid MCP `_meta` key name. No consumer of the old key is
+  known, but a client reading it will notice.
+- Upgraded wasmtime to 47 (`wasmtime`, `wasmtime-wasi`, `wasmtime-wasi-http`),
+  rmcp to 3.1, and wasmparser/wasm-encoder to 0.252. No host API changes were
+  required; MSRV stays at Rust 1.94.
+
+### Fixed
+
+- Ask-mode consent works again under MCP revision `2026-07-28`.
+- `act inspect tools` respects `--no-audit` and `--config`.
+- `act-build init` scaffolds Rust components against act-sdk 0.14 and no longer
+  adds a direct `wit-bindgen` dependency, which the SDK's `#[act_component]`
+  macro has emitted itself since 0.14.
 
 ## [0.10.1] - 2026-06-29
 
@@ -601,3 +645,4 @@ Initial release of the ACT CLI host — loads WebAssembly components and exposes
 - Setup action for component e2e testing (`actcore/act-cli/setup@v0`)
 
 [0.1.0]: https://github.com/actcore/act-cli/tree/0.1.0
+[0.11.0]: https://github.com/actcore/act-cli/compare/0.10.1..0.11.0
