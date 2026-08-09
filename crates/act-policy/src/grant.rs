@@ -53,6 +53,17 @@ impl PolicyMode {
     }
 }
 
+impl std::fmt::Display for PolicyMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Deny => "deny",
+            Self::Allowlist => "allowlist",
+            Self::Open => "open",
+            Self::Ask => "ask",
+        })
+    }
+}
+
 // ── Resolved config types ─────────────────────────────────────────────────────
 
 /// One entry in a filesystem allow list: a glob pattern plus the access mode
@@ -274,4 +285,19 @@ fn parse_sockets_constraints(cs: &[serde_json::Value]) -> Result<Vec<SocketsRule
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PolicyMode;
+
+    #[test]
+    fn policy_mode_display_renders_the_config_spellings() {
+        // These are the exact strings an operator reads in an audit line and
+        // the config file accepts under `[policy]` — they must match.
+        assert_eq!(PolicyMode::Deny.to_string(), "deny");
+        assert_eq!(PolicyMode::Allowlist.to_string(), "allowlist");
+        assert_eq!(PolicyMode::Open.to_string(), "open");
+        assert_eq!(PolicyMode::Ask.to_string(), "ask");
+    }
 }

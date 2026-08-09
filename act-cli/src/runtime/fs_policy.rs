@@ -47,6 +47,8 @@ use act_policy::consent::{ConsentAsk, ConsentPrompter, DecisionCache};
 use act_policy::fs_matcher::FsAccess;
 use act_policy::provider::{CompiledCeiling, ResourceOp};
 
+use act_audit::{CapDecisionRecord, Decision4, emit_cap_decision};
+
 // ── Mounts → preopens ─────────────────────────────────────────────────────
 
 /// A (guest path → host path) pair handed to wasmtime-wasi's `preopened_dir`.
@@ -281,10 +283,14 @@ async fn resolve_ask(
             },
         )
         .await;
+    emit_cap_decision(&CapDecisionRecord::answered(
+        act_types::constants::CAP_FILESYSTEM,
+        &path,
+        allowed,
+    ));
     if allowed {
         Ok(canonical)
     } else {
-        tracing::warn!(path = %path, "fs policy: ask denied");
         Err(ErrorCode::NotPermitted.into())
     }
 }
@@ -358,12 +364,34 @@ impl<'a> PolicyFilesystemCtxView<'a> {
             },
             attrs: serde_json::Value::Null,
         };
-        match self.ceiling.classify(&op) {
-            Decision::Allow => Ok(PathDecision::Allow(canonical)),
+        let explained = self.ceiling.classify_explained(&op);
+        let mode = self.ceiling.effective_mode().to_string();
+        let key = canonical.display().to_string();
+        match explained.decision {
+            Decision::Allow => {
+                emit_cap_decision(&CapDecisionRecord::statik(
+                    act_types::constants::CAP_FILESYSTEM,
+                    &key,
+                    &op.action,
+                    Decision4::Allow,
+                    &mode,
+                    explained.rule,
+                ));
+                Ok(PathDecision::Allow(canonical))
+            }
             Decision::Deny => {
-                tracing::warn!(path = %canonical.display(), "fs policy: blocked");
+                emit_cap_decision(&CapDecisionRecord::statik(
+                    act_types::constants::CAP_FILESYSTEM,
+                    &key,
+                    &op.action,
+                    Decision4::Deny,
+                    &mode,
+                    explained.rule,
+                ));
                 Err(ErrorCode::NotPermitted.into())
             }
+            // Deliberately silent: `ask` has not resolved yet. The record is
+            // emitted in `resolve_ask` once the verdict exists.
             Decision::Ask => Ok(PathDecision::Ask {
                 canonical,
                 cache: self.cache.clone(),
@@ -879,6 +907,56 @@ mod mount_tests {
         create_mount_dirs(&mounts).unwrap();
         assert!(target.is_dir());
         std::fs::remove_dir_all(&tmp).ok();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn fs_records_carry_the_matched_rule_and_a_reason_on_deny() {
+        // Pure record construction — no wasmtime store needed.
+        let allow = act_audit::CapDecisionRecord::statik(
+            act_types::constants::CAP_FILESYSTEM,
+            "/data/app.db",
+            "read",
+            act_audit::Decision4::Allow,
+            "allowlist",
+            Some("/data/**".into()),
+        );
+        assert_eq!(allow.cap_id, act_types::constants::CAP_FILESYSTEM);
+        assert_eq!(allow.rule.as_deref(), Some("/data/**"));
+        assert!(allow.reason.is_none());
+
+        let deny = act_audit::CapDecisionRecord::statik(
+            act_types::constants::CAP_FILESYSTEM,
+            "/etc/passwd",
+            "read",
+            act_audit::Decision4::Deny,
+            "allowlist",
+            None,
+        );
+        assert_eq!(deny.reason.as_deref(), Some("outside ceiling"));
+        assert_eq!(deny.actor, act_audit::Actor::Static);
+    }
+
+    #[test]
+    fn ask_resolution_attributes_the_decision_to_the_user() {
+        let r = act_audit::CapDecisionRecord::answered(
+            act_types::constants::CAP_FILESYSTEM,
+            "/home/u/.ssh/id_ed25519",
+            false,
+        );
+        assert_eq!(r.decision, act_audit::Decision4::AskDeny);
+        assert_eq!(r.actor, act_audit::Actor::User);
+        assert_eq!(r.reason.as_deref(), Some("denied by user"));
+
+        let r = act_audit::CapDecisionRecord::answered(
+            act_types::constants::CAP_FILESYSTEM,
+            "/home/u/notes.txt",
+            true,
+        );
+        assert_eq!(r.decision, act_audit::Decision4::AskAllow);
+        assert_eq!(r.actor, act_audit::Actor::User);
     }
 }
 
