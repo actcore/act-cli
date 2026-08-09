@@ -256,6 +256,30 @@ enum InspectCommand {
     },
 }
 
+/// The `fmt` layer's filter: the caller-configured `env_filter`, with the
+/// audit-only targets carved out.
+///
+/// `EnvFilter` matches targets by module-path prefix, so a directive like
+/// `act=info` also matches `act::audit` — it is a "submodule" of `act` in
+/// that scheme. Without this exclusion, `fmt` would re-render every audit
+/// event a second time, in its own format, bypassing `render.rs` entirely —
+/// which is where the audit trail's control-character escaping and
+/// char-boundary-safe truncation live. Guest-controlled values that reach
+/// the trail (session id, tool name, capability id, the rule string) would
+/// then reach stderr unescaped through this second path, reopening the
+/// audit-line forgery hole `act-audit` already closed. `act::guest` is
+/// excluded for the same reason even though nothing emits on it yet — it is
+/// reserved for untrusted guest-authored telemetry (ACT-EVENTS, deferred)
+/// that must never be rendered as though the host authored it.
+fn fmt_filter<S>(
+    env_filter: tracing_subscriber::EnvFilter,
+) -> impl tracing_subscriber::layer::Filter<S> {
+    use tracing_subscriber::filter::{FilterExt, filter_fn};
+    env_filter.and(filter_fn(|meta: &tracing::Metadata<'_>| {
+        meta.target() != act_audit::TARGET_AUDIT && meta.target() != act_audit::TARGET_GUEST
+    }))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -316,7 +340,7 @@ async fn main() -> Result<()> {
 
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
-        .with_filter(env_filter);
+        .with_filter(fmt_filter(env_filter));
 
     // The audit layer carries its own filter, pinned to the audit target.
     // This is what makes the trail unreachable from RUST_LOG / -v / log-level:
@@ -1377,5 +1401,45 @@ mod tests {
         let json = serde_json::json!("not an object");
         let meta = runtime::Metadata::from(json.clone());
         assert!(meta.is_empty());
+    }
+
+    #[test]
+    fn fmt_filter_excludes_audit_and_guest_targets() {
+        // Pins the fmt layer's filter behaviour without touching the real
+        // subscriber or stderr: a capturing layer records every target that
+        // makes it through `fmt_filter`, and only the ordinary one should.
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::{Context, Layer};
+        use tracing_subscriber::prelude::*;
+        use tracing_subscriber::registry::LookupSpan;
+
+        #[derive(Clone, Default)]
+        struct Capture(Arc<Mutex<Vec<String>>>);
+
+        impl<S> Layer<S> for Capture
+        where
+            S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+        {
+            fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(event.metadata().target().to_string());
+            }
+        }
+
+        let cap = Capture::default();
+        let sink = cap.clone();
+        let env_filter: tracing_subscriber::EnvFilter = "act=info".parse().unwrap();
+        let sub = tracing_subscriber::registry().with(cap.with_filter(fmt_filter(env_filter)));
+
+        tracing::subscriber::with_default(sub, || {
+            tracing::info!(target: act_audit::TARGET_AUDIT, "audit event");
+            tracing::info!(target: act_audit::TARGET_GUEST, "guest event");
+            tracing::info!(target: "act::runtime", "ordinary event");
+        });
+
+        let got = sink.0.lock().unwrap().clone();
+        assert_eq!(got, vec!["act::runtime".to_string()]);
     }
 }
