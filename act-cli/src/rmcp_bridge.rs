@@ -472,18 +472,28 @@ impl ActRmcpBridge {
         self.has_sessions && self.default_session_id.is_none()
     }
 
-    /// Base metadata for non-call requests (list-tools, schema fetch),
-    /// with the default session-id injected when in session-of-1 mode.
-    fn base_metadata(&self) -> runtime::Metadata {
+    /// Base metadata for non-call requests (list-tools, schema fetch).
+    ///
+    /// `ctx_meta` is the caller's transport `_meta`, folded in when present.
+    /// Precedence matches `call_tool_impl`: transport metadata first, then
+    /// the session-of-1 default forced last so it overrides any
+    /// client-supplied `std:session-id` and the facade stays stateless.
+    fn base_metadata(&self, ctx_meta: Option<&rmcp::model::MetaObject>) -> runtime::Metadata {
         let mut meta = self.metadata.clone();
+        if let Some(ctx_meta) = ctx_meta {
+            apply_transport_meta(&mut meta, ctx_meta);
+        }
         force_session_id(&mut meta, &self.default_session_id);
         meta
     }
 
-    async fn list_tools_impl(&self) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
+    async fn list_tools_impl(
+        &self,
+        metadata: runtime::Metadata,
+    ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let req = runtime::ComponentRequest::ListTools {
-            metadata: self.base_metadata(),
+            metadata,
             reply: reply_tx,
         };
 
@@ -991,8 +1001,17 @@ impl rmcp::ServerHandler for ActRmcpBridge {
         // `list-tools` runs without a consent sink: a capability touched here
         // has no in-flight `tools/call` to hang an elicitation off, so the
         // gate denies rather than prompting. See `runtime::elicit`.
-        let _ = context;
-        self.list_tools_impl()
+        //
+        // The context's transport `_meta` is still forwarded. A
+        // session-provider component may expose a different tool set per
+        // session, and an agent addressing one sends its session-id here
+        // exactly as it does on `tools/call`. Dropping the whole context
+        // made those per-session tools undiscoverable over MCP: the guest
+        // saw an unaddressed `list-tools` and could only answer with the
+        // sessionless set. Computed eagerly, before the returned future is
+        // built, so nothing borrows `context` past this call.
+        let metadata = self.base_metadata(Some(&context.meta));
+        self.list_tools_impl(metadata)
     }
 
     /// rmcp 3 widened the return type to `CallToolResponse` (SEP-2322 MRTR /
@@ -1398,18 +1417,51 @@ mod tests {
 
     #[test]
     fn base_metadata_injects_default_session_id() {
-        let meta = bridge_with_default(Some("sid_0")).base_metadata();
+        let meta = bridge_with_default(Some("sid_0")).base_metadata(None);
         assert_eq!(
             meta.get_as::<String>(act_types::constants::META_SESSION_ID)
                 .as_deref(),
             Some("sid_0"),
             "base metadata must carry the default session-id"
         );
-        let none = bridge_with_default(None).base_metadata();
+        let none = bridge_with_default(None).base_metadata(None);
         assert!(
             none.get_as::<String>(act_types::constants::META_SESSION_ID)
                 .is_none(),
             "no default → no session-id seeded"
+        );
+    }
+
+    #[test]
+    fn base_metadata_forwards_transport_meta_to_list_tools() {
+        let ctx = rmcp::model::MetaObject(
+            serde_json::json!({ "dev.actcore/session-id": "sid_client" })
+                .as_object()
+                .expect("literal is an object")
+                .clone(),
+        );
+
+        // A session-provider may expose a different tool set per session, so
+        // the client's session-id has to reach the guest on `list-tools` too
+        // — otherwise those tools are undiscoverable. Also covers the
+        // `dev.actcore/*` → `std:*` respelling on the way in.
+        let meta = bridge_with_default(None).base_metadata(Some(&ctx));
+        assert_eq!(
+            meta.get_as::<String>(act_types::constants::META_SESSION_ID)
+                .as_deref(),
+            Some("sid_client"),
+            "transport session-id must be forwarded to list-tools"
+        );
+
+        // Session-of-1 keeps the same precedence as `call_tool_impl`: the
+        // pre-opened default overrides whatever the client supplied.
+        let forced = bridge_with_default(Some("sid_0")).base_metadata(Some(&ctx));
+        assert_eq!(
+            forced
+                .get_as::<String>(act_types::constants::META_SESSION_ID)
+                .as_deref(),
+            Some("sid_0"),
+            "session-of-1 default must still win over a client-supplied id"
         );
     }
 
