@@ -959,6 +959,12 @@ async fn cmd_call(
     Ok(())
 }
 
+/// How long the host waits for a component's `open-session` before giving up.
+/// Generous, because a legitimate open may dial a database or drive a browser
+/// handshake; finite, because an unbounded wait turns a stuck guest into a
+/// silent host.
+const OPEN_SESSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Marshal a JSON object of session args into the WIT shape and call
 /// `open-session` against the prepared component. Returns the
 /// allocated session-id.
@@ -988,7 +994,24 @@ async fn open_session_for_call(pc: &PreparedComponent, json: &str) -> Result<Str
         .await
         .map_err(|_| anyhow::anyhow!("component actor unavailable"))?;
 
-    match reply_rx.await? {
+    // Bounded, because a guest that never returns from `open-session` would
+    // otherwise hang the host forever with nothing on stderr. `act run
+    // --session-args` opens the session *before* it binds the listener, so an
+    // unbounded wait there is indistinguishable from a port that never came
+    // up — the caller sees connection refused and no reason for it.
+    let reply = match tokio::time::timeout(OPEN_SESSION_TIMEOUT, reply_rx).await {
+        Ok(r) => r?,
+        Err(_) => anyhow::bail!(
+            "open-session did not return within {}s. The component is still \
+             inside its `open-session` export; nothing it depends on \
+             (a database, a browser, a remote endpoint) has answered, or it \
+             blocked without yielding. Check the session args and whatever \
+             they point at.",
+            OPEN_SESSION_TIMEOUT.as_secs()
+        ),
+    };
+
+    match reply {
         Ok(session) => Ok(session.id),
         Err(runtime::ComponentError::Tool(te)) => {
             let ls = act_types::types::LocalizedString::from(&te.message);

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A component that never returns from `open-session` no longer hangs the host
+  silently. The wait is now bounded at 60 seconds and reports what happened.
+  This bit hardest with `act run --session-args`, which opens the session
+  *before* it binds the listener: a stuck guest meant the port never came up,
+  so the caller saw connection refused with nothing on stderr to explain it.
+
 ## [0.11.1] - 2026-08-12
 
 ### Changed
