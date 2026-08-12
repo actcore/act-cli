@@ -53,7 +53,7 @@ Remote components are cached in `~/.cache/act/components/`.
 
 | Command | Description |
 |---------|-------------|
-| `run`   | Serve a component over ACT-HTTP (`-l`) or MCP stdio (`--mcp`) |
+| `run`   | Serve a component over MCP — stdio (`--mcp`) or Streamable HTTP (`--mcp --http -l`) |
 | `call`  | Call a tool directly, print result to stdout |
 | `info`  | Show component metadata, tools, and schemas (`--tools`, `--format text\|json\|toon`) |
 | `pull`  | Download a component from OCI or HTTP to local file |

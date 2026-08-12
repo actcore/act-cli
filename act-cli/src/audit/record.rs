@@ -57,7 +57,6 @@ pub mod attr {
 pub enum Transport {
     Cli,
     Mcp,
-    Http,
 }
 
 impl fmt::Display for Transport {
@@ -65,7 +64,6 @@ impl fmt::Display for Transport {
         f.write_str(match self {
             Transport::Cli => "cli",
             Transport::Mcp => "mcp",
-            Transport::Http => "http",
         })
     }
 }
@@ -435,7 +433,6 @@ mod tests {
     fn transport_and_outcome_render_lowercase_kebab() {
         assert_eq!(Transport::Cli.to_string(), "cli");
         assert_eq!(Transport::Mcp.to_string(), "mcp");
-        assert_eq!(Transport::Http.to_string(), "http");
         assert_eq!(Outcome::Ok.to_string(), "ok");
         assert_eq!(Outcome::ToolError.to_string(), "tool-error");
         assert_eq!(Outcome::HostError.to_string(), "host-error");

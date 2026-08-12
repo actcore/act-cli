@@ -3,7 +3,6 @@
 use anyhow::Result;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use tokio::sync::{mpsc, oneshot};
 use tracing::Instrument;
@@ -633,12 +632,6 @@ pub enum ComponentRequest {
         /// the caller instead of the gate reaching for the peer itself.
         consent: Option<elicit::ConsentSink>,
     },
-    CallToolStreaming {
-        name: String,
-        arguments: Vec<u8>,
-        metadata: Vec<(String, Vec<u8>)>,
-        event_tx: mpsc::Sender<SseEvent>,
-    },
     /// Returns a JSON Schema string. Errors with `std:not-found` if the
     /// component does not export `session-provider`.
     GetOpenSessionArgsSchema {
@@ -668,13 +661,6 @@ pub enum ComponentRequest {
 /// Collected result from call-tool (stream already consumed).
 pub struct CallToolResult {
     pub events: Vec<act::tools::types::ToolEvent>,
-}
-
-/// Events sent through the SSE channel. Wraps stream events plus a terminal Done signal.
-pub enum SseEvent {
-    Stream(act::tools::types::ToolEvent),
-    Done,
-    Error(ComponentError),
 }
 
 /// Handle to send requests to the component actor.
@@ -934,106 +920,6 @@ pub fn spawn_component_actor(
                     crate::audit::finish_tool_call(&audit_span, outcome, started.elapsed());
                     let _ = reply.send(response);
                 }
-                ComponentRequest::CallToolStreaming {
-                    name,
-                    arguments,
-                    metadata,
-                    event_tx,
-                } => {
-                    let provider = tool_provider.clone();
-
-                    let started = std::time::Instant::now();
-                    let meta_strings = decode_meta_strings(&metadata);
-                    let audit_span = crate::audit::tool_call_span(&crate::audit::ToolCallStart {
-                        component_ref: audit.component_ref.clone(),
-                        digest: audit.digest.clone(),
-                        tool: name.clone(),
-                        args_sha256: crate::audit::sha256_hex(&arguments),
-                        args_json: args_as_json(&arguments, audit.record_args),
-                        session_id: meta_str(&meta_strings, act_types::constants::META_SESSION_ID),
-                        agent_id: meta_str(&meta_strings, act_types::constants::META_AGENT_ID),
-                        request_id: meta_str(&meta_strings, act_types::constants::META_REQUEST_ID)
-                            .unwrap_or_else(new_request_id),
-                        traceparent: meta_str(
-                            &meta_strings,
-                            act_types::constants::META_TRACEPARENT,
-                        ),
-                        tracestate: meta_str(&meta_strings, act_types::constants::META_TRACESTATE),
-                        transport: audit.transport,
-                    });
-
-                    let (done_tx, done_rx) = oneshot::channel::<()>();
-                    // This arm never collects events (they're forwarded live),
-                    // so a guest `tool-event::error` has to be tracked as it
-                    // passes through — set by `ForwardingConsumer` or the
-                    // Immediate branch below, read after the call completes.
-                    let saw_error = Arc::new(AtomicBool::new(false));
-
-                    let result = store
-                        .run_concurrent(async |accessor| {
-                            let tool_result = provider
-                                .call_call_tool(
-                                    accessor,
-                                    name.clone(),
-                                    arguments.clone(),
-                                    metadata.clone(),
-                                )
-                                .await?;
-
-                            accessor.with(|access| match tool_result {
-                                exports::act::tools::tool_provider::ToolResult::Streaming(
-                                    stream,
-                                ) => {
-                                    let consumer = ForwardingConsumer {
-                                        event_tx: event_tx.clone(),
-                                        done_tx: Some(done_tx),
-                                        saw_error: saw_error.clone(),
-                                    };
-                                    let _ = stream.pipe(access, consumer);
-                                }
-                                exports::act::tools::tool_provider::ToolResult::Immediate(
-                                    events,
-                                ) => {
-                                    for event in events {
-                                        if matches!(event, act::tools::types::ToolEvent::Error(_)) {
-                                            saw_error.store(true, Ordering::Relaxed);
-                                        }
-                                        if event_tx.try_send(SseEvent::Stream(event)).is_err() {
-                                            break;
-                                        }
-                                    }
-                                    let _ = done_tx.send(());
-                                }
-                            });
-
-                            let _ = done_rx.await;
-
-                            Ok::<_, wasmtime::Error>(())
-                        })
-                        .instrument(audit_span.clone())
-                        .await;
-
-                    let outcome = match &result {
-                        Ok(Ok(())) if saw_error.load(Ordering::Relaxed) => {
-                            crate::audit::Outcome::ToolError
-                        }
-                        Ok(Ok(())) => crate::audit::Outcome::Ok,
-                        Ok(Err(_)) | Err(_) => crate::audit::Outcome::HostError,
-                    };
-                    crate::audit::finish_tool_call(&audit_span, outcome, started.elapsed());
-
-                    let terminal = match result {
-                        Ok(Ok(())) => SseEvent::Done,
-                        Ok(Err(e)) => SseEvent::Error(ComponentError::Internal(anyhow::anyhow!(
-                            "call-tool failed: {e}"
-                        ))),
-                        Err(e) => SseEvent::Error(ComponentError::Internal(anyhow::anyhow!(
-                            "run_concurrent failed: {e}"
-                        ))),
-                    };
-                    let _ = event_tx.send(terminal).await;
-                }
-
                 ComponentRequest::GetOpenSessionArgsSchema { metadata, reply } => {
                     let response = match &session_provider {
                         Some(sp) => {
@@ -1181,52 +1067,6 @@ impl StreamConsumer<HostState> for CollectingConsumer {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .extend(buffer);
-        }
-
-        if finish {
-            if let Some(tx) = self.done_tx.take() {
-                let _ = tx.send(());
-            }
-            Poll::Ready(Ok(StreamResult::Dropped))
-        } else {
-            Poll::Ready(Ok(StreamResult::Completed))
-        }
-    }
-}
-
-/// A StreamConsumer that forwards events through an mpsc channel for SSE streaming.
-struct ForwardingConsumer {
-    event_tx: mpsc::Sender<SseEvent>,
-    done_tx: Option<oneshot::Sender<()>>,
-    /// Set when a forwarded event is `tool-event::error`, so the actor can
-    /// audit the call as `ToolError` instead of `Ok` once it completes —
-    /// this consumer never collects events, so this flag is the only signal.
-    saw_error: Arc<AtomicBool>,
-}
-
-impl StreamConsumer<HostState> for ForwardingConsumer {
-    type Item = act::tools::types::ToolEvent;
-
-    fn poll_consume(
-        mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-        store: StoreContextMut<HostState>,
-        mut source: Source<'_, Self::Item>,
-        finish: bool,
-    ) -> Poll<wasmtime::Result<StreamResult>> {
-        let mut buffer = Vec::with_capacity(64);
-        source.read(store, &mut buffer)?;
-
-        for event in buffer {
-            if matches!(event, act::tools::types::ToolEvent::Error(_)) {
-                self.saw_error.store(true, Ordering::Relaxed);
-            }
-            if self.event_tx.try_send(SseEvent::Stream(event)).is_err() {
-                if let Some(tx) = self.done_tx.take() {
-                    let _ = tx.send(());
-                }
-                return Poll::Ready(Ok(StreamResult::Dropped));
-            }
         }
 
         if finish {

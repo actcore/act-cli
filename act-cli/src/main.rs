@@ -1,7 +1,6 @@
 mod audit;
 mod config;
 mod format;
-mod http;
 mod resolve;
 mod rmcp_bridge;
 mod runtime;
@@ -97,7 +96,7 @@ enum Command {
         #[arg(long)]
         mcp: bool,
 
-        /// Serve over ACT-HTTP
+        /// Serve MCP over Streamable HTTP at /mcp (requires --mcp)
         #[arg(long)]
         http: bool,
 
@@ -184,8 +183,8 @@ enum Command {
     /// Inspect `act:sessions/session-provider` — currently only
     /// `open-args-schema`, since opening or closing a session from a
     /// one-shot CLI invocation cannot keep the underlying wasm state
-    /// alive. For real session work, use `act run --http` or
-    /// `act run --mcp` (the host process holds the wasm instance and
+    /// alive. For real session work, use `act run --mcp` (with or
+    /// without `--http`; the host process holds the wasm instance and
     /// the session lives as long as the host).
     #[command(subcommand)]
     Session(SessionCommand),
@@ -732,9 +731,12 @@ async fn cmd_run(
 ) -> Result<()> {
     // Transport matrix:
     //   --mcp                 → MCP over stdio
-    //   --http                → ACT-HTTP REST server
     //   --mcp --http          → MCP over Streamable HTTP at /mcp
-    //   neither (with --listen) → ACT-HTTP REST server (back-compat)
+    //
+    // ACT-HTTP (the REST binding: /info, /tools, /sessions) was removed in
+    // 0.12.0. `--http` alone, and a bare `--listen`, used to start it; both
+    // now fail with a message pointing at the MCP transports rather than
+    // silently serving a different protocol on the same flag.
     if mcp && http {
         let addr = match &listen {
             Some(s) => parse_listen_addr(s)?,
@@ -802,44 +804,14 @@ async fn cmd_run(
     }
 
     if http || listen.is_some() {
-        let addr = match &listen {
-            Some(s) => parse_listen_addr(s)?,
-            None => "[::1]:3000".parse().unwrap(),
-        };
-
-        // ACT-HTTP: no MCP peer, no TTY; use DenyPrompter (fail-safe) — no
-        // prompt channel exists.
-        let prompter: Arc<dyn act_policy::consent::ConsentPrompter> =
-            Arc::new(act_policy::consent::DenyPrompter);
-        let pc = prepare_component(
-            &component,
-            &opts,
-            prompter,
-            false,
-            crate::audit::Transport::Http,
+        anyhow::bail!(
+            "ACT-HTTP (the REST binding) was removed in 0.12.0. \
+             Use `--mcp` for MCP over stdio, or `--mcp --http` to serve MCP \
+             over Streamable HTTP at /mcp on --listen."
         )
-        .await?;
-        let default_session_id = maybe_open_default_session(&pc, &session_args).await?;
-
-        let state = Arc::new(http::AppState {
-            info: pc.info,
-            component: pc.handle,
-            metadata: pc.metadata,
-            default_session_id,
-        });
-
-        tracing::info!(%addr, "ACT host listening");
-
-        let listener = tokio::net::TcpListener::bind(addr).await?;
-        axum::serve(listener, http::create_router(state))
-            .await
-            .context("server error")?;
-        return Ok(());
     }
 
-    anyhow::bail!(
-        "Specify a transport: --mcp (stdio), --http (ACT-HTTP server), or --mcp --http (MCP over HTTP)"
-    )
+    anyhow::bail!("Specify a transport: --mcp (stdio), or --mcp --http (MCP over HTTP)")
 }
 
 async fn cmd_call(
