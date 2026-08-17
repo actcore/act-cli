@@ -81,3 +81,53 @@ fn components_enumerates_the_profiles_and_forgets_the_emptied_ones() {
     store.erase("comp-a", "k").unwrap();
     assert_eq!(store.components().unwrap(), vec!["comp-b"]);
 }
+
+/// The phase's entire protection story, and the one `act secret set` prints to
+/// the operator: *"the file will be created 0600, readable only by this
+/// user."* Deleting the `mode(0o600)` call left every other test green while
+/// the plaintext records were written at the ambient umask — 0644 on a default
+/// box — and the CLI kept printing the promise.
+///
+/// The root is a directory this crate creates, not the tempdir itself:
+/// `tempfile` already makes its own directories 0700, so asserting on that
+/// would hold whether or not the store sets a mode.
+#[cfg(unix)]
+#[test]
+fn the_store_is_created_readable_only_by_its_owner() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("store");
+    let store = FileStore::new(root.clone());
+    store.put("comp", "notion", &rec()).unwrap();
+
+    let mode = |p: &std::path::Path| {
+        std::fs::metadata(p)
+            .unwrap_or_else(|e| panic!("{}: {e}", p.display()))
+            .permissions()
+            .mode()
+            & 0o777
+    };
+
+    for p in [
+        act_credentials::backend::file::secrets_path(&root),
+        root.join("index.json"),
+    ] {
+        assert_eq!(
+            mode(&p),
+            0o600,
+            "{} must be 0600 — `act secret set` promises it",
+            p.display()
+        );
+    }
+
+    // Files at 0600 keep the contents safe on their own; write permission on
+    // the directory is enough for a co-group user to `rename` their own
+    // `secrets.json` over the real one and feed a chosen credential to every
+    // component that reads this store.
+    assert_eq!(
+        mode(&root),
+        0o700,
+        "the store directory must not be created at the ambient umask"
+    );
+}

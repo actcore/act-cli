@@ -43,6 +43,18 @@ pub enum HostError {
     Unavailable(String),
 }
 
+/// What the guest is told when the store could not be read.
+///
+/// Host-authored and constant on purpose. `StoreError::Encoding` is built from
+/// `serde_json`'s message, and serde's `invalid type` text embeds the offending
+/// JSON scalar — so forwarding the detail hands stored credential material to
+/// the guest, which puts it in a tool result. Externally-materialised store
+/// files are a first-class source (spec §5.6), and the pipelines that render
+/// them emit JSON numbers without being asked, so a numeric PIN or account id
+/// is exactly the shape that reaches this path. The detail goes to the host's
+/// log at `warn`, where the operator can see it and the agent cannot.
+const STORE_UNREADABLE: &str = "the credential store could not be read";
+
 impl HostError {
     fn to_wit(&self) -> store::SecretError {
         match self {
@@ -121,7 +133,10 @@ impl CredentialHost {
                 Ok(rec.project())
             }
             Ok(None) => Err(HostError::NotFound),
-            Err(e) => Err(HostError::Unavailable(e.to_string())),
+            Err(e) => {
+                tracing::warn!(error = %e, "credential store read failed");
+                Err(HostError::Unavailable(STORE_UNREADABLE.into()))
+            }
         }
     }
 
@@ -135,9 +150,10 @@ impl CredentialHost {
         {
             return Err(HostError::InvalidSession);
         }
-        self.store
-            .list(Some(&self.component))
-            .map_err(|e| HostError::Unavailable(e.to_string()))
+        self.store.list(Some(&self.component)).map_err(|e| {
+            tracing::warn!(error = %e, "credential store list failed");
+            HostError::Unavailable(STORE_UNREADABLE.into())
+        })
     }
 }
 
@@ -733,6 +749,86 @@ mod tests {
             serve_get(&ctx, "s1", &want("notion")).await,
             Err(store::SecretError::Unavailable(_))
         ));
+    }
+
+    /// The stored value a corrupt-store test must never see leave the host.
+    const MATERIAL: &str = "987654321";
+
+    /// A `secrets.json` the way an external secret-materialiser writes one:
+    /// `std:value` as a JSON number, which the CLI's own `set` cannot produce
+    /// but `jq` / `op` / `kubectl get secret -o json` do without being asked.
+    fn seed_numeric_value(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            act_credentials::backend::file::secrets_path(dir),
+            format!(
+                r#"{{"entries":{{"comp":{{"notion":{{"kind":"std:opaque","fields":{{"std:value":{MATERIAL}}},"host_only":{{}},"description":null,"expires_at":null}}}}}}}}"#
+            ),
+        )
+        .unwrap();
+    }
+
+    fn ctx_over(
+        dir: &std::path::Path,
+        ceiling: Arc<dyn act_policy::provider::CompiledCeiling>,
+    ) -> GateContext {
+        let h = Arc::new(CredentialHost::new(
+            Arc::new(FileStore::new(dir.to_path_buf())),
+            "comp".to_string(),
+        ));
+        h.note_session_opened("s1");
+        GateContext {
+            host: Some(h),
+            ceiling,
+            prompter: Arc::new(DenyPrompter),
+            cache: Arc::new(DecisionCache::new()),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_store_decode_error_does_not_carry_stored_material_to_the_guest() {
+        // The phase's central claim, on the one path that used to break it:
+        // `StoreError::Encoding` wraps serde's message, and serde's
+        // `invalid type` text quotes the offending scalar. Forwarding it put
+        // the stored credential in the guest's `unavailable` payload, and the
+        // guest puts that in a tool result — so the agent read the value.
+        // Spec §5.6 makes an externally-materialised store file a first-class
+        // source, which is how a record this shape gets on disk at all.
+        let dir = tempfile::tempdir().unwrap();
+        seed_numeric_value(dir.path());
+
+        let ctx = ctx_over(dir.path(), ceiling(true, PolicyMode::Open).await);
+        let Err(store::SecretError::Unavailable(msg)) =
+            serve_get(&ctx, "s1", &want("notion")).await
+        else {
+            panic!("a store that cannot be decoded must report `unavailable`");
+        };
+
+        assert!(
+            !msg.contains(MATERIAL),
+            "stored material reached the guest inside the error: {msg}"
+        );
+        assert_eq!(
+            msg, STORE_UNREADABLE,
+            "the guest gets a host-authored constant, never the store's own words"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_listing_over_an_undecodable_store_is_host_authored_too() {
+        // `list` reads the index, which has no field that could hold a value,
+        // so this is not today's leak — it is what keeps the two error sites
+        // uniform, so a backend that ever lists from the records cannot
+        // reintroduce it by inheriting the old `e.to_string()`.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path()).unwrap();
+        std::fs::write(dir.path().join("index.json"), r#"{"version":"one"}"#).unwrap();
+
+        let ctx = ctx_over(dir.path(), ceiling(true, PolicyMode::Open).await);
+        let Err(store::SecretError::Unavailable(msg)) = serve_list(&ctx, Some("s1")).await else {
+            panic!("an index that cannot be decoded must report `unavailable`");
+        };
+        assert_eq!(msg, STORE_UNREADABLE);
     }
 
     #[test]

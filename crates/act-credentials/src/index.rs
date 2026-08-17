@@ -32,7 +32,7 @@ impl Index {
     }
 
     pub fn save(&self, root: &Path) -> Result<(), StoreError> {
-        std::fs::create_dir_all(root)?;
+        create_dir_private(root)?;
         let text =
             serde_json::to_string_pretty(self).map_err(|e| StoreError::Encoding(e.to_string()))?;
         write_private(&Self::path(root), text.as_bytes())
@@ -70,6 +70,31 @@ impl Index {
     }
 }
 
+/// `create_dir_all`, then narrow the leaf directory to `0700` on unix.
+///
+/// The records are 0600, so the *contents* are safe at any directory mode —
+/// but write permission on the directory is enough for a co-group user to
+/// `rename` their own `secrets.json` over the real one and feed a chosen
+/// credential to every component that reads this store. That is credential
+/// substitution against exactly the threat [`write_private`]'s `create_new`
+/// guard was written to close. The default root under `dirs::data_dir()`
+/// inherits the home directory's own protection; an explicit
+/// `--credentials-backend file:/srv/shared/store` inherits nothing.
+///
+/// Applied on every write rather than only on creation, so a store laid down
+/// by an earlier build heals instead of staying loose forever. A directory
+/// widened on purpose for sharing is the attack above, not a use case this
+/// backend supports.
+pub(crate) fn create_dir_private(dir: &Path) -> Result<(), StoreError> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
 /// Atomic write with restrictive permissions: temp file then rename.
 ///
 /// The mode is set **as the file is created**, not chmodded afterwards.
@@ -87,7 +112,7 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<(), StoreError>
     use std::io::Write;
 
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(dir)?;
+    create_dir_private(dir)?;
     let tmp = path.with_extension("tmp");
 
     match std::fs::remove_file(&tmp) {

@@ -27,10 +27,17 @@ package act:credentials@0.1.0;
 interface types {
   use act:core/types@0.4.0.{cbor};
 
-  /// Shape of a secret, as a namespaced string. Well-known kinds use the
-  /// `std:` prefix (e.g. "std:api-key", "std:bearer-token", "std:basic-auth");
-  /// third-party kinds use their own namespace. The kind determines which
-  /// keys appear in `secret.fields`.
+  /// Shape of a secret, as a namespaced string. Well-known kinds carry the
+  /// `std:` prefix and are registered in ACT-CONSTANTS: "std:opaque" (one
+  /// value), "std:basic" (username and password), "std:oauth2" (an access
+  /// token, with expiry and scopes alongside it); third-party kinds use
+  /// their own namespace. The kind determines which keys appear in
+  /// `secret.fields`.
+  ///
+  /// A string rather than an enum because every appearance is in a returned
+  /// position: a new case in a closed enum would arrive at components built
+  /// against the earlier version, which cannot lower it. Registering a kind
+  /// therefore needs no WIT change and no version bump.
   type secret-kind = string;
 
   /// The secret material itself: field name to CBOR-encoded value. Field
@@ -56,9 +63,13 @@ interface types {
   record secret-request {
     /// Store lookup key.
     key: string,
-    /// Expected shape. When present, the host MAY reject a key whose
-    /// stored kind differs rather than hand back fields the caller
-    /// cannot interpret.
+    /// Expected shape, when the component knows it — absent for a bridge
+    /// that has not yet seen its first challenge. A provisioning hint, NOT
+    /// a retrieval filter: it tells the host what to ask a human for, and
+    /// does not constrain what `get-secret` returns. A value stored as
+    /// "std:opaque" is still served to a component expecting "std:oauth2",
+    /// because that is the same string in the same header; the component
+    /// inspects `secret.kind` and decides for itself.
     kind: option<secret-kind>,
     /// The resource the credential will be used against (a host, a URL,
     /// an account id). Advisory context for the human being prompted.
@@ -74,8 +85,10 @@ interface types {
   variant secret-error {
     /// No such key in the compartment this component can see.
     not-found,
-    /// The key exists but policy refused it — undeclared class, denied
-    /// grant, or a human answering no.
+    /// Policy refused the request — undeclared class, denied grant, or a
+    /// human answering no. It says nothing about whether the key exists:
+    /// the decision is taken before the store is consulted, so `denied`
+    /// cannot be used to probe a profile for keys.
     denied,
     /// The `session` argument does not name a live session.
     invalid-session,
@@ -101,8 +114,9 @@ interface store {
   /// Enumerate the credentials this component may ask for, without their
   /// material.
   ///
-  /// `session` scopes the listing to one session's compartment; when
-  /// absent, the listing covers what is visible outside any session.
+  /// `session`, when present, must name a live session — it is checked,
+  /// not used to narrow the result. There is no per-session compartment:
+  /// the listing covers this component's whole profile either way.
   /// Components use this to discover which keys exist before requesting
   /// one, so a missing credential is a first-class answer rather than a
   /// failed call.

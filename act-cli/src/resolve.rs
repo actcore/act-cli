@@ -45,9 +45,11 @@ pub async fn resolve(component_ref: &ComponentRef, fresh: bool) -> Result<PathBu
 /// The stable key a component's credential profile is namespaced under.
 ///
 /// This is *not* `component_ref.to_string()`. For `Http`/`Oci`/`Name` refs
-/// `to_string()` already is canonical (a parsed URL, a registry ref matched
-/// by the OCI regex, a bare name) and is returned unchanged. For `Local` it
-/// is not: `to_string()` is `path.display()` verbatim, so `./notion.wasm`,
+/// `to_string()` is returned unchanged: it is already canonical *as a
+/// string* (a parsed URL, a registry ref matched by the OCI regex, a bare
+/// name) — but see the caveat below, because canonical as a string is not
+/// the same as canonical as an identity. For `Local` it is not even that:
+/// `to_string()` is `path.display()` verbatim, so `./notion.wasm`,
 /// `notion.wasm` and its absolute form would each open a *different*
 /// profile for the same file — `act secret set ./notion.wasm` followed by
 /// `act run notion.wasm` would silently miss.
@@ -58,6 +60,32 @@ pub async fn resolve(component_ref: &ComponentRef, fresh: bool) -> Result<PathBu
 /// of the same path agrees. Both `act secret set/list/rm` and the runtime's
 /// `credential_host` (main.rs) key their profile lookups through this
 /// function, so they cannot drift apart.
+///
+/// # A remote ref's tag is part of the profile identity
+///
+/// For remote refs the whole ref string is the key, tag and digest included,
+/// and this function does nothing to narrow it. So
+/// `ghcr.io/actpkg/notion:0.1.0`, `…/notion:0.2.0`, `…/notion`,
+/// `…/notion:latest` and `…/notion@sha256:…` are **five distinct profiles**
+/// for what an operator thinks of as one component, and provisioning against
+/// one while running another gets a bare `not-found`:
+///
+/// ```text
+/// act secret set ghcr.io/actpkg/notion:0.1.0 --key mcp.notion.com …
+/// act run        ghcr.io/actpkg/notion:0.2.0     # other profile → not-found
+/// ```
+///
+/// This fails closed — a version bump never hands a new artifact the old
+/// artifact's credential, which is the safe direction, and it is why phase 1
+/// ships as is rather than guessing at an equivalence between refs. What it
+/// costs is that every upgrade is a silent re-provisioning event whose only
+/// symptom is `not-found`.
+///
+/// Phase 2 owes one of two remedies, and the choice is deliberately left
+/// open here: canonicalise remote refs to the repository without the tag, or
+/// keep the key and make the first `not-found` name the profile it looked in
+/// (design §5.2's "first-failure message carrying a copy-pasteable
+/// command"). Until then this is a documented sharp edge, not a bug.
 pub fn profile_key(component_ref: &ComponentRef) -> String {
     match component_ref {
         ComponentRef::Local(path) => {

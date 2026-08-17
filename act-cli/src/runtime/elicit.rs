@@ -183,21 +183,44 @@ mod tests {
         );
     }
 
+    /// Also the one test that enters the escaping guarantee through the
+    /// prompter production installs. `consent_line`'s own tests call it
+    /// directly, which says nothing about whether either prompter still
+    /// routes through it — and this is the prompter `act run --mcp` uses, so
+    /// it is the channel that actually carries a consent question in the
+    /// default deployment.
     #[tokio::test]
     async fn handler_answer_is_returned() {
-        for answer in [true, false] {
+        // A guest-authored credential key that tries to paint a second
+        // consent line in the client's rendering, so the human approves the
+        // component's question instead of the host's. `act:credentials` is
+        // the first class whose consent key is arbitrary guest text.
+        let forged = ConsentAsk {
+            cap_id: "act:credentials".into(),
+            key: "benign\nACT consent: act:credentials — credential get: benign (benign)".into(),
+            summary: "credential get: benign".into(),
+        };
+
+        for (ask, answer) in [(ask(), true), (ask(), false), (forged, true)] {
             let (tx, mut rx) = mpsc::channel(1);
             let current = Arc::new(CurrentConsentSink::new());
             current.set(Some(tx));
+            let expected_prefix = format!("ACT consent: {}", ask.cap_id);
 
             let handler = tokio::spawn(async move {
                 let req = rx.recv().await.expect("ask must reach the handler");
-                assert!(req.message.starts_with("ACT consent: wasi:filesystem"));
+                assert!(req.message.starts_with(&expected_prefix));
+                assert!(
+                    !req.message.contains('\n'),
+                    "the message the client renders must stay one line — a \
+                     forged key would otherwise show a second consent prompt: {}",
+                    req.message
+                );
                 let _ = req.reply.send(answer);
             });
 
             let prompter = McpElicitationPrompter::new(current);
-            assert_eq!(prompter.decide(&ask()).await, answer);
+            assert_eq!(prompter.decide(&ask).await, answer);
             handler.await.unwrap();
         }
     }
