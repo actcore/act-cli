@@ -4,9 +4,11 @@ mod format;
 mod resolve;
 mod rmcp_bridge;
 mod runtime;
+mod secret_cmd;
 
 use act_types::cbor;
 use resolve::ComponentRef;
+use secret_cmd::SecretCmd;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -54,6 +56,21 @@ struct CommonOpts {
     /// credentials — it warns on startup.
     #[arg(long = "audit-args")]
     audit_args: bool,
+
+    // Declared here, on the subcommands that instantiate a guest, rather than
+    // as one flag on `act` itself: a flag `act run` accepts and then ignores
+    // is worse than no flag, because the operator believes the runtime is
+    // reading the store they named. `act secret` declares the same flag on
+    // its own subcommand and both parse it through
+    // `runtime::credentials::resolve_backend`, so the writer and the reader
+    // cannot drift. Named explicitly rather than inferred: a future backend
+    // arrives as a value for this flag, never as a silent fallback
+    // (design D13/§7.4).
+    /// Credential store this run reads from: `file:<path>`. Defaults to the
+    /// platform's credential-store location — the same store `act secret`
+    /// writes to.
+    #[arg(long = "credentials-backend", value_name = "BACKEND")]
+    credentials_backend: Option<String>,
 
     /// Use a named profile from the config file
     #[arg(long)]
@@ -194,6 +211,20 @@ enum Command {
     /// Inspect a component artifact (read-only, no instantiation).
     #[command(subcommand)]
     Inspect(InspectCommand),
+    /// Manage stored credentials. There is no `get`: a value is never printed.
+    Secret {
+        // The same flag, the same parser and the same default as the
+        // run-side flag on `CommonOpts` — that is what makes `act secret set`
+        // and `act run` agree on where the store lives. `global` so it may be
+        // written before or after `set`/`list`/`rm`.
+        /// Credential store to write to: `file:<path>`. Defaults to the
+        /// platform's credential-store location — the same store `act run`
+        /// reads from.
+        #[arg(long, global = true, value_name = "BACKEND")]
+        credentials_backend: Option<String>,
+        #[command(subcommand)]
+        cmd: SecretCmd,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -294,7 +325,9 @@ async fn main() -> Result<()> {
         Command::Run { opts, .. } | Command::Call { opts, .. } | Command::Info { opts, .. } => {
             (opts.config.as_deref(), opts.no_audit, opts.audit_args)
         }
-        Command::Skill { .. } | Command::Pull { .. } => (None, false, false),
+        Command::Skill { .. } | Command::Pull { .. } | Command::Secret { .. } => {
+            (None, false, false)
+        }
         Command::Session(sub) => match sub {
             SessionCommand::OpenArgsSchema { opts, .. } => {
                 (opts.config.as_deref(), opts.no_audit, opts.audit_args)
@@ -420,6 +453,15 @@ async fn main() -> Result<()> {
                 opts,
             } => cmd_inspect_tools(reference, format, opts).await,
         },
+        Command::Secret {
+            cmd,
+            credentials_backend,
+        } => {
+            let global_opts = secret_cmd::GlobalOpts {
+                credentials_backend,
+            };
+            secret_cmd::cmd_secret(cmd, &global_opts).await
+        }
     }
 }
 
@@ -667,7 +709,10 @@ async fn prepare_component_with_consent(
         max_memory,
         prompter,
         cache,
-        credential_host(&audit.component_ref)?,
+        credential_host(
+            &resolve::profile_key(component),
+            opts.credentials_backend.as_deref(),
+        )?,
         &audit,
     )
     .await?;
@@ -685,28 +730,33 @@ async fn prepare_component_with_consent(
     })
 }
 
-/// Build the credential host serving one component run, or `None` when this
-/// platform has no data directory to put a store in.
+/// Build the credential host serving one component run, or `None` when no
+/// store was named and this platform has no data directory to put one in.
 ///
-/// `component_ref` is the profile namespace — the resolved reference the
-/// operator used, which is the same string `act secret set` writes under. It
-/// is what makes one component unable to read another's credentials
-/// (design §2.1), so it is threaded from the audit context rather than
-/// re-derived here, where it could drift.
+/// `component_ref` is the profile namespace, and it is what makes one
+/// component unable to read another's credentials (design §2.1). It must be
+/// `resolve::profile_key(component)`, not `component.to_string()` — the
+/// audit context's `component_ref` field keeps the operator's literal
+/// spelling for the audit trail, but the profile namespace needs the
+/// normalised form so `act secret set ./x.wasm` and `act run x.wasm` land
+/// on the same profile. Callers pass the normalised key directly rather
+/// than reading it back off `AuditContext`, so the two purposes can't be
+/// conflated by threading one value through both.
 ///
-/// The backend is named explicitly through `backend::select`, never inferred:
+/// `credentials_backend` is the operator's `--credentials-backend`, parsed by
+/// the same `resolve_backend` `act secret` uses: the reader resolves the store
+/// exactly as the writer did. The backend is named explicitly, never inferred:
 /// there is deliberately no mode that picks one for you (design §7.4).
 fn credential_host(
     component_ref: &str,
+    credentials_backend: Option<&str>,
 ) -> Result<Option<Arc<runtime::credentials::CredentialHost>>> {
-    let Some(root) = runtime::credentials::default_store_root() else {
+    let Some(choice) = runtime::credentials::resolve_backend(credentials_backend)? else {
         return Ok(None);
     };
-    let store = act_credentials::backend::select(
-        act_credentials::backend::BackendChoice::File(root.clone()),
-        &root,
-    )
-    .with_context(|| format!("opening credential store at {}", root.display()))?;
+    let root = runtime::credentials::backend_root(&choice).to_path_buf();
+    let store = act_credentials::backend::select(choice, &root)
+        .with_context(|| format!("opening credential store at {}", root.display()))?;
     Ok(Some(Arc::new(runtime::credentials::CredentialHost::new(
         Arc::from(store),
         component_ref.to_string(),
@@ -1396,6 +1446,30 @@ mod tests {
     fn parse_cli_metadata_kv_pair() {
         let result = parse_cli_metadata(&["key=value".to_string()], None, None).unwrap();
         assert_eq!(result, Some(serde_json::json!({"key": "value"})));
+    }
+
+    /// The reader half of the profile-namespace fix. `act secret set` keys
+    /// the write on `resolve::profile_key`; if the runtime keyed the read on
+    /// the operator's literal spelling instead, `act secret set ./x.wasm`
+    /// followed by `act run x.wasm` would miss with a bare not-found. The
+    /// writer half is covered end-to-end in `tests/secret_cli.rs`.
+    #[test]
+    fn the_runtime_reads_the_profile_the_writer_wrote() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = format!("file:{}", dir.path().display());
+        let cwd = std::env::current_dir().unwrap();
+
+        for spelling in ["./x.wasm", "x.wasm"] {
+            let component: ComponentRef = spelling.parse().unwrap();
+            let host = credential_host(&resolve::profile_key(&component), Some(&backend))
+                .unwrap()
+                .expect("an explicitly named backend always yields a host");
+            assert_eq!(
+                host.component(),
+                cwd.join("x.wasm").display().to_string(),
+                "{spelling} must reach the same profile as every other spelling"
+            );
+        }
     }
 
     #[test]

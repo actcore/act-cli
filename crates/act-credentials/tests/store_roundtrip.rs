@@ -65,3 +65,19 @@ fn a_component_cannot_see_another_components_keys() {
     assert!(store.get("comp-b", "shared-name").unwrap().is_none());
     assert!(store.list(Some("comp-b")).unwrap().is_empty());
 }
+
+#[test]
+fn components_enumerates_the_profiles_and_forgets_the_emptied_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FileStore::new(dir.path().to_path_buf());
+    assert!(store.components().unwrap().is_empty());
+
+    store.put("comp-a", "k", &rec()).unwrap();
+    store.put("comp-b", "k", &rec()).unwrap();
+    assert_eq!(store.components().unwrap(), vec!["comp-a", "comp-b"]);
+
+    // A profile exists only while it holds something: `act secret list`
+    // must not report a component whose last credential was removed.
+    store.erase("comp-a", "k").unwrap();
+    assert_eq!(store.components().unwrap(), vec!["comp-b"]);
+}

@@ -21,9 +21,10 @@
 //! about the credential logic itself has to be written twice, or written async.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use act_credentials::backend::BackendChoice;
 use act_credentials::record::{Secret, SecretInfo};
 use act_credentials::store::CredentialStore;
 use act_policy::providers::credentials::CAP_CREDENTIALS;
@@ -68,9 +69,10 @@ impl CredentialHost {
         }
     }
 
-    /// The component reference this host serves, as the operator wrote it.
-    /// It is the profile namespace — the boundary the whole design rests on
-    /// (spec §2.1) — and it is what a consent prompt must name (spec §5.5).
+    /// The component reference this host serves — `resolve::profile_key` of
+    /// the reference the operator wrote, not the literal spelling. It is the
+    /// profile namespace — the boundary the whole design rests on (spec
+    /// §2.1) — and it is what a consent prompt must name (spec §5.5).
     pub fn component(&self) -> &str {
         &self.component
     }
@@ -141,11 +143,49 @@ impl CredentialHost {
 
 /// Where the file backend lives when the operator has not named one.
 ///
-/// `act secret set` will grow an explicit `--credentials-backend`; until then
-/// this is the single path the writer and the reader have to agree on, so it
-/// lives next to the reader rather than in either caller.
+/// This is the path the writer (`act secret`) and the reader (`act run` /
+/// `act call`) have to agree on when neither was given
+/// `--credentials-backend`, so it lives next to the reader rather than in
+/// either caller. `None` on a platform with no data directory.
 pub fn default_store_root() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("act").join("credentials"))
+}
+
+/// Parse `--credentials-backend`, or fall back to [`default_store_root`].
+///
+/// The one parser for that flag: `act secret set/list/rm` and the runtime's
+/// [`crate::credential_host`] both come through here, so a store named on the
+/// write is the store read on the run. There is no inferred backend — an
+/// unrecognised value is an error, never a silent fall back to plaintext
+/// (design D13/§7.4).
+///
+/// `Ok(None)` means only "no store location exists on this platform, and none
+/// was named": the runtime treats that as no credential host, while `act
+/// secret` turns it into an error naming the flag. Neither decision belongs
+/// here.
+pub fn resolve_backend(explicit: Option<&str>) -> anyhow::Result<Option<BackendChoice>> {
+    match explicit {
+        Some(s) => {
+            let path = s.strip_prefix("file:").ok_or_else(|| {
+                anyhow::anyhow!("unknown --credentials-backend '{s}'; expected file:<path>")
+            })?;
+            anyhow::ensure!(
+                !path.is_empty(),
+                "--credentials-backend 'file:' needs a path, e.g. file:/path/to/store"
+            );
+            Ok(Some(BackendChoice::File(PathBuf::from(path))))
+        }
+        None => Ok(default_store_root().map(BackendChoice::File)),
+    }
+}
+
+/// The directory a [`BackendChoice`] lives in. A `match` rather than an
+/// irrefutable `let`, so a second variant is a compile error here instead of
+/// a silent assumption at every call site.
+pub fn backend_root(choice: &BackendChoice) -> &Path {
+    match choice {
+        BackendChoice::File(p) => p,
+    }
 }
 
 // ── WIT bridge ─────────────────────────────────────────────────────────────
@@ -480,6 +520,9 @@ mod tests {
         fn list(&self, component: Option<&str>) -> Result<Vec<SecretInfo>, StoreError> {
             self.lists.fetch_add(1, Ordering::SeqCst);
             self.inner.list(component)
+        }
+        fn components(&self) -> Result<Vec<String>, StoreError> {
+            self.inner.components()
         }
         fn writable(&self) -> bool {
             self.inner.writable()

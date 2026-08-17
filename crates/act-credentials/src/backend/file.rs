@@ -87,6 +87,10 @@ impl CredentialStore for FileStore {
         Ok(Index::load(&self.root)?.list(component))
     }
 
+    fn components(&self) -> Result<Vec<String>, StoreError> {
+        Ok(Index::load(&self.root)?.entries.into_keys().collect())
+    }
+
     fn writable(&self) -> bool {
         true
     }

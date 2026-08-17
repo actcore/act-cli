@@ -20,6 +20,14 @@ pub trait CredentialStore: Send + Sync {
     fn erase(&self, component: &str, key: &str) -> Result<(), StoreError>;
     /// Metadata only, never values. `None` lists every component.
     fn list(&self, component: Option<&str>) -> Result<Vec<SecretInfo>, StoreError>;
+    /// The components holding at least one credential.
+    ///
+    /// `list(None)` flattens the profile away, which is the one thing a
+    /// listing across components must not lose: profile keys are normalised
+    /// (`act-cli`'s `resolve::profile_key`), so this is also how an operator
+    /// sees which key a `set` actually landed under. Component names, like
+    /// `SecretInfo`, cannot carry a value.
+    fn components(&self) -> Result<Vec<String>, StoreError>;
     /// False for a mounted read-only secret; OAuth refresh needs this (spec §7.1).
     fn writable(&self) -> bool;
 }
