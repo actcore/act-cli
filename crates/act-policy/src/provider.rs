@@ -114,6 +114,10 @@ impl ProviderRegistry {
             "wasi:sockets",
             Arc::new(crate::providers::sockets::SocketsProvider),
         );
+        r.register(
+            "act:credentials",
+            Arc::new(crate::providers::credentials::CredentialsProvider),
+        );
         r
     }
 }
@@ -166,5 +170,35 @@ mod tests {
         assert_eq!(tag(&r, "db:truncate").await, "db-wild"); // *-prefix
         assert_eq!(tag(&r, "db:drop-database").await, "db-drop"); // longest *-prefix
         assert_eq!(tag(&r, "email:send").await, "generic"); // fallback
+    }
+
+    #[tokio::test]
+    async fn credentials_provider_is_registered_not_generic_fallback() {
+        let r = ProviderRegistry::with_builtins();
+        let provider = r.lookup("act:credentials");
+        // If credentials provider is not registered, lookup would return the
+        // generic fallback. We verify by checking that resolving with an empty
+        // declared set in Ask mode yields Deny (credentials provider behavior),
+        // not Ask (generic provider behavior which treats undeclared as unbounded).
+        let ask_grant = crate::grant::CapabilityGrant {
+            mode: crate::grant::PolicyMode::Ask,
+            allow: vec![],
+            deny: vec![],
+        };
+        let ceiling = provider
+            .resolve("act:credentials", &[], &ask_grant)
+            .await
+            .unwrap();
+        let cred_op = ResourceOp {
+            cap_id: "act:credentials".into(),
+            key: "test-cred".into(),
+            action: "get".into(),
+            attrs: serde_json::Value::Null,
+        };
+        assert_eq!(
+            ceiling.classify(&cred_op),
+            crate::Decision::Deny,
+            "act:credentials provider must deny undeclared access in Ask mode, not defer to generic fallback which would return Ask"
+        );
     }
 }
