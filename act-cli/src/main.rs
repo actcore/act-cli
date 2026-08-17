@@ -709,10 +709,7 @@ async fn prepare_component_with_consent(
         max_memory,
         prompter,
         cache,
-        credential_host(
-            &resolve::profile_key(component),
-            opts.credentials_backend.as_deref(),
-        )?,
+        credential_host(component, opts.credentials_backend.as_deref())?,
         &audit,
     )
     .await?;
@@ -733,24 +730,28 @@ async fn prepare_component_with_consent(
 /// Build the credential host serving one component run, or `None` when no
 /// store was named and this platform has no data directory to put one in.
 ///
-/// `component_ref` is the profile namespace, and it is what makes one
-/// component unable to read another's credentials (design §2.1). It must be
-/// `resolve::profile_key(component)`, not `component.to_string()` — the
-/// audit context's `component_ref` field keeps the operator's literal
-/// spelling for the audit trail, but the profile namespace needs the
-/// normalised form so `act secret set ./x.wasm` and `act run x.wasm` land
-/// on the same profile. Callers pass the normalised key directly rather
-/// than reading it back off `AuditContext`, so the two purposes can't be
-/// conflated by threading one value through both.
+/// Takes the `ComponentRef` and derives the profile namespace itself. That is
+/// the point: the namespace is what makes one component unable to read
+/// another's credentials (design §2.1), and it must be
+/// `resolve::profile_key(component)` rather than the operator's literal
+/// spelling, or `act secret set ./x.wasm` and `act run x.wasm` land on
+/// different profiles. Taking a `&str` left that rule to prose and to whoever
+/// wrote the call — and let a test pass the right string while the call site
+/// passed the wrong one. Here it cannot be passed at all.
+///
+/// The literal spelling is still recorded, separately, as
+/// `AuditContext::component_ref`: an audit trail should say what was typed.
+/// Two values, two purposes, neither derivable from the other's variable.
 ///
 /// `credentials_backend` is the operator's `--credentials-backend`, parsed by
 /// the same `resolve_backend` `act secret` uses: the reader resolves the store
 /// exactly as the writer did. The backend is named explicitly, never inferred:
 /// there is deliberately no mode that picks one for you (design §7.4).
 fn credential_host(
-    component_ref: &str,
+    component: &ComponentRef,
     credentials_backend: Option<&str>,
 ) -> Result<Option<Arc<runtime::credentials::CredentialHost>>> {
+    let component_ref = resolve::profile_key(component);
     let Some(choice) = runtime::credentials::resolve_backend(credentials_backend)? else {
         return Ok(None);
     };
@@ -759,7 +760,7 @@ fn credential_host(
         .with_context(|| format!("opening credential store at {}", root.display()))?;
     Ok(Some(Arc::new(runtime::credentials::CredentialHost::new(
         Arc::from(store),
-        component_ref.to_string(),
+        component_ref,
     ))))
 }
 
@@ -1453,6 +1454,10 @@ mod tests {
     /// the operator's literal spelling instead, `act secret set ./x.wasm`
     /// followed by `act run x.wasm` would miss with a bare not-found. The
     /// writer half is covered end-to-end in `tests/secret_cli.rs`.
+    ///
+    /// It passes `credential_host` exactly what `prepare_component_with_consent`
+    /// passes it — the `ComponentRef` itself — so the normalisation under test
+    /// is the one the runtime performs, not one the test performed for it.
     #[test]
     fn the_runtime_reads_the_profile_the_writer_wrote() {
         let dir = tempfile::tempdir().unwrap();
@@ -1461,7 +1466,7 @@ mod tests {
 
         for spelling in ["./x.wasm", "x.wasm"] {
             let component: ComponentRef = spelling.parse().unwrap();
-            let host = credential_host(&resolve::profile_key(&component), Some(&backend))
+            let host = credential_host(&component, Some(&backend))
                 .unwrap()
                 .expect("an explicitly named backend always yields a host");
             assert_eq!(

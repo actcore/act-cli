@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::io::{IsTerminal, Read, Write};
 
 use act_credentials::backend::{self, BackendChoice};
-use act_credentials::kind::KindRegistry;
+use act_credentials::kind::{KindDef, KindRegistry};
 use act_credentials::record::SecretRecord;
 use act_credentials::record::SecretValue;
 use act_credentials::store::CredentialStore;
@@ -97,11 +97,21 @@ fn cmd_set(
     opts: &GlobalOpts,
 ) -> Result<()> {
     let registry = KindRegistry::builtin();
-    validate_kind(&registry, &kind)?;
+    let def = validate_kind(&registry, &kind)?;
 
-    // Validated (and, for a pipe with no source flag, refused) before we
-    // touch the store — an unknown kind or a credential we shouldn't be
-    // reading should never depend on whether the store is reachable.
+    // The store is opened, and its nature disclosed, *before* the credential
+    // is read. Interactively the operator has to learn the store is plaintext
+    // before typing a password into it — a disclosure that arrives afterwards
+    // informs nobody of anything they can still act on. The same ordering
+    // means a typo'd --credentials-backend fails before a secret has been
+    // typed and thrown away. Kind validation stays ahead of both: it needs
+    // neither the store nor the credential.
+    let choice = resolve_backend(opts.credentials_backend.as_deref())?;
+    let root = backend_root(&choice).to_path_buf();
+    let store = backend::select(choice.clone(), &root)
+        .with_context(|| format!("opening credential store at {}", root.display()))?;
+    disclose_if_first_write(&choice, store.as_ref())?;
+
     let fields = if fields_stdin {
         read_fields_from_stdin()?
     } else if let Some(cmd_str) = from_command.as_deref() {
@@ -114,12 +124,7 @@ fn cmd_set(
              cannot be prompted for. Use --fields-stdin or --from-command."
         );
     };
-
-    let choice = resolve_backend(opts.credentials_backend.as_deref())?;
-    let root = backend_root(&choice).to_path_buf();
-    let store = backend::select(choice.clone(), &root)
-        .with_context(|| format!("opening credential store at {}", root.display()))?;
-    disclose_if_first_write(&choice, store.as_ref())?;
+    validate_fields(def, &fields)?;
 
     let profile = resolve::profile_key(&component);
     let record = SecretRecord {
@@ -229,18 +234,34 @@ fn resolve_backend(explicit: Option<&str>) -> Result<BackendChoice> {
 /// backend) so a future non-file backend doesn't inherit a plaintext
 /// warning that no longer applies to it.
 ///
+/// It names the file, not just the directory: an operator told that
+/// permissions are the only protection needs to know what to chmod, back up,
+/// or keep out of a sync client. The name comes from the backend
+/// (`file::secrets_path`) so the notice cannot drift from what is written.
+///
 /// The permissions sentence is platform-specific because the guarantee is:
-/// `act_credentials::index::write_private` chmods 0600 on unix and does
+/// `act_credentials::index::write_private` creates at 0600 on unix and sets
 /// nothing anywhere else. A notice that overstated the protection on Windows
 /// would be worse than none, since this notice is the whole of what the
 /// operator is told.
 fn disclose_if_first_write(choice: &BackendChoice, store: &dyn CredentialStore) -> Result<()> {
+    disclose_if_first_write_to(&mut std::io::stderr(), choice, store)
+}
+
+/// The writer is a parameter (rather than `eprintln!` inline) so the test
+/// below can assert on exactly what an operator would see, instead of
+/// re-deriving the same string the function itself builds.
+fn disclose_if_first_write_to(
+    out: &mut dyn Write,
+    choice: &BackendChoice,
+    store: &dyn CredentialStore,
+) -> Result<()> {
     #[cfg(unix)]
-    const PROTECTION: &str = "The only protection is filesystem permissions — its files are written 0600, \
+    const PROTECTION: &str = "The only protection is filesystem permissions — it is created 0600, \
          readable only by this user.";
     #[cfg(not(unix))]
     const PROTECTION: &str = "The only protection is filesystem permissions — and on this platform ACT sets \
-         none of its own: the files inherit whatever the containing directory grants.";
+         none of its own: the file inherits whatever the containing directory grants.";
 
     match choice {
         BackendChoice::File(root) => {
@@ -249,14 +270,16 @@ fn disclose_if_first_write(choice: &BackendChoice, store: &dyn CredentialStore) 
                 .context("checking store contents")?
                 .is_empty()
             {
-                eprintln!(
-                    "act secret: creating a new credential store under {}\n\
+                writeln!(
+                    out,
+                    "act secret: creating a new credential store at {}\n\
                      This store is PLAINTEXT: nothing in ACT encrypts it. {PROTECTION} \
                      Anyone who can read this user's files can read every credential \
                      kept here. There is no OS-keyring backend yet. \
                      (shown once per store)",
-                    root.display()
-                );
+                    backend::file::secrets_path(root).display()
+                )
+                .context("writing plaintext-store notice")?;
             }
         }
     }
@@ -265,15 +288,66 @@ fn disclose_if_first_write(choice: &BackendChoice, store: &dyn CredentialStore) 
 
 // ── Kind validation ─────────────────────────────────────────────────────
 
-fn validate_kind(reg: &KindRegistry, kind: &str) -> Result<()> {
-    if reg.get(kind).is_some() {
-        return Ok(());
+/// Returns the definition, not just `Ok(())`: the caller needs it to check
+/// the fields against the kind that names them.
+fn validate_kind<'a>(reg: &'a KindRegistry, kind: &str) -> Result<&'a KindDef> {
+    if let Some(def) = reg.get(kind) {
+        return Ok(def);
     }
     let known: Vec<&str> = reg.ids().collect();
     anyhow::bail!(
         "unknown credential kind '{kind}'; known kinds: {}",
         known.join(", ")
     );
+}
+
+/// A field map has to satisfy the kind that names it.
+///
+/// Without this, `--kind std:basic --fields-stdin '{"token":"…"}'` is stored
+/// happily and the mistake surfaces much later, inside a component, as a
+/// missing field it cannot explain. The interactive path is already
+/// registry-driven and cannot produce a map that fails here; the two scripted
+/// paths accept whatever they are handed, which is exactly where a typo
+/// enters.
+///
+/// Missing required fields are an error. Unknown keys are a warning and are
+/// stored: a kind lists what a *reader* can rely on, and a component may
+/// legitimately be handed more than that — but an operator who misspelled
+/// `std:usrname` should hear about it. Only names are printed; the values
+/// they hold never are.
+fn validate_fields(def: &KindDef, fields: &BTreeMap<String, SecretValue>) -> Result<()> {
+    let missing: Vec<&str> = def
+        .fields
+        .iter()
+        .filter(|f| f.required)
+        .map(|f| f.key.as_str())
+        .filter(|k| !fields.contains_key(*k))
+        .collect();
+    if !missing.is_empty() {
+        let given = if fields.is_empty() {
+            "the field map is empty".to_string()
+        } else {
+            format!(
+                "the field map has {}",
+                fields.keys().cloned().collect::<Vec<_>>().join(", ")
+            )
+        };
+        anyhow::bail!(
+            "credential kind '{}' requires {} — {given}",
+            def.id,
+            missing.join(", ")
+        );
+    }
+    for key in fields.keys() {
+        if !def.fields.iter().any(|f| &f.key == key) {
+            eprintln!(
+                "act secret: warning: '{key}' is not a field of {}; storing it, but \
+                 a component reading this credential by kind will not look for it",
+                def.id
+            );
+        }
+    }
+    Ok(())
 }
 
 // ── Field sources ────────────────────────────────────────────────────────
@@ -370,18 +444,34 @@ fn read_visible_line(label: &str) -> Result<String> {
     Ok(line.trim_end_matches(['\n', '\r']).to_string())
 }
 
+/// Said before the operator types, never after, in every case where what they
+/// type will be visible. Announcing a downgrade once it has happened tells
+/// them only that their password is already in the scrollback.
+const ECHO_WARNING: &str = "act secret: warning: terminal echo could not be turned off — what you type next \
+     WILL be visible on screen and in your scrollback. Ctrl-C and use --fields-stdin \
+     or --from-command to avoid it.";
+
 /// Reads one line with terminal echo turned off, so a hidden credential
 /// never lands in scrollback or a screen-recording (spec §5.3). Shells out
 /// to `stty` rather than pulling in a terminal-control crate — `act-cli`
 /// carries none today, and this is a single interactive-only code path.
+///
+/// If `stty` is missing or fails, the read still happens — refusing would
+/// strand an operator whose terminal is otherwise fine — but it says so
+/// first, so the choice to keep typing is theirs. Silently reading with echo
+/// on would defeat the only thing this function exists for.
 #[cfg(unix)]
 fn read_hidden_line(label: &str) -> Result<String> {
-    eprint!("{label}: ");
-    std::io::stderr().flush().ok();
     let echo_disabled = std::process::Command::new("stty")
         .arg("-echo")
         .status()
         .is_ok_and(|s| s.success());
+    if !echo_disabled {
+        eprintln!("{ECHO_WARNING}");
+    }
+
+    eprint!("{label}: ");
+    std::io::stderr().flush().ok();
     let read_result = {
         let mut line = String::new();
         std::io::stdin()
@@ -397,12 +487,12 @@ fn read_hidden_line(label: &str) -> Result<String> {
 }
 
 /// No terminal-echo control implemented on this platform yet: the value is
-/// visible while typed. A known gap, not a silent downgrade — it says so.
+/// visible while typed. A known gap, not a silent downgrade — it says so,
+/// with the same warning and at the same point as the unix arm's failure
+/// path.
 #[cfg(not(unix))]
 fn read_hidden_line(label: &str) -> Result<String> {
-    eprintln!(
-        "(warning: hidden input is not implemented on this platform; typing will be visible)"
-    );
+    eprintln!("{ECHO_WARNING}");
     read_visible_line(label)
 }
 
@@ -466,5 +556,53 @@ mod tests {
         assert!(resolve_backend(Some("file:")).is_err());
         let BackendChoice::File(p) = resolve_backend(Some("file:/tmp/x")).unwrap();
         assert_eq!(p, PathBuf::from("/tmp/x"));
+    }
+
+    /// Simulates two `act secret set` runs against the same fresh store: the
+    /// first write is the one that creates it, the second finds it already
+    /// non-empty. Only the first should tell the operator the store is
+    /// plaintext and where it lives; a notice on every run would train
+    /// operators to stop reading it.
+    #[test]
+    fn the_plaintext_notice_shows_once_per_store_then_falls_silent() {
+        let dir = tempfile::tempdir().unwrap();
+        let choice = BackendChoice::File(dir.path().to_path_buf());
+        let store = backend::select(choice.clone(), dir.path()).unwrap();
+
+        let mut first_run = Vec::new();
+        disclose_if_first_write_to(&mut first_run, &choice, store.as_ref()).unwrap();
+        let first_run = String::from_utf8(first_run).unwrap();
+        assert!(first_run.contains("PLAINTEXT"), "{first_run}");
+        let secrets_path = backend::file::secrets_path(dir.path());
+        assert!(
+            first_run.contains(&secrets_path.display().to_string()),
+            "{first_run}"
+        );
+
+        // The write the first run's disclosure was standing in front of.
+        store
+            .put(
+                "example-component",
+                "default",
+                &SecretRecord {
+                    kind: "std:opaque".to_string(),
+                    fields: BTreeMap::from([(
+                        "std:value".to_string(),
+                        SecretValue::new("first-secret"),
+                    )]),
+                    host_only: BTreeMap::new(),
+                    description: None,
+                    expires_at: None,
+                },
+            )
+            .unwrap();
+
+        let mut second_run = Vec::new();
+        disclose_if_first_write_to(&mut second_run, &choice, store.as_ref()).unwrap();
+        let second_run = String::from_utf8(second_run).unwrap();
+        assert!(
+            second_run.is_empty(),
+            "a store that already holds a credential must not repeat the notice: {second_run}"
+        );
     }
 }

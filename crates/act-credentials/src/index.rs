@@ -71,16 +71,42 @@ impl Index {
 }
 
 /// Atomic write with restrictive permissions: temp file then rename.
+///
+/// The mode is set **as the file is created**, not chmodded afterwards.
+/// Writing at the ambient umask and tightening after leaves a window in which
+/// the plaintext temp file is world-readable — and `act secret` prints
+/// filesystem permissions as the store's only protection, so that window is a
+/// broken promise rather than a small imprecision. `rename` carries the mode
+/// with the inode, so the destination is never briefly loose either.
+///
+/// `create_new` for the same reason: the temp file must be one we created. A
+/// leftover from a crash is removed first, but anything that reappears in
+/// between (a hostile pre-created file, a symlink pointed elsewhere) makes the
+/// open fail loudly instead of writing plaintext through someone else's inode.
 pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+    use std::io::Write;
+
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir)?;
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, bytes)?;
+
+    match std::fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
     }
+    let mut f = opts.open(&tmp)?;
+    f.write_all(bytes)?;
+    drop(f);
+
     std::fs::rename(&tmp, path)?;
     Ok(())
 }

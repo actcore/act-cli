@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -20,13 +20,23 @@ struct Secrets {
     entries: BTreeMap<String, BTreeMap<String, SecretRecord>>,
 }
 
+/// The file holding the plaintext records, given the store root.
+///
+/// Public because `act secret`'s first-write disclosure names it: an operator
+/// told that permissions are the only protection needs to know which file to
+/// chmod, back up, or keep out of a sync client. One definition, so the notice
+/// cannot name a file the store does not use.
+pub fn secrets_path(root: &Path) -> PathBuf {
+    root.join("secrets.json")
+}
+
 impl FileStore {
     pub fn new(root: PathBuf) -> Self {
         Self { root }
     }
 
     fn secrets_path(&self) -> PathBuf {
-        self.root.join("secrets.json")
+        secrets_path(&self.root)
     }
 
     fn load(&self) -> Result<Secrets, StoreError> {
