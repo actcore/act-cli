@@ -89,6 +89,51 @@ impl wasmtime_wasi_http::p3::WasiHttpView for HostState {
     }
 }
 
+// ── act:credentials/store — TEMPORARY stub ─────────────────────────────────
+//
+// TEMPORARY: replaced wholesale in Task 7. Present only so the tree builds
+// between tasks; no test depends on this behaviour.
+//
+// `act:credentials/store@0.1.0` is the first *import* in `act-world` — the
+// host implements it, components call it. The generated trait is
+// `store::HostWithStore<T>`, implemented for the `HasData` type rather than
+// for `HostState` itself, because both WIT functions are `async func` and so
+// bindgen lowers them through `func_wrap_concurrent` with an `Accessor`.
+//
+// `Host` is implemented for `&mut HostState` as well: `skip_mut_forwarding_impls`
+// suppresses bindgen's blanket `&mut T` forwarding impl, and
+// `add_to_linker::<HostState, HasSelf<HostState>>` requires it because
+// `HasSelf<HostState>::Data<'a>` is `&'a mut HostState`.
+//
+// Nothing links this into `create_linker` yet: wiring it is Task 7's job,
+// where the store, the compartment lookup and the capability gate arrive
+// together.
+use bindings::act::credentials::store as credentials_stub;
+
+impl credentials_stub::Host for HostState {}
+impl credentials_stub::Host for &mut HostState {}
+
+impl credentials_stub::HostWithStore<HostState> for wasmtime::component::HasSelf<HostState> {
+    async fn list_secrets(
+        _accessor: &wasmtime::component::Accessor<HostState, Self>,
+        _session: Option<String>,
+    ) -> Result<Vec<credentials_stub::SecretInfo>, credentials_stub::SecretError> {
+        Err(credentials_stub::SecretError::Unavailable(
+            "not implemented".into(),
+        ))
+    }
+
+    async fn get_secret(
+        _accessor: &wasmtime::component::Accessor<HostState, Self>,
+        _session: String,
+        _want: credentials_stub::SecretRequest,
+    ) -> Result<credentials_stub::Secret, credentials_stub::SecretError> {
+        Err(credentials_stub::SecretError::Unavailable(
+            "not implemented".into(),
+        ))
+    }
+}
+
 /// Create a wasmtime engine with component-model and async enabled.
 pub fn create_engine() -> Result<Engine> {
     let mut config = Config::new();

@@ -1,0 +1,118 @@
+/// Credential-store interface — host-provided secrets, handed to a
+/// component only when it asks for them.
+///
+/// `act:credentials` is the first ACT package the *host* implements and
+/// the component imports. Everything else in the ecosystem runs the other
+/// way round: components export `tool-provider`, `session-provider`, and
+/// the host calls in. Here the component calls out, and the host answers
+/// from a store the component can neither read nor enumerate directly.
+///
+/// The import is opt-in in both directions. A component that needs no
+/// credentials never calls `store`, and the capability provider denies the
+/// class outright unless the component declared it — an undeclared class
+/// is always denied, no grant can widen it.
+///
+/// Both functions are `async` by design. Today the host answers from a
+/// local store and returns promptly; the async signature is what lets a
+/// future host acquire a credential *during* the call — prompting a human,
+/// running an OAuth exchange, refreshing an expired token — without a
+/// breaking change to this interface.
+///
+/// The data model lives in its own `types` interface, function-free and
+/// async-free, so other packages (SDK helpers, sync-shim adapters) can
+/// `use act:credentials/types` without pulling in the async signatures.
+package act:credentials@0.1.0;
+
+/// Credential data model — function-free, async-free, safe to `use` anywhere.
+interface types {
+  use act:core/types@0.4.0.{cbor};
+
+  /// Shape of a secret, as a namespaced string. Well-known kinds use the
+  /// `std:` prefix (e.g. "std:api-key", "std:bearer-token", "std:basic-auth");
+  /// third-party kinds use their own namespace. The kind determines which
+  /// keys appear in `secret.fields`.
+  type secret-kind = string;
+
+  /// The secret material itself: field name to CBOR-encoded value. Field
+  /// names are fixed by the `secret-kind`.
+  type secret-fields = list<tuple<string, cbor>>;
+
+  /// Non-secret description of a stored credential. `list-secrets` returns
+  /// these; the material is never included, so enumerating what exists
+  /// leaks nothing that could be used to authenticate.
+  record secret-info {
+    /// Store-unique lookup key.
+    key: string,
+    /// Shape of the secret behind this key.
+    kind: secret-kind,
+    /// Human-readable note, shown in consent prompts and `act secret list`.
+    description: option<string>,
+    /// Expiry as a Unix timestamp in seconds, when the credential has one.
+    expires-at: option<u64>,
+  }
+
+  /// What a component is asking for. Everything past `key` is context the
+  /// host uses to decide, to prompt, and to record in the audit trail.
+  record secret-request {
+    /// Store lookup key.
+    key: string,
+    /// Expected shape. When present, the host MAY reject a key whose
+    /// stored kind differs rather than hand back fields the caller
+    /// cannot interpret.
+    kind: option<secret-kind>,
+    /// The resource the credential will be used against (a host, a URL,
+    /// an account id). Advisory context for the human being prompted.
+    %resource: option<string>,
+    /// Requested scopes, for credentials that carry them.
+    scopes: list<string>,
+    /// Why the component wants it, in the component's own words. Shown
+    /// to the human; never trusted as authorization.
+    hint: option<string>,
+  }
+
+  /// Why a credential was not handed over.
+  variant secret-error {
+    /// No such key in the compartment this component can see.
+    not-found,
+    /// The key exists but policy refused it — undeclared class, denied
+    /// grant, or a human answering no.
+    denied,
+    /// The `session` argument does not name a live session.
+    invalid-session,
+    /// The store could not answer: backend unavailable, decryption
+    /// failure, host misconfiguration. The string is a diagnostic for
+    /// logs, not for the agent to act on.
+    unavailable(string),
+  }
+
+  /// A credential handed to the component.
+  record secret {
+    /// Shape, which fixes the keys present in `fields`.
+    kind: secret-kind,
+    /// The secret material.
+    fields: secret-fields,
+  }
+}
+
+/// The host-provided credential store.
+interface store {
+  use types.{secret, secret-info, secret-request, secret-error};
+
+  /// Enumerate the credentials this component may ask for, without their
+  /// material.
+  ///
+  /// `session` scopes the listing to one session's compartment; when
+  /// absent, the listing covers what is visible outside any session.
+  /// Components use this to discover which keys exist before requesting
+  /// one, so a missing credential is a first-class answer rather than a
+  /// failed call.
+  list-secrets: async func(session: option<string>) -> result<list<secret-info>, secret-error>;
+
+  /// Request one credential.
+  ///
+  /// `session` names the session the request is made under; the host uses
+  /// it to pick the compartment and to bound the credential's lifetime.
+  /// The host MAY prompt, MAY refuse, and MUST record the request in the
+  /// audit trail. Returned material is never logged.
+  get-secret: async func(session: string, want: secret-request) -> result<secret, secret-error>;
+}
