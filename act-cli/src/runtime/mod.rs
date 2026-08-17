@@ -89,7 +89,7 @@ impl wasmtime_wasi_http::p3::WasiHttpView for HostState {
     }
 }
 
-// ── act:credentials/store — TEMPORARY stub ─────────────────────────────────
+// ── act:credentials — TEMPORARY stub ───────────────────────────────────────
 //
 // TEMPORARY: replaced wholesale in Task 7. Present only so the tree builds
 // between tasks; no test depends on this behaviour.
@@ -100,18 +100,29 @@ impl wasmtime_wasi_http::p3::WasiHttpView for HostState {
 // for `HostState` itself, because both WIT functions are `async func` and so
 // bindgen lowers them through `func_wrap_concurrent` with an `Accessor`.
 //
-// `Host` is implemented for `&mut HostState` as well: `skip_mut_forwarding_impls`
-// suppresses bindgen's blanket `&mut T` forwarding impl, and
-// `add_to_linker::<HostState, HasSelf<HostState>>` requires it because
-// `HasSelf<HostState>::Data<'a>` is `&'a mut HostState`.
+// `Host` is implemented for `&mut HostState` on *both* interfaces:
+// `skip_mut_forwarding_impls` suppresses bindgen's blanket `&mut T`
+// forwarding impls (the generated file contains none at all), while both
+// `store::add_to_linker` and `types::add_to_linker` require
+// `for<'a> D::Data<'a>: Host` — which is `&'a mut HostState` under
+// `HasSelf<HostState>`.
 //
-// Nothing links this into `create_linker` yet: wiring it is Task 7's job,
+// Task 7 must call `types::add_to_linker` alongside `store::add_to_linker`.
+// `store` uses types from `types`, so the elaborated world imports both
+// instances, and a guest importing `act:credentials/store` fails
+// instantiation on an unregistered `act:credentials/types@0.1.0` — the
+// interface carries no functions, but the instance must still exist in the
+// linker. The world-level `add_to_linker` registers both, in that order.
+//
+// Nothing links either into `create_linker` yet: wiring is Task 7's job,
 // where the store, the compartment lookup and the capability gate arrive
 // together.
 use bindings::act::credentials::store as credentials_stub;
+use bindings::act::credentials::types as credentials_types_stub;
 
 impl credentials_stub::Host for HostState {}
 impl credentials_stub::Host for &mut HostState {}
+impl credentials_types_stub::Host for &mut HostState {}
 
 impl credentials_stub::HostWithStore<HostState> for wasmtime::component::HasSelf<HostState> {
     async fn list_secrets(
