@@ -374,6 +374,75 @@ pub fn create_linker(engine: &Engine) -> Result<Linker<HostState>> {
     Ok(linker)
 }
 
+/// Declared constraints for one capability class, as `CapabilityProvider::resolve`
+/// expects them.
+///
+/// For `wasi:filesystem`/`wasi:http`/`wasi:sockets`, an empty result legitimately
+/// means "declared with an unbounded/absent ceiling": their providers parse every
+/// constraint value as a typed rule, so this stays exactly the manifest's
+/// constraint list, untouched — the bulk of this function's callers must never
+/// see it perturbed.
+///
+/// `act:credentials` is different: it is a *binary* capability class (see the
+/// `declared`-slice contract documented on `act_policy::providers::credentials`)
+/// whose bare-table declaration form (`[std.capabilities."act:credentials"]`)
+/// always parses to an empty constraint list. Left alone that collapses
+/// "declared, no constraints" into "never declared", and
+/// `CredentialsProvider::resolve` denies every access permanently while the
+/// audit trail reports the component as never having declared the class. So for
+/// this one id — and only this one, for now — presence in the manifest decides,
+/// not the constraint list, and a one-element sentinel is synthesized when
+/// present, matching the contract the provider's module docs require.
+fn declared_constraints(info: &ComponentInfo, cap_id: &str) -> Vec<serde_json::Value> {
+    if cap_id == act_policy::providers::credentials::CAP_CREDENTIALS {
+        return if info.std.capabilities.has(cap_id) {
+            vec![serde_json::json!({})]
+        } else {
+            Vec::new()
+        };
+    }
+    info.std
+        .capabilities
+        .get(cap_id)
+        .map(|req| req.constraints.clone())
+        .unwrap_or_default()
+}
+
+/// Warn when a component that declares `act:credentials` is also granted
+/// `wasi:http` in `open` mode.
+///
+/// Reading credentials and reaching an unrestricted network are each
+/// unremarkable alone. Together they are an exfiltration channel: a component
+/// that can read your credentials and reach any host can send them anywhere
+/// (docs/specs/2026-08-03-act-credentials-design.md §4.1).
+///
+/// Emitted on this module's default target, **not** `act::audit`, like every
+/// other host advisory (`http_policy`, `fs_policy`). The audit target is not a
+/// general-purpose log: `AuditLayer::on_event` reconstructs a typed
+/// `CapDecisionRecord` and drops anything without both a `cap_id` and an
+/// `act.decision` field, while `crate::fmt_filter` excludes `act::audit` from
+/// the `fmt` layer precisely so audit events are rendered once, by `render.rs`.
+/// A prose warning addressed to `act::audit` therefore reaches neither layer
+/// and is silently swallowed. This is advice about a grant the operator chose,
+/// not a decision about a resource access, so the ordinary log is where it
+/// belongs.
+fn warn_if_credentials_exfil_risk(info: &ComponentInfo, http_mode: act_policy::grant::PolicyMode) {
+    if info
+        .std
+        .capabilities
+        .has(act_policy::providers::credentials::CAP_CREDENTIALS)
+        && http_mode == act_policy::grant::PolicyMode::Open
+    {
+        tracing::warn!(
+            component = %info.std.name,
+            http_mode = %http_mode,
+            "component declares act:credentials and is granted wasi:http in open \
+             mode: it can read your credentials and reach any host, so it can \
+             send them anywhere — scope wasi:http to an allowlist"
+        );
+    }
+}
+
 /// Create a new store with WASI context, preopening directories from resolved mounts.
 ///
 /// `grant_policy` is intersected with the component's declared capabilities via
@@ -399,17 +468,16 @@ pub async fn create_store(
     let registry = ProviderRegistry::with_builtins();
 
     // Helper: extract declared constraints for a capability id.
-    let get_declared = |cap_id: &str| -> Vec<serde_json::Value> {
-        info.std
-            .capabilities
-            .get(cap_id)
-            .map(|req| req.constraints.clone())
-            .unwrap_or_default()
-    };
+    let get_declared =
+        |cap_id: &str| -> Vec<serde_json::Value> { declared_constraints(info, cap_id) };
 
     let fs_grant = grant_policy.resolve(act_types::constants::CAP_FILESYSTEM);
     let http_grant = grant_policy.resolve(act_types::constants::CAP_HTTP);
     let sockets_grant = grant_policy.resolve(act_types::constants::CAP_SOCKETS);
+
+    // act:credentials + wasi:http in `open` mode is an exfiltration channel —
+    // see `warn_if_credentials_exfil_risk` above.
+    warn_if_credentials_exfil_risk(info, http_grant.mode);
 
     let fs_ceiling: Arc<dyn CompiledCeiling> = Arc::from(
         registry
@@ -1265,5 +1333,280 @@ mod tests {
         let bytes = std::fs::read(path).expect("read fixture");
         let (_component, digest) = load_component(&engine, path).expect("load");
         assert_eq!(digest, crate::audit::sha256_hex(&bytes));
+    }
+
+    // ── act:credentials declared-slice contract ───────────────────────────
+
+    use act_policy::providers::credentials::CAP_CREDENTIALS;
+
+    /// Parse an `act.toml`-shaped fragment the way the real manifest is read.
+    ///
+    /// These tests deliberately go through TOML rather than hand-building a
+    /// `Vec<serde_json::Value>`: the entire defect being guarded against is
+    /// that the *prescribed declaration syntax* parses to zero constraints.
+    /// A hand-built `vec![json!({})]` would assert the fix's output while
+    /// saying nothing about the input production actually receives — which is
+    /// exactly how this defect survived its first review.
+    fn info_from_act_toml(src: &str) -> ComponentInfo {
+        toml::from_str(src).expect("act.toml fragment must parse into ComponentInfo")
+    }
+
+    #[test]
+    fn a_bare_credentials_table_is_handed_to_the_provider_as_a_non_empty_slice() {
+        let info = info_from_act_toml(
+            r#"
+            [std]
+            name = "notion"
+
+            [std.capabilities."act:credentials"]
+            "#,
+        );
+
+        // Precondition — this is the trap. The spec-prescribed declaration
+        // form really does parse to an empty constraint list, so the raw
+        // manifest cannot distinguish "declared" from "absent" on its own.
+        assert!(
+            info.std
+                .capabilities
+                .get(CAP_CREDENTIALS)
+                .expect("capability must be present in the parsed manifest")
+                .constraints
+                .is_empty(),
+            "the bare-table form is expected to carry zero constraints; if this \
+             ever changes, `declared_constraints`' credentials branch is moot"
+        );
+
+        // `CredentialsProvider::resolve` derives declared-ness from
+        // `!declared.is_empty()` and sees nothing else, so a sentinel must be
+        // synthesized or every credential access is denied forever while the
+        // audit trail blames the component for not declaring the class.
+        assert!(
+            !declared_constraints(&info, CAP_CREDENTIALS).is_empty(),
+            "a component that declared act:credentials must reach the provider \
+             as a non-empty declared slice"
+        );
+    }
+
+    #[test]
+    fn an_undeclared_credentials_capability_is_handed_over_as_an_empty_slice() {
+        let info = info_from_act_toml(
+            r#"
+            [std]
+            name = "no-secrets"
+
+            [std.capabilities."wasi:http"]
+            constraints = [{ host = "api.notion.com" }]
+            "#,
+        );
+
+        assert!(
+            !info.std.capabilities.has(CAP_CREDENTIALS),
+            "sanity: this manifest must not declare act:credentials"
+        );
+        assert!(
+            declared_constraints(&info, CAP_CREDENTIALS).is_empty(),
+            "an undeclared act:credentials must stay empty so the provider denies it"
+        );
+    }
+
+    #[test]
+    fn the_sentinel_is_scoped_to_credentials_and_never_perturbs_physical_classes() {
+        // For wasi:filesystem/http/sockets an empty `declared` legitimately
+        // means "no ceiling, deny" — and their providers parse every element
+        // of the slice as a typed constraint, so a `{}` sentinel would be fed
+        // to a parser expecting `{"host": ...}` / `{"path": ...}`.
+        let info = info_from_act_toml(
+            r#"
+            [std]
+            name = "bare-physical"
+
+            [std.capabilities."wasi:filesystem"]
+
+            [std.capabilities."wasi:http"]
+
+            [std.capabilities."wasi:sockets"]
+            "#,
+        );
+
+        for cap in [
+            act_types::constants::CAP_FILESYSTEM,
+            act_types::constants::CAP_HTTP,
+            act_types::constants::CAP_SOCKETS,
+        ] {
+            assert!(
+                info.std.capabilities.has(cap),
+                "sanity: {cap} must be declared in this manifest"
+            );
+            assert!(
+                declared_constraints(&info, cap).is_empty(),
+                "{cap} is declared bare, so its declared slice must stay empty — \
+                 no sentinel, or its provider would try to parse `{{}}` as a rule"
+            );
+        }
+    }
+
+    #[test]
+    fn declared_constraints_passes_physical_constraints_through_verbatim() {
+        let info = info_from_act_toml(
+            r#"
+            [std]
+            name = "scoped"
+
+            [std.capabilities."wasi:http"]
+            constraints = [{ host = "api.notion.com" }, { host = "*.example.com" }]
+            "#,
+        );
+
+        assert_eq!(
+            declared_constraints(&info, act_types::constants::CAP_HTTP),
+            vec![
+                serde_json::json!({ "host": "api.notion.com" }),
+                serde_json::json!({ "host": "*.example.com" }),
+            ],
+            "physical classes must see their manifest constraints untouched"
+        );
+    }
+
+    // ── the credentials + open-network warning ────────────────────────────
+
+    /// A `MakeWriter` that accumulates formatted events in memory, so the
+    /// warning can be asserted as it is actually emitted (target included)
+    /// rather than by re-testing the `if` that guards it.
+    #[derive(Clone, Default)]
+    struct CapturedLog(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl CapturedLog {
+        fn contents(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).expect("utf-8 log output")
+        }
+    }
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLog {
+        type Writer = Self;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Run the warning through **the production `fmt` layer**, filter and all.
+    ///
+    /// Deliberately not a bare `fmt()` subscriber. `crate::fmt_filter` drops
+    /// the `act::audit` and `act::guest` targets so audit events are rendered
+    /// only by `render.rs`, and `AuditLayer::on_event` in turn drops any event
+    /// that is not a typed capability record. An advisory addressed to
+    /// `act::audit` therefore falls between the two layers and reaches no
+    /// output at all — which is exactly what this warning did before, and a
+    /// bare `fmt()` subscriber would have happily printed it and called the
+    /// test green.
+    fn capture_exfil_warning(
+        info: &ComponentInfo,
+        http_mode: act_policy::grant::PolicyMode,
+    ) -> String {
+        use tracing_subscriber::prelude::*;
+
+        let log = CapturedLog::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(log.clone())
+                .with_ansi(false)
+                // The default `log-level = "info"` from `config.toml`, i.e.
+                // what an operator who configured nothing actually runs with.
+                .with_filter(crate::fmt_filter(tracing_subscriber::EnvFilter::new(
+                    "act=info",
+                ))),
+        );
+        // Thread-local, so parallel tests don't fight over a global default.
+        tracing::subscriber::with_default(subscriber, || {
+            warn_if_credentials_exfil_risk(info, http_mode);
+        });
+        log.contents()
+    }
+
+    fn credentials_and_http_component() -> ComponentInfo {
+        info_from_act_toml(
+            r#"
+            [std]
+            name = "notion-sync"
+
+            [std.capabilities."act:credentials"]
+
+            [std.capabilities."wasi:http"]
+            "#,
+        )
+    }
+
+    #[test]
+    fn credentials_plus_open_http_warns_about_exfiltration_not_just_the_two_names() {
+        let out = capture_exfil_warning(
+            &credentials_and_http_component(),
+            act_policy::grant::PolicyMode::Open,
+        );
+
+        assert!(
+            !out.is_empty(),
+            "the warning must actually reach an output layer — addressed to \
+             `act::audit` it is dropped by `fmt_filter` and then again by \
+             `AuditLayer::on_event`, and nothing is printed at all"
+        );
+        assert!(
+            out.contains("WARN"),
+            "the combination must be reported at WARN, got: {out}"
+        );
+        assert!(
+            out.contains("notion-sync"),
+            "must name the component it is about, got: {out}"
+        );
+        // The point of the warning is the *consequence* of the pairing. Naming
+        // the two capabilities without saying what they add up to tells the
+        // operator nothing they could not read off their own command line.
+        assert!(
+            out.contains("send them anywhere"),
+            "must state that credentials can be sent anywhere, got: {out}"
+        );
+        assert!(
+            out.contains("reach any host"),
+            "must state that any host is reachable, got: {out}"
+        );
+    }
+
+    #[test]
+    fn neither_capability_alone_triggers_the_exfiltration_warning() {
+        // Scoped http with credentials: reach is bounded, so no warning.
+        for mode in [
+            act_policy::grant::PolicyMode::Deny,
+            act_policy::grant::PolicyMode::Allowlist,
+            act_policy::grant::PolicyMode::Ask,
+        ] {
+            let out = capture_exfil_warning(&credentials_and_http_component(), mode);
+            assert!(
+                out.is_empty(),
+                "act:credentials with http in {mode} mode must not warn, got: {out}"
+            );
+        }
+
+        // Open http without credentials: nothing to exfiltrate, so no warning.
+        let no_credentials = info_from_act_toml(
+            r#"
+            [std]
+            name = "plain-fetcher"
+
+            [std.capabilities."wasi:http"]
+            "#,
+        );
+        let out = capture_exfil_warning(&no_credentials, act_policy::grant::PolicyMode::Open);
+        assert!(
+            out.is_empty(),
+            "open http without act:credentials must not warn, got: {out}"
+        );
     }
 }

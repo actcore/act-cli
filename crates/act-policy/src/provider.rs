@@ -115,7 +115,7 @@ impl ProviderRegistry {
             Arc::new(crate::providers::sockets::SocketsProvider),
         );
         r.register(
-            "act:credentials",
+            crate::providers::credentials::CAP_CREDENTIALS,
             Arc::new(crate::providers::credentials::CredentialsProvider),
         );
         r
@@ -175,7 +175,7 @@ mod tests {
     #[tokio::test]
     async fn credentials_provider_is_registered_not_generic_fallback() {
         let r = ProviderRegistry::with_builtins();
-        let provider = r.lookup("act:credentials");
+        let provider = r.lookup(crate::providers::credentials::CAP_CREDENTIALS);
         // If credentials provider is not registered, lookup would return the
         // generic fallback. We verify by checking that resolving with an empty
         // declared set in Ask mode yields Deny (credentials provider behavior),
@@ -186,11 +186,15 @@ mod tests {
             deny: vec![],
         };
         let ceiling = provider
-            .resolve("act:credentials", &[], &ask_grant)
+            .resolve(
+                crate::providers::credentials::CAP_CREDENTIALS,
+                &[],
+                &ask_grant,
+            )
             .await
             .unwrap();
         let cred_op = ResourceOp {
-            cap_id: "act:credentials".into(),
+            cap_id: crate::providers::credentials::CAP_CREDENTIALS.into(),
             key: "test-cred".into(),
             action: "get".into(),
             attrs: serde_json::Value::Null,

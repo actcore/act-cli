@@ -42,6 +42,15 @@ use crate::Decision;
 use crate::grant::{CapabilityGrant, PolicyError, PolicyMode};
 use crate::provider::{CapabilityProvider, CompiledCeiling, Explained, ResourceOp};
 
+/// The `act:credentials` capability id. Mirrors `act_types::constants::CAP_CREDENTIALS`
+/// (act-sdk-rs) — that is the ecosystem-wide canonical constant, but act-cli's
+/// `act-types` dependency predates it, so this crate-local copy is what the
+/// registration site (`provider.rs::with_builtins`) and callers within this
+/// workspace (e.g. `act-cli::runtime::create_store`) actually use today.
+/// Replace both with the `act_types` constant once the workspace dependency
+/// is bumped past the release that carries it.
+pub const CAP_CREDENTIALS: &str = "act:credentials";
+
 pub struct CredentialsProvider;
 
 pub struct CredentialsCeiling {
@@ -90,7 +99,7 @@ impl CompiledCeiling for CredentialsCeiling {
         };
         Explained {
             decision,
-            rule: Some("act:credentials".into()),
+            rule: Some(CAP_CREDENTIALS.into()),
         }
     }
 
@@ -122,7 +131,7 @@ mod tests {
 
     fn op() -> ResourceOp {
         ResourceOp {
-            cap_id: "act:credentials".into(),
+            cap_id: CAP_CREDENTIALS.into(),
             key: "notion-work".into(),
             action: "get".into(),
             attrs: serde_json::Value::Null,
@@ -132,7 +141,7 @@ mod tests {
     #[tokio::test]
     async fn undeclared_is_denied_even_in_ask_mode() {
         let ceiling = CredentialsProvider
-            .resolve("act:credentials", &[], &grant(PolicyMode::Ask))
+            .resolve(CAP_CREDENTIALS, &[], &grant(PolicyMode::Ask))
             .await
             .unwrap();
         assert_eq!(
@@ -152,7 +161,7 @@ mod tests {
         // caller-side wiring — see the module docs for why it can't yet.
         let declared = vec![serde_json::json!({})];
         let ceiling = CredentialsProvider
-            .resolve("act:credentials", &declared, &grant(PolicyMode::Ask))
+            .resolve(CAP_CREDENTIALS, &declared, &grant(PolicyMode::Ask))
             .await
             .unwrap();
         assert_eq!(ceiling.classify(&op()), Decision::Ask);
@@ -163,7 +172,7 @@ mod tests {
         // Sentinel, see comment above.
         let declared = vec![serde_json::json!({})];
         let ceiling = CredentialsProvider
-            .resolve("act:credentials", &declared, &grant(PolicyMode::Deny))
+            .resolve(CAP_CREDENTIALS, &declared, &grant(PolicyMode::Deny))
             .await
             .unwrap();
         assert_eq!(ceiling.classify(&op()), Decision::Deny);
@@ -174,7 +183,7 @@ mod tests {
         // Sentinel, see comment on `declared_and_asked_yields_ask` above.
         let declared = vec![serde_json::json!({})];
         let ceiling = CredentialsProvider
-            .resolve("act:credentials", &declared, &grant(PolicyMode::Ask))
+            .resolve(CAP_CREDENTIALS, &declared, &grant(PolicyMode::Ask))
             .await
             .unwrap();
         assert_eq!(ceiling.effective_mode(), PolicyMode::Ask);
@@ -187,7 +196,7 @@ mod tests {
         // the audit trail renders a mode the component was never actually
         // granted.
         let ceiling = CredentialsProvider
-            .resolve("act:credentials", &[], &grant(PolicyMode::Ask))
+            .resolve(CAP_CREDENTIALS, &[], &grant(PolicyMode::Ask))
             .await
             .unwrap();
         assert_eq!(ceiling.effective_mode(), PolicyMode::Deny);
