@@ -86,6 +86,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "act-credentials"
+version = "0.11.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "toml 1.1.2+spec-1.1.0",
+]
+
+[[package]]
 name = "act-policy"
 version = "0.11.1"
 dependencies = [

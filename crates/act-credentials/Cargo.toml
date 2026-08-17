@@ -1,0 +1,18 @@
+[package]
+name = "act-credentials"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Credential profiles, kinds and storage backends for the ACT host"
+keywords = ["act", "wasm", "credentials"]
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
