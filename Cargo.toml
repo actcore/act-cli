@@ -22,7 +22,6 @@ clap = { version = "4.6", features = ["derive", "env"] }
 dirs = "6"
 globset = "0.4"
 http = "1"
-keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
 oci-client = "0.17"
 regex = "1"
 serde = { version = "1.0.228", features = ["derive"] }

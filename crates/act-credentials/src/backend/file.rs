@@ -7,8 +7,9 @@ use crate::index::{Index, write_private};
 use crate::record::{SecretInfo, SecretRecord};
 use crate::store::{CredentialStore, StoreError};
 
-/// Secrets in one JSON file next to the index. Used where no keyring exists —
-/// containers, CI — and always selected explicitly, never fallen into (spec §7.4).
+/// Secrets in one JSON file next to the index. This is the only backend: the
+/// records are plaintext on disk, protected by filesystem permissions alone,
+/// and it is always selected explicitly (spec §7.4).
 pub struct FileStore {
     root: PathBuf,
 }
