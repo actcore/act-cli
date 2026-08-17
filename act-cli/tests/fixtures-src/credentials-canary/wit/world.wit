@@ -1,0 +1,11 @@
+package component:impl;
+
+world component-world {
+  // The one interface the host provides and this component imports.
+  import act:credentials/store@0.1.0;
+
+  export act:tools/tool-provider@0.2.0;
+  // Exported so the host can open a live session: `get-secret` requires one,
+  // and a session is only live *after* `open-session` returns.
+  export act:sessions/session-provider@0.2.0;
+}

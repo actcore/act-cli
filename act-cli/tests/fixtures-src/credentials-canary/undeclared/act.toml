@@ -1,0 +1,13 @@
+# The same component bytes packed without an `act:credentials` declaration.
+#
+# `act-build pack` resolves metadata from the directory it finds walking up
+# from the wasm, so packing a copy of `credentials_canary.wasm` placed *here*
+# produces an artifact identical in code and different only in what it claims
+# to need. That is the only way to test "undeclared means denied": there is no
+# flag that un-declares a capability, by design — an undeclared class is denied
+# and no grant can widen it (spec §4).
+[std]
+name = "credentials-canary-undeclared"
+version = "0.1.0"
+description = "The credentials canary packed without declaring act:credentials, so every get-secret must be denied."
+default-language = "en"

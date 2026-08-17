@@ -1,0 +1,11 @@
+[std]
+name = "credentials-canary"
+version = "0.1.0"
+description = "Canary component for act:credentials host integration tests. Its `whoami` tool fetches a credential and reports its shape, never its value."
+default-language = "en"
+
+# Declared as the bare table spec §4 prescribes — `act:credentials` carries no
+# constraints, and the host synthesises the presence sentinel the provider's
+# `declared` slice needs (`runtime::declared_constraints`). The undeclared twin
+# in `undeclared/act.toml` is this file minus these two lines.
+[std.capabilities."act:credentials"]

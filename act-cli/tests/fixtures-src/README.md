@@ -100,3 +100,54 @@ cargo run --manifest-path ../../../../act-build/Cargo.toml --release -- \
 cp target/wasm32-wasip2/release/sockets_canary.wasm \
     ../../fixtures/sockets-canary.wasm
 ```
+
+## credentials-canary
+
+Credentials canary. The only fixture that **imports** a host interface —
+`act:credentials/store@0.1.0` — rather than only exporting ones, so it is the
+only one that can drive the host's credential path end to end. It also exports
+`act:tools/tool-provider` and `act:sessions/session-provider`; the session
+export is not optional, because `get-secret` requires a live session.
+
+Its `whoami` tool fetches the credential under the key `probe` and returns
+its `kind`, whether the field map arrived non-empty, the field *names*, and
+the byte **length** of `std:value` — never the value. The length is the
+minimal oracle that lets `tests/credentials_e2e.rs` tell "the host handed over
+the real material" from "the host handed over an empty shell with the right
+kind on it". `list_keys` returns `list-secrets` metadata, which by
+construction cannot carry a value.
+
+The credential is fetched **on the tool call, never inside `open-session`**:
+the host marks a session live only once `open-session` returns, and the id is
+component-chosen, so a fetch from inside that call is refused as an unknown
+session — always. See the credentials design doc §8.3 / §9.2.
+
+### Two artifacts, one build
+
+`credentials-canary.wasm` and `credentials-canary-undeclared.wasm` are the
+same compiled bytes packed twice: against `act.toml`, which carries the bare
+`[std.capabilities."act:credentials"]` table spec §4 prescribes, and against
+`undeclared/act.toml`, which does not. `act-build pack` resolves metadata from
+the first project directory it finds walking up from the wasm, so placing a
+copy of the wasm in `undeclared/` is what selects the second manifest. Two
+artifacts are needed because there is deliberately no flag that un-declares a
+capability: an undeclared class is denied and no grant can widen it.
+
+### Rebuild
+
+```bash
+cd tests/fixtures-src/credentials-canary
+cargo build --target wasm32-wasip2 --release
+AB="cargo run --manifest-path ../../../../act-build/Cargo.toml --release --"
+
+# Declaring variant:
+cp target/wasm32-wasip2/release/credentials_canary.wasm .
+$AB pack credentials_canary.wasm
+mv credentials_canary.wasm ../../fixtures/credentials-canary.wasm
+
+# Undeclared twin — same bytes, packed against undeclared/act.toml:
+cp target/wasm32-wasip2/release/credentials_canary.wasm undeclared/
+$AB pack undeclared/credentials_canary.wasm
+mv undeclared/credentials_canary.wasm \
+    ../../fixtures/credentials-canary-undeclared.wasm
+```

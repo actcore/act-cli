@@ -1,0 +1,22 @@
+[workspace]
+
+[package]
+name = "credentials-canary"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+wit-bindgen = { version = "0.58", features = ["async-spawn"] }
+ciborium = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
+opt-level = "z"
