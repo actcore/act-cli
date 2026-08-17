@@ -120,7 +120,7 @@ fn take_bytes(s: &str, n: usize) -> &str {
 /// substitutes from the component's own `act.toml` declaration under `ask`/
 /// `open` grants, which is entirely author-chosen and need not correspond to
 /// anything real.
-fn needs_escape(c: char) -> bool {
+pub(crate) fn needs_escape(c: char) -> bool {
     c.is_control()
         || matches!(
             c,
@@ -138,7 +138,14 @@ fn needs_escape(c: char) -> bool {
 /// directional overrides into guest-controlled fields. This sanitizes them
 /// uniformly at the rendering point: \n, \r, \t as their literal forms; other
 /// escaped chars as \u{...}. Returns the original string if no escaping needed.
-fn escape_audit_field(s: &str) -> Cow<'_, str> {
+///
+/// Not only audit lines: `runtime::consent` and `runtime::elicit` run every
+/// consent prompt through this too. A prompt is the stronger case — an audit
+/// line is read after the fact, whereas a forged prompt line is answered by a
+/// human who believes they are approving something else. It lives here rather
+/// than in the consent module because the audit trail was the first caller
+/// and the escaping rules must not fork between the two surfaces.
+pub(crate) fn escape_audit_field(s: &str) -> Cow<'_, str> {
     if !s.chars().any(needs_escape) {
         return Cow::Borrowed(s);
     }

@@ -171,10 +171,18 @@ struct EventVisitor {
     has_prompt_channel: bool,
     /// Present on a credential-issue event and on nothing else — see
     /// `on_event`, which branches on it before anything else.
-    credential_kind: String,
+    ///
+    /// An `Option`, not a `String`, and the difference is load-bearing: the
+    /// kind comes straight off the stored record and nothing validates it, so
+    /// a record written with `kind: ""` is served to the guest all the same.
+    /// Branching on emptiness would drop that event through both other
+    /// branches too, and a secret would cross the sandbox boundary with no
+    /// audit line at all — the one thing this record exists to make
+    /// impossible. Presence of the field is the signal; its value is not.
+    credential_kind: Option<String>,
     /// Carried on the credential-issue event itself rather than read off an
-    /// enclosing span: `get-secret` is legal from inside `open-session`,
-    /// which runs under no audit span at all.
+    /// enclosing span, so the record identifies itself without depending on
+    /// span context.
     component_ref: String,
     session_id: String,
 }
@@ -187,7 +195,7 @@ impl Visit for EventVisitor {
             n if n == attr::RESOURCE_ACTION => self.action = v.to_string(),
             n if n == attr::DECISION => self.decision = v.to_string(),
             n if n == attr::POLICY_MODE => self.mode = v.to_string(),
-            n if n == attr::CREDENTIAL_KIND => self.credential_kind = v.to_string(),
+            n if n == attr::CREDENTIAL_KIND => self.credential_kind = Some(v.to_string()),
             n if n == attr::COMPONENT_REF => self.component_ref = v.to_string(),
             n if n == attr::SESSION_ID => self.session_id = v.to_string(),
             n if n == attr::POLICY_ACTOR => self.actor = v.to_string(),
@@ -319,19 +327,20 @@ where
 
         // A credential-issue record (from `emit_credential_issue`) carries
         // neither a capability id nor a decision, so both branches below
-        // would drop it. It is checked first, on the one field no other
-        // audit event emits, and printed unconditionally — under
-        // `Detail::Rollup` too. There is no rollup that could carry it: the
-        // call is often made from inside `open-session`, where there is no
-        // enclosing span to fold into, and a per-run count of "credentials
-        // issued" would not answer the only question an operator has here,
-        // which is *which* ones.
-        if !v.credential_kind.is_empty() {
+        // would drop it. It is checked first, on the presence of the one
+        // field no other audit event emits — presence, not a non-empty
+        // value, so an unvalidated `kind` cannot make a secret cross
+        // unrecorded.
+        //
+        // Printed unconditionally, under `Detail::Rollup` too: a per-run
+        // count of "credentials issued" would not answer the only question
+        // an operator has here, which is *which* ones.
+        if let Some(kind) = v.credential_kind {
             let record = CredentialIssueRecord {
                 component_ref: v.component_ref,
                 session_id: v.session_id,
                 key: v.key,
-                kind: v.credential_kind,
+                kind,
             };
             self.emit(|| render_credential_issue(&record));
             return;
@@ -536,10 +545,10 @@ mod tests {
 
     #[test]
     fn a_credential_issue_reaches_output_with_no_enclosing_span_at_all() {
-        // The case that matters most and the one a span-derived record would
-        // lose: the leading deployment shape fetches its credentials from
-        // inside `open-session` (design §8.3), which runs under no audit
-        // span. All four facts must come off the event itself.
+        // A record must identify itself from its own fields. Emitting with
+        // no span at all is how that is pinned: all four facts have to come
+        // off the event, so no later call site can be added that renders an
+        // anonymous credential line.
         let out = run(|| emit_credential_issue(&issue()));
         assert_eq!(out.len(), 1, "expected one line, got {out:?}");
         assert!(out[0].contains("notion-work"), "key missing: {}", out[0]);
@@ -550,6 +559,27 @@ mod tests {
             out[0]
         );
         assert!(out[0].contains("sess-7"), "session missing: {}", out[0]);
+    }
+
+    #[test]
+    fn a_credential_with_an_empty_kind_is_still_audited() {
+        // `kind` comes straight off the stored record and nothing validates
+        // it, so `kind: ""` is served to the guest like any other. If the
+        // layer keyed on a non-empty value the event would fall through
+        // every branch and a secret would cross with no audit line at all.
+        let out = run(|| {
+            emit_credential_issue(&CredentialIssueRecord {
+                kind: String::new(),
+                ..issue()
+            })
+        });
+        assert_eq!(out.len(), 1, "expected one line, got {out:?}");
+        assert!(out[0].contains("notion-work"), "key missing: {}", out[0]);
+        assert!(
+            out[0].contains("ghcr.io/actpkg/notion@0.1.0"),
+            "component missing: {}",
+            out[0]
+        );
     }
 
     #[test]

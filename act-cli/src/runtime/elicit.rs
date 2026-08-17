@@ -116,8 +116,9 @@ use act_policy::consent::{ConsentAsk, ConsentPrompter};
 /// capability requests interactively.
 ///
 /// Runs on the actor task, so it does not touch the peer itself — see the
-/// module docs. Format mirrors `TtyPrompter`:
-/// `ACT consent: <cap_id> — <summary> (<key>)`.
+/// module docs. Format is `TtyPrompter`'s, from the shared
+/// `runtime::consent::consent_line`: `ACT consent: <cap_id> — <summary> (<key>)`,
+/// every field escaped.
 pub struct McpElicitationPrompter {
     current: Arc<CurrentConsentSink>,
 }
@@ -131,10 +132,10 @@ impl McpElicitationPrompter {
 #[async_trait::async_trait]
 impl ConsentPrompter for McpElicitationPrompter {
     async fn decide(&self, ask: &ConsentAsk) -> bool {
-        let message = format!(
-            "ACT consent: {} — {} ({})",
-            ask.cap_id, ask.summary, ask.key
-        );
+        // Same escaping as the TTY prompter, from the same function: an MCP
+        // client renders this string too, and a guest-authored key with a
+        // newline in it forges structure there just as readily.
+        let message = crate::runtime::consent::consent_line(ask);
 
         // No sink means nothing is in flight to associate the ask with — e.g. a
         // capability touched during `list-tools`. Deny rather than reach for a

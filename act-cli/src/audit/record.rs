@@ -295,10 +295,11 @@ pub struct CeilingClassRecord {
 /// different questions when read back.
 ///
 /// `component_ref` and `session_id` are carried on the record itself rather
-/// than inherited from an enclosing span, because the leading deployment
-/// shape fetches its credentials from inside `open-session` (design §8.3) —
-/// and `open-session` runs under no audit span at all. A record that relied
-/// on span context would be anonymous in exactly the case that matters most.
+/// than inherited from an enclosing span: an audit record must identify what
+/// it describes from its own fields, not from whatever happens to enclose the
+/// call site. That keeps the record intact wherever the host later chooses to
+/// serve a credential from, and keeps the layer's decoding a function of the
+/// event alone.
 ///
 /// There is no field that could hold a value, and none is added: the type is
 /// the enforcement. `list-secrets` has no record of its own on purpose —
