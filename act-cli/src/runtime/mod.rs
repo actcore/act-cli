@@ -408,39 +408,94 @@ fn declared_constraints(info: &ComponentInfo, cap_id: &str) -> Vec<serde_json::V
         .unwrap_or_default()
 }
 
-/// Warn when a component that declares `act:credentials` is also granted
-/// `wasi:http` in `open` mode.
+/// The capability classes over which credentials can leave the machine.
 ///
-/// Reading credentials and reaching an unrestricted network are each
-/// unremarkable alone. Together they are an exfiltration channel: a component
-/// that can read your credentials and reach any host can send them anywhere
-/// (docs/specs/2026-08-03-act-credentials-design.md §4.1).
+/// Deliberately a constant read by `warn_if_credentials_exfil_risk` itself
+/// rather than a list its caller assembles: a caller that wired up only
+/// `wasi:http` would reopen the identical channel under the id nobody checked,
+/// and nothing about that call would look wrong at the call site.
+const EXFIL_NETWORK_CAPS: [&str; 2] = [
+    act_types::constants::CAP_HTTP,
+    act_types::constants::CAP_SOCKETS,
+];
+
+/// Warn when a component that declares `act:credentials` also holds an `open`
+/// grant on a network class it declared a reachable ceiling for.
 ///
-/// Emitted on this module's default target, **not** `act::audit`, like every
-/// other host advisory (`http_policy`, `fs_policy`). The audit target is not a
-/// general-purpose log: `AuditLayer::on_event` reconstructs a typed
-/// `CapDecisionRecord` and drops anything without both a `cap_id` and an
-/// `act.decision` field, while `crate::fmt_filter` excludes `act::audit` from
-/// the `fmt` layer precisely so audit events are rendered once, by `render.rs`.
-/// A prose warning addressed to `act::audit` therefore reaches neither layer
-/// and is silently swallowed. This is advice about a grant the operator chose,
-/// not a decision about a resource access, so the ordinary log is where it
-/// belongs.
-fn warn_if_credentials_exfil_risk(info: &ComponentInfo, http_mode: act_policy::grant::PolicyMode) {
-    if info
+/// Reading credentials and reaching the network are each unremarkable alone;
+/// together they are an exfiltration channel
+/// (docs/specs/2026-08-03-act-credentials-design.md §4.1). Both network classes
+/// count — raw TCP over `wasi:sockets` exfiltrates exactly as well as HTTP does,
+/// so warning about `wasi:http` alone would leave the same channel open under a
+/// different id.
+///
+/// ## Why the grant alone is not the trigger
+///
+/// The reach is the *ceiling* — grant ∩ declaration — not the grant. Per
+/// `act_policy::effective`, a class the component never declared is forced to
+/// `Deny` (`effective.rs:100`), a class declared as a bare table with no
+/// constraints is likewise forced to `Deny` (`effective.rs:118`), and an `open`
+/// grant does not mean "everything": it collapses to `Allowlist` bounded by the
+/// declaration (`effective.rs:144`). So `--allow wasi:http` on a component that
+/// declared no hosts buys that component nothing at all, and warning about it
+/// would be a false positive — the fastest way to teach an operator to ignore
+/// every warning this host emits.
+///
+/// The condition is therefore `open` grant **and** a non-empty declaration:
+/// exactly the case where the operator has removed their own bound and the
+/// artifact's self-declaration is the only one left standing.
+///
+/// ## Why not `act::audit`
+///
+/// Emitted on this module's default target, like every other host advisory
+/// (`http_policy`, `fs_policy`). The audit target is not a general-purpose log:
+/// `AuditLayer::on_event` reconstructs a typed `CapDecisionRecord` and drops
+/// anything without both a `cap_id` and an `act.decision` field, while
+/// `crate::fmt_filter` excludes `act::audit` from the `fmt` layer precisely so
+/// audit events are rendered once, by `render.rs`. A prose warning addressed to
+/// `act::audit` therefore reaches neither layer and is silently swallowed. This
+/// is advice about a grant the operator chose, not a decision about a resource
+/// access, so the ordinary log is where it belongs.
+fn warn_if_credentials_exfil_risk(
+    info: &ComponentInfo,
+    grant_policy: &act_policy::grant::GrantPolicy,
+) {
+    if !info
         .std
         .capabilities
         .has(act_policy::providers::credentials::CAP_CREDENTIALS)
-        && http_mode == act_policy::grant::PolicyMode::Open
     {
-        tracing::warn!(
-            component = %info.std.name,
-            http_mode = %http_mode,
-            "component declares act:credentials and is granted wasi:http in open \
-             mode: it can read your credentials and reach any host, so it can \
-             send them anywhere — scope wasi:http to an allowlist"
-        );
+        return;
     }
+
+    // Note: a declaration whose constraints are present but malformed is
+    // counted as reachable here, while `effective_*` parses it, logs
+    // "ignoring malformed ... constraint" and denies. Erring towards the
+    // warning on a manifest that is already being complained about is the
+    // safe side of that seam, and keeping this check on the raw constraint
+    // list avoids duplicating each class's constraint schema here.
+    let unbounded: Vec<&str> = EXFIL_NETWORK_CAPS
+        .iter()
+        .copied()
+        .filter(|cap_id| {
+            grant_policy.resolve(cap_id).mode == act_policy::grant::PolicyMode::Open
+                && !declared_constraints(info, cap_id).is_empty()
+        })
+        .collect();
+    if unbounded.is_empty() {
+        return;
+    }
+
+    let classes = unbounded.join(" and ");
+    tracing::warn!(
+        component = %info.std.name,
+        open_grants = %classes,
+        "component declares act:credentials and is granted {classes} in open \
+         mode: an open grant adds no bound of your own, leaving the component's \
+         own declaration as the only limit on where it can reach — and it can \
+         send your credentials anywhere that declaration permits. Grant an \
+         allowlist you chose instead."
+    );
 }
 
 /// Create a new store with WASI context, preopening directories from resolved mounts.
@@ -475,9 +530,10 @@ pub async fn create_store(
     let http_grant = grant_policy.resolve(act_types::constants::CAP_HTTP);
     let sockets_grant = grant_policy.resolve(act_types::constants::CAP_SOCKETS);
 
-    // act:credentials + wasi:http in `open` mode is an exfiltration channel —
-    // see `warn_if_credentials_exfil_risk` above.
-    warn_if_credentials_exfil_risk(info, http_grant.mode);
+    // act:credentials plus an unbounded grant on either network class is an
+    // exfiltration channel — see `warn_if_credentials_exfil_risk` above. It
+    // resolves the classes it cares about itself, from the whole policy.
+    warn_if_credentials_exfil_risk(info, grant_policy);
 
     let fs_ceiling: Arc<dyn CompiledCeiling> = Arc::from(
         registry
@@ -1337,6 +1393,7 @@ mod tests {
 
     // ── act:credentials declared-slice contract ───────────────────────────
 
+    use act_policy::grant::PolicyMode;
     use act_policy::providers::credentials::CAP_CREDENTIALS;
 
     /// Parse an `act.toml`-shaped fragment the way the real manifest is read.
@@ -1508,9 +1565,29 @@ mod tests {
     /// output at all — which is exactly what this warning did before, and a
     /// bare `fmt()` subscriber would have happily printed it and called the
     /// test green.
+    /// A `GrantPolicy` with explicit per-class modes and everything else denied.
+    fn grants(pairs: &[(&str, PolicyMode)]) -> act_policy::grant::GrantPolicy {
+        act_policy::grant::GrantPolicy {
+            default: PolicyMode::Deny,
+            entries: pairs
+                .iter()
+                .map(|(id, mode)| {
+                    (
+                        (*id).to_string(),
+                        act_policy::grant::CapabilityGrant {
+                            mode: *mode,
+                            allow: vec![],
+                            deny: vec![],
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
     fn capture_exfil_warning(
         info: &ComponentInfo,
-        http_mode: act_policy::grant::PolicyMode,
+        network_grants: &[(&str, PolicyMode)],
     ) -> String {
         use tracing_subscriber::prelude::*;
 
@@ -1526,13 +1603,22 @@ mod tests {
                 ))),
         );
         // Thread-local, so parallel tests don't fight over a global default.
+        let policy = grants(network_grants);
         tracing::subscriber::with_default(subscriber, || {
-            warn_if_credentials_exfil_risk(info, http_mode);
+            warn_if_credentials_exfil_risk(info, &policy);
         });
         log.contents()
     }
 
-    fn credentials_and_http_component() -> ComponentInfo {
+    /// A component with credentials **and genuine reach**: `wasi:http`
+    /// declared with real hosts, so an `open` grant actually leaves it able to
+    /// talk to them.
+    ///
+    /// The earlier version of this fixture declared `wasi:http` as a bare
+    /// table, which `effective_http` forces to `Deny` — so the positive test
+    /// was asserting that the host warns about a component whose HTTP ceiling
+    /// blocks everything.
+    fn credentials_and_reachable_http() -> ComponentInfo {
         info_from_act_toml(
             r#"
             [std]
@@ -1541,6 +1627,21 @@ mod tests {
             [std.capabilities."act:credentials"]
 
             [std.capabilities."wasi:http"]
+            constraints = [{ host = "api.notion.com" }, { host = "*.notion.so" }]
+            "#,
+        )
+    }
+
+    fn credentials_and_reachable_sockets() -> ComponentInfo {
+        info_from_act_toml(
+            r#"
+            [std]
+            name = "pg-sync"
+
+            [std.capabilities."act:credentials"]
+
+            [std.capabilities."wasi:sockets"]
+            constraints = [{ host = "db.internal", ports = [5432], protocols = ["tcp"] }]
             "#,
         )
     }
@@ -1548,8 +1649,11 @@ mod tests {
     #[test]
     fn credentials_plus_open_http_warns_about_exfiltration_not_just_the_two_names() {
         let out = capture_exfil_warning(
-            &credentials_and_http_component(),
-            act_policy::grant::PolicyMode::Open,
+            &credentials_and_reachable_http(),
+            &[
+                (act_types::constants::CAP_HTTP, PolicyMode::Open),
+                (act_types::constants::CAP_SOCKETS, PolicyMode::Deny),
+            ],
         );
 
         assert!(
@@ -1566,47 +1670,181 @@ mod tests {
             out.contains("notion-sync"),
             "must name the component it is about, got: {out}"
         );
+        assert!(
+            out.contains("wasi:http"),
+            "must name the class whose grant is open, got: {out}"
+        );
         // The point of the warning is the *consequence* of the pairing. Naming
         // the two capabilities without saying what they add up to tells the
         // operator nothing they could not read off their own command line.
         assert!(
-            out.contains("send them anywhere"),
-            "must state that credentials can be sent anywhere, got: {out}"
+            out.contains("send your credentials anywhere that declaration permits"),
+            "must state that credentials can be sent across that reach, got: {out}"
         );
         assert!(
-            out.contains("reach any host"),
-            "must state that any host is reachable, got: {out}"
+            out.contains("only limit on where it can reach"),
+            "must state that the artifact's own declaration is the last bound \
+             standing once the operator's grant is open, got: {out}"
+        );
+        // An `open` grant collapses to `Allowlist` bounded by the declaration
+        // (`effective.rs:144`), so "any host" is simply false. An overstated
+        // warning is a warning operators learn to skip.
+        assert!(
+            !out.contains("any host"),
+            "must not claim unbounded reach — an open grant is still bounded by \
+             the component's declaration, got: {out}"
+        );
+    }
+
+    #[test]
+    fn credentials_plus_open_sockets_warns_too_because_raw_tcp_exfiltrates_as_well() {
+        // Design §4.1 rests containment on credentials + http *and* sockets.
+        // Covering only http would leave the identical channel open under a
+        // different capability id.
+        let out = capture_exfil_warning(
+            &credentials_and_reachable_sockets(),
+            &[
+                (act_types::constants::CAP_HTTP, PolicyMode::Deny),
+                (act_types::constants::CAP_SOCKETS, PolicyMode::Open),
+            ],
+        );
+
+        assert!(
+            out.contains("wasi:sockets"),
+            "an open wasi:sockets grant must warn and name the class, got: {out}"
+        );
+        assert!(
+            out.contains("pg-sync"),
+            "must name the component it is about, got: {out}"
+        );
+    }
+
+    #[test]
+    fn both_network_classes_open_are_both_named() {
+        let info = info_from_act_toml(
+            r#"
+            [std]
+            name = "wide-open"
+
+            [std.capabilities."act:credentials"]
+
+            [std.capabilities."wasi:http"]
+            constraints = [{ host = "api.example.com" }]
+
+            [std.capabilities."wasi:sockets"]
+            constraints = [{ host = "db.internal", ports = [5432], protocols = ["tcp"] }]
+            "#,
+        );
+        let out = capture_exfil_warning(
+            &info,
+            &[
+                (act_types::constants::CAP_HTTP, PolicyMode::Open),
+                (act_types::constants::CAP_SOCKETS, PolicyMode::Open),
+            ],
+        );
+
+        assert!(
+            out.contains("wasi:http") && out.contains("wasi:sockets"),
+            "both open classes must be named, got: {out}"
+        );
+    }
+
+    #[test]
+    fn an_open_grant_on_a_class_the_component_cannot_actually_reach_stays_silent() {
+        // The reach is the ceiling — grant ∩ declaration — not the grant. Both
+        // shapes below are forced to `Deny` by `act_policy::effective`, so the
+        // component can reach nothing and there is nothing to warn about.
+        // Warning here is the false positive that trains operators to ignore
+        // every warning the host emits.
+        let bare_declaration = info_from_act_toml(
+            r#"
+            [std]
+            name = "bare-net"
+
+            [std.capabilities."act:credentials"]
+
+            [std.capabilities."wasi:http"]
+
+            [std.capabilities."wasi:sockets"]
+            "#,
+        );
+        let out = capture_exfil_warning(
+            &bare_declaration,
+            &[
+                (act_types::constants::CAP_HTTP, PolicyMode::Open),
+                (act_types::constants::CAP_SOCKETS, PolicyMode::Open),
+            ],
+        );
+        assert!(
+            out.is_empty(),
+            "a bare network declaration is forced to Deny (effective.rs:118), so \
+             an open grant on it reaches nothing and must not warn, got: {out}"
+        );
+
+        let never_declared = info_from_act_toml(
+            r#"
+            [std]
+            name = "no-net"
+
+            [std.capabilities."act:credentials"]
+            "#,
+        );
+        let out = capture_exfil_warning(
+            &never_declared,
+            &[
+                (act_types::constants::CAP_HTTP, PolicyMode::Open),
+                (act_types::constants::CAP_SOCKETS, PolicyMode::Open),
+            ],
+        );
+        assert!(
+            out.is_empty(),
+            "an undeclared class is forced to Deny (effective.rs:100) — \
+             `--allow wasi:http` buys such a component nothing, got: {out}"
         );
     }
 
     #[test]
     fn neither_capability_alone_triggers_the_exfiltration_warning() {
-        // Scoped http with credentials: reach is bounded, so no warning.
-        for mode in [
-            act_policy::grant::PolicyMode::Deny,
-            act_policy::grant::PolicyMode::Allowlist,
-            act_policy::grant::PolicyMode::Ask,
-        ] {
-            let out = capture_exfil_warning(&credentials_and_http_component(), mode);
+        // Reach is bounded by a grant the operator chose, so no warning — the
+        // artifact's declaration is not the only thing standing between the
+        // credentials and the network.
+        for mode in [PolicyMode::Deny, PolicyMode::Allowlist, PolicyMode::Ask] {
+            let out = capture_exfil_warning(
+                &credentials_and_reachable_http(),
+                &[
+                    (act_types::constants::CAP_HTTP, mode),
+                    (act_types::constants::CAP_SOCKETS, mode),
+                ],
+            );
             assert!(
                 out.is_empty(),
-                "act:credentials with http in {mode} mode must not warn, got: {out}"
+                "act:credentials with network in {mode} mode must not warn, got: {out}"
             );
         }
 
-        // Open http without credentials: nothing to exfiltrate, so no warning.
+        // Wide-open network but nothing to exfiltrate: no credentials, no warning.
         let no_credentials = info_from_act_toml(
             r#"
             [std]
             name = "plain-fetcher"
 
             [std.capabilities."wasi:http"]
+            constraints = [{ host = "api.example.com" }]
+
+            [std.capabilities."wasi:sockets"]
+            constraints = [{ host = "db.internal", ports = [5432], protocols = ["tcp"] }]
             "#,
         );
-        let out = capture_exfil_warning(&no_credentials, act_policy::grant::PolicyMode::Open);
+        let out = capture_exfil_warning(
+            &no_credentials,
+            &[
+                (act_types::constants::CAP_HTTP, PolicyMode::Open),
+                (act_types::constants::CAP_SOCKETS, PolicyMode::Open),
+            ],
+        );
         assert!(
             out.is_empty(),
-            "open http without act:credentials must not warn, got: {out}"
+            "open network without act:credentials must not warn, got: {out}"
         );
     }
 }
