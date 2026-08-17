@@ -225,13 +225,24 @@ fn resolve_backend(explicit: Option<&str>) -> Result<BackendChoice> {
 /// The file store is plaintext, protected only by filesystem permissions —
 /// nothing here encrypts it (spec D13/§7.4). That is the only thing standing
 /// between an operator and a false sense of protection, so it is stated
-/// once, on the write that creates the store, rather than left to the docs.
+/// while the store is empty, rather than left to the docs.
 ///
-/// "First write" is decided through the store's own `list`, not by
-/// reaching into the file backend's on-disk layout: an empty store is one
-/// nothing has ever been written to, regardless of which files that turns
-/// out to mean. Matched on `choice` (rather than asserted for every
-/// backend) so a future non-file backend doesn't inherit a plaintext
+/// This runs *before* the field is read (see `cmd_set`), which means the
+/// write it is warning about has not happened yet and may never happen: the
+/// field read can still fail, the kind can turn out invalid for the fields
+/// given, or a symlink race in `write_private` can refuse the write outright.
+/// The wording below is deliberately about the store's current, checkable
+/// state ("holds no credentials") and what a write to it *would* mean, never
+/// about an action already taken — an operator told "creating a new store"
+/// right before a validation error would have been told something false.
+///
+/// "Empty" is decided through the store's own `list`, not by reaching into
+/// the file backend's on-disk layout: a store nothing has been written to
+/// reads as empty regardless of which files that turns out to mean — and,
+/// symmetrically, `erase`-ing the last credential leaves `secrets.json` on
+/// disk but empty, so "the file exists" is not a safe stand-in for "this
+/// notice no longer applies." Matched on `choice` (rather than asserted for
+/// every backend) so a future non-file backend doesn't inherit a plaintext
 /// warning that no longer applies to it.
 ///
 /// It names the file, not just the directory: an operator told that
@@ -257,11 +268,12 @@ fn disclose_if_first_write_to(
     store: &dyn CredentialStore,
 ) -> Result<()> {
     #[cfg(unix)]
-    const PROTECTION: &str = "The only protection is filesystem permissions — it is created 0600, \
-         readable only by this user.";
+    const PROTECTION: &str = "The only protection will be filesystem permissions — the file \
+         will be created 0600, readable only by this user.";
     #[cfg(not(unix))]
-    const PROTECTION: &str = "The only protection is filesystem permissions — and on this platform ACT sets \
-         none of its own: the file inherits whatever the containing directory grants.";
+    const PROTECTION: &str = "The only protection will be filesystem permissions — and on this \
+         platform ACT sets none of its own: the file will inherit whatever the containing \
+         directory grants.";
 
     match choice {
         BackendChoice::File(root) => {
@@ -272,11 +284,12 @@ fn disclose_if_first_write_to(
             {
                 writeln!(
                     out,
-                    "act secret: creating a new credential store at {}\n\
-                     This store is PLAINTEXT: nothing in ACT encrypts it. {PROTECTION} \
-                     Anyone who can read this user's files can read every credential \
-                     kept here. There is no OS-keyring backend yet. \
-                     (shown once per store)",
+                    "act secret: {} holds no credentials\n\
+                     If this write succeeds, it will be the first one, and this store will \
+                     be PLAINTEXT: nothing in ACT encrypts it. {PROTECTION} Anyone who can \
+                     read this user's files will be able to read every credential kept \
+                     here. There is no OS-keyring backend yet. \
+                     (shown while the store is empty)",
                     backend::file::secrets_path(root).display()
                 )
                 .context("writing plaintext-store notice")?;
@@ -551,6 +564,32 @@ mod tests {
     }
 
     #[test]
+    fn validate_fields_errors_on_a_missing_required_field() {
+        let reg = KindRegistry::builtin();
+        let basic = reg.get("std:basic").expect("std:basic registered");
+        let mut fields = BTreeMap::new();
+        fields.insert("std:username".to_string(), SecretValue::new("alice"));
+        // std:password is required and absent — this must be an error, not a
+        // credential silently missing half of what a component expects.
+        let err = validate_fields(basic, &fields).unwrap_err().to_string();
+        assert!(err.contains("std:password"), "{err}");
+        assert!(err.contains("std:basic"), "{err}");
+    }
+
+    #[test]
+    fn validate_fields_accepts_an_undefined_key_rather_than_rejecting_it() {
+        let reg = KindRegistry::builtin();
+        let opaque = reg.get("std:opaque").expect("std:opaque registered");
+        let mut fields = BTreeMap::new();
+        fields.insert("std:value".to_string(), SecretValue::new("v"));
+        fields.insert("std:bogus".to_string(), SecretValue::new("x"));
+        // A key the kind doesn't define is a warning, not a rejection: a kind
+        // lists what a *reader* can rely on, and a component may legitimately
+        // be handed more than that. Only the required-field check may bail.
+        assert!(validate_fields(opaque, &fields).is_ok());
+    }
+
+    #[test]
     fn resolve_backend_requires_the_file_scheme() {
         assert!(resolve_backend(Some("keyring")).is_err());
         assert!(resolve_backend(Some("file:")).is_err());
@@ -558,11 +597,16 @@ mod tests {
         assert_eq!(p, PathBuf::from("/tmp/x"));
     }
 
-    /// Simulates two `act secret set` runs against the same fresh store: the
-    /// first write is the one that creates it, the second finds it already
-    /// non-empty. Only the first should tell the operator the store is
-    /// plaintext and where it lives; a notice on every run would train
-    /// operators to stop reading it.
+    /// Unit-level coverage of `disclose_if_first_write_to` alone: it drives
+    /// the function directly against an empty then a non-empty store, so a
+    /// wording regression fails fast without paying for a subprocess.
+    ///
+    /// This is *not* the regression guard for finding 3 (the notice printing
+    /// after fields were read, not before) — that ordering bug lives in
+    /// `cmd_set`, which this test never calls. The guard is
+    /// `the_plaintext_notice_shows_on_the_first_set_and_falls_silent_on_the_second`
+    /// in `tests/secret_cli.rs`, which runs the real `act secret set` binary
+    /// twice and reads its real stderr.
     #[test]
     fn the_plaintext_notice_shows_once_per_store_then_falls_silent() {
         let dir = tempfile::tempdir().unwrap();

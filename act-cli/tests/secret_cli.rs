@@ -294,6 +294,72 @@ fn a_run_side_subcommand_resolves_the_named_backend() {
     );
 }
 
+/// The regression guard for the plaintext-store disclosure (spec D13/§7.4):
+/// it has to appear before the operator can lose anything to it, and it has
+/// to fall silent once the store holds something, or operators learn to stop
+/// reading it. Run against the real `act secret set` binary and its real
+/// stderr — a unit test that calls the disclosure function directly and
+/// fakes the write with its own `store.put` would stay green even if the
+/// call in `cmd_set` were moved back after the field read, since it never
+/// exercises that call site at all.
+#[test]
+fn the_plaintext_notice_shows_on_the_first_set_and_falls_silent_on_the_second() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = format!("file:{}", dir.path().display());
+    let secrets_path = act_credentials::backend::file::secrets_path(dir.path())
+        .display()
+        .to_string();
+
+    let run = |key: &str| {
+        act()
+            .args([
+                "secret",
+                "set",
+                "comp",
+                "--key",
+                key,
+                "--kind",
+                "std:opaque",
+                "--credentials-backend",
+                &backend,
+                "--fields-stdin",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut c| {
+                use std::io::Write;
+                c.stdin
+                    .as_mut()
+                    .unwrap()
+                    .write_all(br#"{"std:value":"v"}"#)?;
+                c.wait_with_output()
+            })
+            .unwrap()
+    };
+
+    let first = run("k1");
+    let first_err = String::from_utf8_lossy(&first.stderr).into_owned();
+    assert!(first.status.success(), "{first_err}");
+    assert!(
+        first_err.contains("PLAINTEXT"),
+        "first set into an empty store must name the risk: {first_err}"
+    );
+    assert!(
+        first_err.contains(&secrets_path),
+        "and the file it's writing to: {first_err}"
+    );
+
+    let second = run("k2");
+    let second_err = String::from_utf8_lossy(&second.stderr).into_owned();
+    assert!(second.status.success(), "{second_err}");
+    assert!(
+        !second_err.contains("PLAINTEXT"),
+        "a store that already holds a credential must not repeat the notice: {second_err}"
+    );
+}
+
 /// "removed" has to mean removed. `erase` is idempotent, so a mistyped
 /// `--key` would otherwise report success and leave the credential in place —
 /// an operator who thinks they revoked something is worse off than one who
