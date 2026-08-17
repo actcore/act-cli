@@ -62,6 +62,7 @@ path-clean = "1"
 owo-colors = { version = "4.3.0", features = ["supports-colors"] }
 act-store = { version = "0.11.1", path = "../crates/act-store" }
 act-policy = { version = "0.11.1", path = "../crates/act-policy" }
+act-credentials = { version = "0.11.1", path = "../crates/act-credentials" }
 async-trait = "0.1"
 bytesize = "2.3.1"
 

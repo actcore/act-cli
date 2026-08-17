@@ -9,11 +9,13 @@ pub mod record;
 pub mod render;
 
 pub use emit::{
-    emit_cap_decision, emit_ceiling_class, finish_tool_call, instantiation_span, tool_call_span,
+    emit_cap_decision, emit_ceiling_class, emit_credential_issue, finish_tool_call,
+    instantiation_span, tool_call_span,
 };
 pub use layer::{AuditLayer, Detail};
 pub use record::{
-    CapDecisionRecord, CeilingClassRecord, Decision4, Outcome, ToolCallStart, Transport, sha256_hex,
+    CapDecisionRecord, CeilingClassRecord, CredentialIssueRecord, Decision4, Outcome,
+    ToolCallStart, Transport, sha256_hex,
 };
 
 /// Target for host-authored audit records. The audit layer's filter is pinned

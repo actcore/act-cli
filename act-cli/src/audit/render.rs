@@ -5,7 +5,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
-use crate::audit::record::{CapDecisionRecord, Decision4};
+use crate::audit::record::{CapDecisionRecord, CredentialIssueRecord, Decision4};
 
 const PREFIX: &str = "audit: ";
 
@@ -221,6 +221,23 @@ pub fn render_declared_ask_blocked_warning(ids: &[String]) -> String {
     format!(
         "{PREFIX}\u{26a0} declared ask, no prompt channel — every access will be denied: {}",
         escaped.join(", ")
+    )
+}
+
+/// One credential handed to a component. Printed the moment it resolves and
+/// never folded into a rollup: an operator scanning a run for "what got out"
+/// must find one line per issue, not a count.
+///
+/// `key` is guest-authored (design §5.5 — the descriptor is untrusted input),
+/// and so is the stored `kind`, so both go through `escape_audit_field`; a
+/// newline in either would otherwise forge a second audit line.
+pub fn render_credential_issue(r: &CredentialIssueRecord) -> String {
+    format!(
+        "{PREFIX}\u{1f511} credential  {}  kind={}  {}  session={}",
+        escape_audit_field(&r.key),
+        escape_audit_field(&r.kind),
+        escape_audit_field(&r.component_ref),
+        escape_audit_field(&r.session_id),
     )
 }
 
@@ -736,6 +753,42 @@ mod tests {
             "allow must not render the ask marker, got {line}"
         );
         assert!(line.contains("allow"), "got {line}");
+    }
+
+    #[test]
+    fn a_credential_key_cannot_forge_a_second_audit_line() {
+        // The key is whatever the guest put in its `secret-request` (design
+        // §5.5: the descriptor is untrusted input), and it lands in a line an
+        // operator reads as a record of what left the host.
+        let line = render_credential_issue(&CredentialIssueRecord {
+            component_ref: "comp".into(),
+            session_id: "s1".into(),
+            key: "notion\naudit: \u{1f511} credential  innocent  kind=std:opaque".into(),
+            kind: "std:opaque".into(),
+        });
+        assert_eq!(line.matches('\n').count(), 0, "got {line}");
+        assert!(
+            line.contains("\\n"),
+            "expected an escaped newline, got {line}"
+        );
+    }
+
+    #[test]
+    fn a_credential_issue_line_carries_all_four_facts_and_nothing_that_could_be_a_value() {
+        let line = render_credential_issue(&CredentialIssueRecord {
+            component_ref: "ghcr.io/actpkg/notion@0.1.0".into(),
+            session_id: "sess-7".into(),
+            key: "notion-work".into(),
+            kind: "std:oauth2".into(),
+        });
+        for expected in [
+            "notion-work",
+            "std:oauth2",
+            "ghcr.io/actpkg/notion@0.1.0",
+            "sess-7",
+        ] {
+            assert!(line.contains(expected), "missing {expected} in {line}");
+        }
     }
 
     #[test]

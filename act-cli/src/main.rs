@@ -667,6 +667,7 @@ async fn prepare_component_with_consent(
         max_memory,
         prompter,
         cache,
+        credential_host(&audit.component_ref)?,
         &audit,
     )
     .await?;
@@ -682,6 +683,34 @@ async fn prepare_component_with_consent(
         metadata,
         has_sessions,
     })
+}
+
+/// Build the credential host serving one component run, or `None` when this
+/// platform has no data directory to put a store in.
+///
+/// `component_ref` is the profile namespace — the resolved reference the
+/// operator used, which is the same string `act secret set` writes under. It
+/// is what makes one component unable to read another's credentials
+/// (design §2.1), so it is threaded from the audit context rather than
+/// re-derived here, where it could drift.
+///
+/// The backend is named explicitly through `backend::select`, never inferred:
+/// there is deliberately no mode that picks one for you (design §7.4).
+fn credential_host(
+    component_ref: &str,
+) -> Result<Option<Arc<runtime::credentials::CredentialHost>>> {
+    let Some(root) = runtime::credentials::default_store_root() else {
+        return Ok(None);
+    };
+    let store = act_credentials::backend::select(
+        act_credentials::backend::BackendChoice::File(root.clone()),
+        &root,
+    )
+    .with_context(|| format!("opening credential store at {}", root.display()))?;
+    Ok(Some(Arc::new(runtime::credentials::CredentialHost::new(
+        Arc::from(store),
+        component_ref.to_string(),
+    ))))
 }
 
 // ── Commands ─────────────────────────────────────────────────────────────────

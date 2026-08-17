@@ -10,7 +10,8 @@ use tracing::field::Empty;
 
 use crate::audit::TARGET_AUDIT;
 use crate::audit::record::{
-    CapDecisionRecord, CeilingClassRecord, Outcome, ToolCallStart, attr, duration_ms,
+    CapDecisionRecord, CeilingClassRecord, CredentialIssueRecord, Outcome, ToolCallStart, attr,
+    duration_ms,
 };
 
 /// Open the envelope span for one tool call. `act.outcome` and
@@ -92,6 +93,27 @@ pub fn emit_ceiling_class(r: &CeilingClassRecord) {
             { attr::CONSENT_PROMPT_CHANNEL } = r.has_prompt_channel,
         },
         "act.ceiling_class",
+    );
+}
+
+/// One credential handed to a component. Carries no decision and no
+/// capability id, which is how the layer tells it apart from the two event
+/// shapes above — `act.credential.kind` is present on this event and on
+/// nothing else.
+///
+/// Emitted on the audit target, not this crate's default log target, and that
+/// is the point: `RUST_LOG` / `-v` must not be able to hide the moment a
+/// secret crossed into a sandbox. Only `--no-audit` silences it.
+pub fn emit_credential_issue(r: &CredentialIssueRecord) {
+    tracing::info!(
+        target: TARGET_AUDIT,
+        {
+            { attr::COMPONENT_REF } = %r.component_ref,
+            { attr::SESSION_ID } = %r.session_id,
+            { attr::RESOURCE_KEY } = %r.key,
+            { attr::CREDENTIAL_KIND } = %r.kind,
+        },
+        "act.credential_issue",
     );
 }
 

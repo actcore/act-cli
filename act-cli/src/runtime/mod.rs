@@ -13,6 +13,7 @@ use wasmtime_wasi_http::WasiHttpCtx;
 use wasmtime_wasi_http::p3::WasiHttpCtxView;
 
 pub mod consent;
+pub mod credentials;
 pub mod elicit;
 pub mod fs_policy;
 pub mod http_client;
@@ -40,6 +41,15 @@ pub struct HostState {
     /// every `ask`-mode decision point (fs / http / sockets).
     consent_prompter: Arc<dyn act_policy::consent::ConsentPrompter>,
     consent_cache: Arc<act_policy::consent::DecisionCache>,
+    /// The `act:credentials/store` implementation this run serves, or `None`
+    /// when no credential store is configured. Held behind an `Arc` because
+    /// the component actor reaches the same object to mark sessions live and
+    /// dead — see `spawn_component_actor`.
+    credentials: Option<Arc<credentials::CredentialHost>>,
+    /// The compiled `act:credentials` ceiling, consulted before any credential
+    /// is issued. Present even when `credentials` is `None`: the audit header
+    /// must report the class either way.
+    credentials_ceiling: Arc<dyn act_policy::provider::CompiledCeiling>,
     /// Caps the component's wasm linear memory growth (via `store.limiter`).
     /// Default `StoreLimits` is unlimited.
     limits: StoreLimits,
@@ -86,62 +96,6 @@ impl wasmtime_wasi_http::p3::WasiHttpView for HostState {
             table: &mut self.table,
             hooks: &mut self.http_hooks,
         }
-    }
-}
-
-// ── act:credentials — TEMPORARY stub ───────────────────────────────────────
-//
-// TEMPORARY: replaced wholesale in Task 7. Present only so the tree builds
-// between tasks; no test depends on this behaviour.
-//
-// `act:credentials/store@0.1.0` is the first *import* in `act-world` — the
-// host implements it, components call it. The generated trait is
-// `store::HostWithStore<T>`, implemented for the `HasData` type rather than
-// for `HostState` itself, because both WIT functions are `async func` and so
-// bindgen lowers them through `func_wrap_concurrent` with an `Accessor`.
-//
-// `Host` is implemented for `&mut HostState` on *both* interfaces:
-// `skip_mut_forwarding_impls` suppresses bindgen's blanket `&mut T`
-// forwarding impls (the generated file contains none at all), while both
-// `store::add_to_linker` and `types::add_to_linker` require
-// `for<'a> D::Data<'a>: Host` — which is `&'a mut HostState` under
-// `HasSelf<HostState>`.
-//
-// Task 7 must call `types::add_to_linker` alongside `store::add_to_linker`.
-// `store` uses types from `types`, so the elaborated world imports both
-// instances, and a guest importing `act:credentials/store` fails
-// instantiation on an unregistered `act:credentials/types@0.1.0` — the
-// interface carries no functions, but the instance must still exist in the
-// linker. The world-level `add_to_linker` registers both, in that order.
-//
-// Nothing links either into `create_linker` yet: wiring is Task 7's job,
-// where the store, the compartment lookup and the capability gate arrive
-// together.
-use bindings::act::credentials::store as credentials_stub;
-use bindings::act::credentials::types as credentials_types_stub;
-
-impl credentials_stub::Host for HostState {}
-impl credentials_stub::Host for &mut HostState {}
-impl credentials_types_stub::Host for &mut HostState {}
-
-impl credentials_stub::HostWithStore<HostState> for wasmtime::component::HasSelf<HostState> {
-    async fn list_secrets(
-        _accessor: &wasmtime::component::Accessor<HostState, Self>,
-        _session: Option<String>,
-    ) -> Result<Vec<credentials_stub::SecretInfo>, credentials_stub::SecretError> {
-        Err(credentials_stub::SecretError::Unavailable(
-            "not implemented".into(),
-        ))
-    }
-
-    async fn get_secret(
-        _accessor: &wasmtime::component::Accessor<HostState, Self>,
-        _session: String,
-        _want: credentials_stub::SecretRequest,
-    ) -> Result<credentials_stub::Secret, credentials_stub::SecretError> {
-        Err(credentials_stub::SecretError::Unavailable(
-            "not implemented".into(),
-        ))
     }
 }
 
@@ -371,6 +325,10 @@ pub fn create_linker(engine: &Engine) -> Result<Linker<HostState>> {
         .map_err(|e| anyhow::anyhow!("failed to add WASI HTTP P2 to linker: {e}"))?;
     wasmtime_wasi_http::p3::add_to_linker(&mut linker)
         .map_err(|e| anyhow::anyhow!("failed to add WASI HTTP P3 to linker: {e}"))?;
+    // `act:credentials` — the one interface in `act-world` the host provides
+    // and the component imports. Both its instances are registered; see
+    // `credentials::add_to_linker` for why `types` is not optional.
+    credentials::add_to_linker(&mut linker)?;
     Ok(linker)
 }
 
@@ -512,6 +470,7 @@ pub async fn create_store(
     max_memory: Option<usize>,
     prompter: Arc<dyn act_policy::consent::ConsentPrompter>,
     cache: Arc<act_policy::consent::DecisionCache>,
+    credentials: Option<Arc<credentials::CredentialHost>>,
 ) -> Result<(
     Store<HostState>,
     Vec<(String, Arc<dyn act_policy::provider::CompiledCeiling>)>,
@@ -573,10 +532,32 @@ pub async fn create_store(
     );
     let sockets_effective_mode = sockets_ceiling.effective_mode();
 
+    // `act:credentials` is a semantic class with no resource constraints, so
+    // `declared_constraints` hands the provider a synthesized sentinel rather
+    // than a rule list — see its doc comment. It is resolved even when this
+    // run has no credential store: the ceiling is what the audit header
+    // reports, and a component that declared the class but got nothing must
+    // still show up as `declared but not granted`.
+    let credentials_grant =
+        grant_policy.resolve(act_policy::providers::credentials::CAP_CREDENTIALS);
+    let credentials_ceiling: Arc<dyn CompiledCeiling> = Arc::from(
+        registry
+            .lookup(act_policy::providers::credentials::CAP_CREDENTIALS)
+            .resolve(
+                act_policy::providers::credentials::CAP_CREDENTIALS,
+                &get_declared(act_policy::providers::credentials::CAP_CREDENTIALS),
+                &credentials_grant,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("credentials policy: {e}"))?,
+    );
+
     // Captured for the instantiation audit header (Task 10), before any of
-    // the three get moved into `HostState` / the hooks / the sockets
-    // closure below — an `Arc` clone here is cheap and keeps this function's
-    // enforcement wiring below untouched.
+    // them get moved into `HostState` / the hooks / the sockets closure
+    // below — an `Arc` clone here is cheap and keeps this function's
+    // enforcement wiring below untouched. Every class the host resolves
+    // belongs here: the header is assembled from this vec alone, so a class
+    // left out of it is one no operator ever sees a mode for.
     let ceilings: Vec<(String, Arc<dyn CompiledCeiling>)> = vec![
         (
             act_types::constants::CAP_FILESYSTEM.to_string(),
@@ -589,6 +570,10 @@ pub async fn create_store(
         (
             act_types::constants::CAP_SOCKETS.to_string(),
             sockets_ceiling.clone(),
+        ),
+        (
+            act_policy::providers::credentials::CAP_CREDENTIALS.to_string(),
+            credentials_ceiling.clone(),
         ),
     ];
 
@@ -725,6 +710,8 @@ pub async fn create_store(
         },
         consent_prompter: prompter,
         consent_cache: cache,
+        credentials,
+        credentials_ceiling,
         limits: match max_memory {
             Some(bytes) => StoreLimitsBuilder::new().memory_size(bytes).build(),
             None => StoreLimits::default(),
@@ -874,6 +861,7 @@ pub async fn instantiate_component(
     max_memory: Option<usize>,
     prompter: Arc<dyn act_policy::consent::ConsentPrompter>,
     cache: Arc<act_policy::consent::DecisionCache>,
+    credentials: Option<Arc<credentials::CredentialHost>>,
     audit: &AuditContext,
 ) -> Result<(
     ToolProvider,
@@ -891,6 +879,7 @@ pub async fn instantiate_component(
         max_memory,
         prompter,
         cache,
+        credentials,
     )
     .await?;
 
@@ -964,6 +953,15 @@ pub fn spawn_component_actor(
     // per ACT-SESSIONS §2.5 ("host MUST call close-session for every
     // still-open session before deinit").
     let mut tracked_sessions: Vec<String> = Vec::new();
+
+    // The credential host, if this run has one. Taken from the store rather
+    // than passed in: it is already there, and reading it here keeps the two
+    // views of "which sessions are live" — this actor's `tracked_sessions`
+    // and the credential host's set — updated from the same three places.
+    // Every transport (MCP stdio, MCP over HTTP, `--session-args`) opens and
+    // closes sessions through these requests, so wiring it here covers all
+    // of them at once.
+    let credentials = store.data().credentials.clone();
 
     tokio::spawn(async move {
         while let Some(request) = rx.recv().await {
@@ -1141,6 +1139,9 @@ pub fn spawn_component_actor(
                             // Track open id so we can close on deinit.
                             if let Ok(s) = &inner {
                                 tracked_sessions.push(s.id.clone());
+                                if let Some(c) = &credentials {
+                                    c.note_session_opened(&s.id);
+                                }
                             }
                             inner
                         }
@@ -1162,8 +1163,16 @@ pub fn spawn_component_actor(
                                     sp.close_session.call_concurrent(&accessor, (id,)).await
                                 })
                                 .await;
-                            // Untrack regardless of error.
+                            // Untrack regardless of error. Credentials stop
+                            // being served for this id at the same moment
+                            // (spec §3.3: "after close-session the host stops
+                            // serving that id") — a close that the component
+                            // reported as failed still ends the session from
+                            // the host's side, so the two must agree.
                             tracked_sessions.retain(|sid| sid != &session_id);
+                            if let Some(c) = &credentials {
+                                c.note_session_closed(&session_id);
+                            }
                             match result {
                                 Ok(Ok(())) => Ok(()),
                                 Ok(Err(e)) => Err(ComponentError::Internal(anyhow::anyhow!(
@@ -1187,6 +1196,9 @@ pub fn spawn_component_actor(
         // sessions we still track, best-effort. ACT-SESSIONS §2.5.
         if let Some(sp) = &session_provider {
             for id in std::mem::take(&mut tracked_sessions) {
+                if let Some(c) = &credentials {
+                    c.note_session_closed(&id);
+                }
                 let sp = sp.clone();
                 let _ = store
                     .run_concurrent(async |accessor| {
@@ -1521,6 +1533,82 @@ mod tests {
                 serde_json::json!({ "host": "*.example.com" }),
             ],
             "physical classes must see their manifest constraints untouched"
+        );
+    }
+
+    // ── the credentials ceiling reaches the audit header ──────────────────
+
+    /// Resolve one component's ceilings the way `instantiate_component` does,
+    /// and hand back the vec the instantiation audit header is built from.
+    async fn ceilings_for(
+        info: &ComponentInfo,
+        policy: &act_policy::grant::GrantPolicy,
+    ) -> Vec<(String, Arc<dyn act_policy::provider::CompiledCeiling>)> {
+        let engine = create_engine().expect("engine");
+        let (_store, ceilings) = create_store(
+            &engine,
+            &[],
+            policy,
+            info,
+            None,
+            Arc::new(act_policy::consent::DenyPrompter),
+            Arc::new(act_policy::consent::DecisionCache::new()),
+            None,
+        )
+        .await
+        .expect("create_store");
+        ceilings
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_credentials_class_is_among_the_ceilings_the_audit_header_renders() {
+        // `instantiate_component` emits one `act.ceiling_class` event per
+        // entry of this vec and nothing else, so a class missing from it is a
+        // class no operator ever sees — the component's declared credential
+        // access would leave no trace in the trail at all.
+        let info = info_from_act_toml(
+            r#"
+            [std]
+            name = "notion"
+
+            [std.capabilities."act:credentials"]
+            "#,
+        );
+        let ceilings = ceilings_for(&info, &grants(&[(CAP_CREDENTIALS, PolicyMode::Ask)])).await;
+
+        let (_, ceiling) = ceilings
+            .iter()
+            .find(|(id, _)| id == CAP_CREDENTIALS)
+            .expect("act:credentials must be one of the resolved ceilings");
+        assert!(
+            ceiling.declared(),
+            "the manifest declared it, so the header must not report otherwise"
+        );
+        assert_eq!(ceiling.effective_mode(), PolicyMode::Ask);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_undeclared_credentials_class_is_still_reported_and_resolves_to_deny() {
+        // Reported, not omitted: the header's job is to state the mode of
+        // every class, and "deny" is the answer an operator needs when a
+        // component silently fails to read a credential it never declared.
+        let info = info_from_act_toml(
+            r#"
+            [std]
+            name = "crypto"
+            "#,
+        );
+        let ceilings = ceilings_for(&info, &grants(&[(CAP_CREDENTIALS, PolicyMode::Open)])).await;
+
+        let (_, ceiling) = ceilings
+            .iter()
+            .find(|(id, _)| id == CAP_CREDENTIALS)
+            .expect("act:credentials must be reported even when undeclared");
+        assert!(!ceiling.declared());
+        assert_eq!(
+            ceiling.effective_mode(),
+            PolicyMode::Deny,
+            "an open grant must not widen a class the component never declared"
         );
     }
 

@@ -43,6 +43,10 @@ pub mod attr {
     pub const POLICY_RULE: &str = "act.policy.rule";
     /// Whether the component declared this capability class in `act.toml`.
     pub const CAPABILITY_DECLARED: &str = "act.capability.declared";
+    /// The shape of a credential that was handed to a component
+    /// (`std:opaque`, `std:oauth2`, …). Non-secret by construction: the kind
+    /// fixes which field *names* a `secret` carries, never their values.
+    pub const CREDENTIAL_KIND: &str = "act.credential.kind";
     /// Whether this run has any channel that can answer an interactive `ask`
     /// prompt at all (a real TTY, or an MCP client offering elicitation) —
     /// as opposed to headless / ACT-HTTP, where every `ask` decision
@@ -280,6 +284,35 @@ pub struct CeilingClassRecord {
     /// carried per-record so the layer never needs anything but this event's
     /// own typed fields to decide whether to warn.
     pub has_prompt_channel: bool,
+}
+
+/// One credential handed over to a component.
+///
+/// Deliberately **not** a `CapDecisionRecord`. That one records what policy
+/// decided; this one records that material actually crossed into the guest —
+/// design §9 requires an entry for "every `get-secret` that returns material:
+/// component, session, key, timestamp — never values", and the two answer
+/// different questions when read back.
+///
+/// `component_ref` and `session_id` are carried on the record itself rather
+/// than inherited from an enclosing span, because the leading deployment
+/// shape fetches its credentials from inside `open-session` (design §8.3) —
+/// and `open-session` runs under no audit span at all. A record that relied
+/// on span context would be anonymous in exactly the case that matters most.
+///
+/// There is no field that could hold a value, and none is added: the type is
+/// the enforcement. `list-secrets` has no record of its own on purpose —
+/// design §9 again, "it would bury the one event that matters".
+#[derive(Debug, Clone)]
+pub struct CredentialIssueRecord {
+    pub component_ref: String,
+    /// The session the credential was issued under. Never empty in practice:
+    /// `get-secret` requires a session (design §3.3).
+    pub session_id: String,
+    /// The store lookup key, as the guest asked for it — untrusted input, so
+    /// every renderer escapes it.
+    pub key: String,
+    pub kind: String,
 }
 
 /// Lowercase hex SHA-256, no `sha256:` prefix.

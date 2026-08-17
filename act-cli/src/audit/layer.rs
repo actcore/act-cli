@@ -18,10 +18,12 @@ use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
 
 use crate::audit::TARGET_AUDIT;
-use crate::audit::record::{Actor, CapDecisionRecord, CeilingClassRecord, Decision4, attr};
+use crate::audit::record::{
+    Actor, CapDecisionRecord, CeilingClassRecord, CredentialIssueRecord, Decision4, attr,
+};
 use crate::audit::render::{
-    Rollup, SpanFields, render_declared_ask_blocked_warning, render_declared_ungranted_warning,
-    render_exception, render_header, render_rollup,
+    Rollup, SpanFields, render_credential_issue, render_declared_ask_blocked_warning,
+    render_declared_ungranted_warning, render_exception, render_header, render_rollup,
 };
 
 /// Name of the tool-call envelope span, set by `emit::tool_call_span`.
@@ -167,6 +169,14 @@ struct EventVisitor {
     rule: String,
     declared: bool,
     has_prompt_channel: bool,
+    /// Present on a credential-issue event and on nothing else — see
+    /// `on_event`, which branches on it before anything else.
+    credential_kind: String,
+    /// Carried on the credential-issue event itself rather than read off an
+    /// enclosing span: `get-secret` is legal from inside `open-session`,
+    /// which runs under no audit span at all.
+    component_ref: String,
+    session_id: String,
 }
 
 impl Visit for EventVisitor {
@@ -177,6 +187,9 @@ impl Visit for EventVisitor {
             n if n == attr::RESOURCE_ACTION => self.action = v.to_string(),
             n if n == attr::DECISION => self.decision = v.to_string(),
             n if n == attr::POLICY_MODE => self.mode = v.to_string(),
+            n if n == attr::CREDENTIAL_KIND => self.credential_kind = v.to_string(),
+            n if n == attr::COMPONENT_REF => self.component_ref = v.to_string(),
+            n if n == attr::SESSION_ID => self.session_id = v.to_string(),
             n if n == attr::POLICY_ACTOR => self.actor = v.to_string(),
             n if n == attr::POLICY_REASON => self.reason = v.to_string(),
             n if n == attr::POLICY_RULE => self.rule = v.to_string(),
@@ -304,6 +317,26 @@ where
         let mut v = EventVisitor::default();
         event.record(&mut v);
 
+        // A credential-issue record (from `emit_credential_issue`) carries
+        // neither a capability id nor a decision, so both branches below
+        // would drop it. It is checked first, on the one field no other
+        // audit event emits, and printed unconditionally — under
+        // `Detail::Rollup` too. There is no rollup that could carry it: the
+        // call is often made from inside `open-session`, where there is no
+        // enclosing span to fold into, and a per-run count of "credentials
+        // issued" would not answer the only question an operator has here,
+        // which is *which* ones.
+        if !v.credential_kind.is_empty() {
+            let record = CredentialIssueRecord {
+                component_ref: v.component_ref,
+                session_id: v.session_id,
+                key: v.key,
+                kind: v.credential_kind,
+            };
+            self.emit(|| render_credential_issue(&record));
+            return;
+        }
+
         // A ceiling-class record (from `emit_ceiling_class`, inside an
         // instantiation span) carries a capability id but no `act.decision`
         // — a capability decision always carries both. That's the only
@@ -428,7 +461,8 @@ mod tests {
 
     use super::*;
     use crate::audit::emit::{
-        emit_cap_decision, emit_ceiling_class, finish_tool_call, instantiation_span, tool_call_span,
+        emit_cap_decision, emit_ceiling_class, emit_credential_issue, finish_tool_call,
+        instantiation_span, tool_call_span,
     };
     use crate::audit::record::*;
 
@@ -489,6 +523,89 @@ mod tests {
         let sub = tracing_subscriber::registry().with(AuditLayer::new(w, Detail::Rollup));
         tracing::subscriber::with_default(sub, f);
         sink.0.lock().unwrap().clone()
+    }
+
+    fn issue() -> CredentialIssueRecord {
+        CredentialIssueRecord {
+            component_ref: "ghcr.io/actpkg/notion@0.1.0".into(),
+            session_id: "sess-7".into(),
+            key: "notion-work".into(),
+            kind: "std:opaque".into(),
+        }
+    }
+
+    #[test]
+    fn a_credential_issue_reaches_output_with_no_enclosing_span_at_all() {
+        // The case that matters most and the one a span-derived record would
+        // lose: the leading deployment shape fetches its credentials from
+        // inside `open-session` (design §8.3), which runs under no audit
+        // span. All four facts must come off the event itself.
+        let out = run(|| emit_credential_issue(&issue()));
+        assert_eq!(out.len(), 1, "expected one line, got {out:?}");
+        assert!(out[0].contains("notion-work"), "key missing: {}", out[0]);
+        assert!(out[0].contains("std:opaque"), "kind missing: {}", out[0]);
+        assert!(
+            out[0].contains("ghcr.io/actpkg/notion@0.1.0"),
+            "component missing: {}",
+            out[0]
+        );
+        assert!(out[0].contains("sess-7"), "session missing: {}", out[0]);
+    }
+
+    #[test]
+    fn a_credential_issue_prints_immediately_instead_of_folding_into_the_rollup() {
+        // Under Detail::Rollup an allow is folded into a count at span close.
+        // A credential issue must not be: "3 credentials issued" does not
+        // answer the only question an operator has, which is *which* ones.
+        let out = run(|| {
+            let span = tool_call_span(&start());
+            let _g = span.enter();
+            emit_credential_issue(&issue());
+            finish_tool_call(&span, Outcome::Ok, Duration::from_millis(1));
+        });
+        assert_eq!(out.len(), 2, "issue line plus rollup line, got {out:?}");
+        assert!(
+            out[0].contains("notion-work"),
+            "the issue must print before the rollup, got {out:?}"
+        );
+        assert!(
+            !out[1].contains("notion-work"),
+            "and must not also be counted in it, got {}",
+            out[1]
+        );
+    }
+
+    #[test]
+    fn a_credential_issue_is_not_mistaken_for_a_ceiling_class_or_a_decision() {
+        // Both other branches key off `act.capability.id`, which this event
+        // does not carry; if the issue branch were removed or ordered after
+        // them the event would be silently dropped instead. Emitting all
+        // three in one run pins that each still lands in its own shape.
+        let out = run(|| {
+            let span = instantiation_span("comp", "deadbeef");
+            let _g = span.enter();
+            emit_ceiling_class(&CeilingClassRecord {
+                cap_id: "act:credentials".into(),
+                mode: "ask".into(),
+                declared: true,
+                has_prompt_channel: true,
+            });
+            emit_credential_issue(&issue());
+            emit_cap_decision(&deny());
+        });
+        let joined = out.join("\n");
+        assert!(
+            joined.contains("notion-work"),
+            "the issue line survived: {joined}"
+        );
+        assert!(
+            joined.contains("act:credentials=ask"),
+            "the header still reports the class: {joined}"
+        );
+        assert!(
+            joined.contains("evil.example.com:443"),
+            "the denial still rendered: {joined}"
+        );
     }
 
     #[test]
