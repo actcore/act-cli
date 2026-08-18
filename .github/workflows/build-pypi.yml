@@ -27,7 +27,7 @@ jobs:
           - { name: windows-arm64, os: windows-latest, target: aarch64-pc-windows-msvc, manylinux: "", zig: false }
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
       - uses: moonrepo/setup-rust@v1
