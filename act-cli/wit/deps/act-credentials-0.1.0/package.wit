@@ -124,8 +124,11 @@ interface store {
 
   /// Request one credential.
   ///
-  /// `session` names the session the request is made under; the host uses
-  /// it to pick the compartment and to bound the credential's lifetime.
+  /// `session` names the session the request is made under. It does NOT
+  /// select which credentials are visible: the compartment is the calling
+  /// component's profile, and that is the boundary the design rests on. The
+  /// session bounds the credential's lifetime and anchors the audit record,
+  /// and the host rejects an id it did not issue with `invalid-session`.
   /// The host MAY prompt, MAY refuse, and MUST record the request in the
   /// audit trail. Returned material is never logged.
   get-secret: async func(session: string, want: secret-request) -> result<secret, secret-error>;
