@@ -50,12 +50,23 @@ fn f(key: &str, label: &str, secret: bool, required: bool) -> FieldDef {
     }
 }
 
+/// A field whose value is a map, not a scalar — currently only `std:oauth2`.
+fn oauth(key: &str, label: &str) -> FieldDef {
+    FieldDef {
+        key: key.into(),
+        label: label.into(),
+        field_type: "std:oauth2".into(),
+        secret: true,
+        required: true,
+    }
+}
+
 impl KindRegistry {
     pub fn builtin() -> Self {
         let defs = vec![
             KindDef {
-                id: "std:opaque".into(),
-                description: Some("A single opaque value — bearer token or API key".into()),
+                id: "std:string".into(),
+                description: Some("A single string — bearer token, API key or password".into()),
                 fields: vec![f("std:value", "Value", true, true)],
             },
             KindDef {
@@ -70,12 +81,12 @@ impl KindRegistry {
             },
             KindDef {
                 id: "std:oauth2".into(),
-                description: Some("OAuth 2 access token".into()),
-                fields: vec![
-                    f("std:access-token", "Access token", true, true),
-                    f("std:expires-at", "Expires at", false, false),
-                    f("std:scopes", "Scopes", false, false),
-                ],
+                description: Some("OAuth 2 credential, acquired by the browser flow".into()),
+                // ONE field. Its value is an object holding std:access-token,
+                // std:expires-at and std:scopes — the shape act_sdk::credentials
+                // reads. Three flat fields is the pre-migration shape and is
+                // exactly what this replaces.
+                fields: vec![oauth("std:token", "OAuth token")],
             },
         ];
         Self {
@@ -131,25 +142,46 @@ mod tests {
             "both halves are a unit"
         );
 
-        let opaque = r.get("std:opaque").unwrap();
-        assert_eq!(opaque.fields.len(), 1);
-        assert_eq!(opaque.fields[0].key, "std:value");
+        let string = r.get("std:string").unwrap();
+        assert_eq!(string.fields.len(), 1);
+        assert_eq!(string.fields[0].key, "std:value");
 
         let oauth = r.get("std:oauth2").unwrap();
-        assert!(
-            oauth
-                .fields
-                .iter()
-                .any(|f| f.key == "std:access-token" && f.required)
-        );
-        assert!(
-            oauth
-                .fields
-                .iter()
-                .any(|f| f.key == "std:scopes" && !f.required)
-        );
+        assert_eq!(oauth.fields.len(), 1, "one field, whose value is the map");
+        assert_eq!(oauth.fields[0].key, "std:token");
+        assert_eq!(oauth.fields[0].field_type, "std:oauth2");
 
         assert!(r.get("std:nonesuch").is_none());
+    }
+
+    #[test]
+    fn the_oauth2_shape_is_one_field_not_three() {
+        // This is the divergence the plan exists to close: the SDK reads an
+        // OAuth credential as ONE field holding a map. Three flat fields would
+        // be unreadable by it.
+        let r = KindRegistry::builtin();
+        let o = r.get("std:oauth2").expect("builtin");
+        assert_eq!(o.fields.len(), 1, "one field, whose value is the map");
+        assert_eq!(o.fields[0].key, "std:token");
+        assert_eq!(o.fields[0].field_type, "std:oauth2");
+    }
+
+    #[test]
+    fn the_single_value_shape_is_named_for_its_encoding() {
+        let r = KindRegistry::builtin();
+        assert!(r.get("std:opaque").is_none(), "renamed to std:string");
+        let s = r.get("std:string").expect("builtin");
+        assert_eq!(s.fields.len(), 1);
+        assert_eq!(s.fields[0].field_type, "std:string");
+    }
+
+    #[test]
+    fn basic_is_two_string_fields() {
+        let r = KindRegistry::builtin();
+        let b = r.get("std:basic").expect("builtin");
+        assert_eq!(b.fields.len(), 2);
+        assert!(b.fields.iter().all(|f| f.field_type == "std:string"));
+        assert!(b.fields.iter().all(|f| f.secret), "both halves are secret");
     }
 
     #[test]
