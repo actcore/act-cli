@@ -6,13 +6,17 @@
 //! guest, and nothing an agent can read ever carries it.
 //!
 //! One tool, `whoami`, fetches the credential stored under the key `probe`
-//! and reports three facts about it — its `kind`, whether the field map
-//! arrived non-empty, and the **byte length** of `std:value`. Nothing else.
-//! The length is a deliberate, minimal oracle: without it the test could
-//! not distinguish "the host handed over the real material" from "the host
-//! handed over an empty shell with the right kind on it", which is exactly
-//! the failure a test asserting only `kind` would sail past. It is the
-//! least the test can observe and still be a test.
+//! and reports facts about it — its `kind`, whether the field map arrived
+//! non-empty, the **byte length** of `std:value` (when present), and the
+//! **CBOR major type** the first field decoded to (`shape`, `"text"` /
+//! `"map"` / `"other"`). Nothing else — never the value itself, of either
+//! field. The length is a deliberate, minimal oracle: without it the test
+//! could not distinguish "the host handed over the real material" from "the
+//! host handed over an empty shell with the right kind on it", which is
+//! exactly the failure a test asserting only `kind` would sail past. `shape`
+//! is the same idea for the field's *encoding*: it proves an object field
+//! crossed as a CBOR map rather than as text carrying a JSON-looking string.
+//! Both are the least the test can observe and still be a test.
 //!
 //! `session-provider` is exported because `get-secret` requires a live
 //! session, and the credential is fetched **on the tool call, never inside
@@ -73,6 +77,17 @@ fn to_cbor(value: &serde_json::Value) -> Vec<u8> {
     let mut buf = Vec::new();
     ciborium::into_writer(value, &mut buf).unwrap_or_default();
     buf
+}
+
+/// The CBOR major type a field decoded to — never the value it carried.
+/// `std:string` fields cross as text, `std:oauth2` as a map; anything else
+/// the host would have refused before it ever reached here.
+fn cbor_shape(decoded: &serde_json::Value) -> &'static str {
+    match decoded {
+        serde_json::Value::String(_) => "text",
+        serde_json::Value::Object(_) => "map",
+        _ => "other",
+    }
 }
 
 fn extract_session_id(metadata: &[(String, Vec<u8>)]) -> Option<String> {
@@ -143,8 +158,9 @@ impl tool_exports::Guest for CredentialsCanary {
         let whoami = tool_types::ToolDefinition {
             name: "whoami".to_string(),
             description: core_types::LocalizedString::Plain(
-                "Fetch this component's credential and report its shape — kind, whether \
-                 fields arrived, and the length of std:value. Never the value."
+                "Fetch this component's credential and report facts about it — kind, \
+                 whether fields arrived, the length of std:value, and the CBOR shape \
+                 of the first field. Never the value."
                     .to_string(),
             ),
             parameters_schema: r#"{"type":"object","properties":{},"additionalProperties":false}"#
@@ -219,9 +235,11 @@ async fn whoami(session_id: &str) -> tool_types::ToolEvent {
             let mut field_names: Vec<&str> =
                 secret.fields.iter().map(|(name, _)| name.as_str()).collect();
             field_names.sort_unstable();
-            // Values cross as dCBOR text strings, the same encoding tool
-            // arguments and metadata use. Decoded only to measure — the
-            // decoded string is dropped without ever reaching an event.
+            // Values cross as dCBOR — text for a `std:string` field, a map
+            // for a `std:oauth2` one — the same encoding tool arguments and
+            // metadata use. Decoded only to measure or classify — the
+            // decoded value itself is dropped without ever reaching an
+            // event.
             let value_len = secret
                 .fields
                 .iter()
@@ -230,11 +248,22 @@ async fn whoami(session_id: &str) -> tool_types::ToolEvent {
                     serde_json::Value::String(s) => Some(s.len()),
                     _ => None,
                 });
+            // Whichever field this kind carries — `std:value` for a string
+            // kind, `std:token` for `std:oauth2` — report the CBOR major
+            // type it decoded to. Fields arrive already sorted by name, and
+            // every kind this canary is asked about has exactly one
+            // revealable field, so "the first one" is unambiguous.
+            let shape = secret
+                .fields
+                .first()
+                .map(|(_, raw)| cbor_shape(&from_cbor(raw)))
+                .unwrap_or("other");
             content_event(&serde_json::json!({
                 "kind": secret.kind,
                 "has_fields": !secret.fields.is_empty(),
                 "field_names": field_names,
                 "value_len": value_len,
+                "shape": shape,
             }))
         }
         Err(e) => credential_error(&e),

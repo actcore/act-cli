@@ -469,6 +469,68 @@ async fn a_declaring_component_with_no_grant_is_refused_by_default() {
     );
 }
 
+/// A `std:oauth2` field is an object, not a scalar (design §3.2), and the
+/// host must encode it by its declared type: a CBOR map, not text carrying a
+/// JSON-looking string. `whoami` decodes only the CBOR major type it saw —
+/// never the value — into a `shape` member, which is the oracle this test
+/// reads.
+///
+/// Reuses `PROBE_KEY`, unlike the tests above that name it via `std:string`:
+/// the canary's `whoami` always asks for the fixed key `probe`, so this is
+/// the same credential slot provisioned under a different kind.
+#[tokio::test]
+async fn an_oauth2_field_reaches_the_guest_as_a_map() {
+    let sandbox = Sandbox::new();
+    let backend = sandbox.backend();
+    let canary = fixture("credentials-canary.wasm");
+
+    provision(
+        &backend,
+        &canary,
+        PROBE_KEY,
+        "std:oauth2",
+        r#"{"std:token": {"std:access-token": "at", "std:scopes": ["repo"]}}"#,
+    );
+
+    let out = call_over_mcp(
+        &sandbox,
+        &canary,
+        &[
+            "--credentials-backend",
+            &backend,
+            "--allow",
+            "act:credentials",
+        ],
+        "whoami",
+    )
+    .await;
+
+    let payload = out.payload();
+    assert_eq!(
+        payload.get("kind").and_then(|v| v.as_str()),
+        Some("std:oauth2"),
+        "the component saw the kind: {}",
+        out.transport
+    );
+    assert_eq!(
+        payload.get("shape").and_then(|v| v.as_str()),
+        Some("map"),
+        "the guest must see a CBOR map, not text: {}",
+        out.transport
+    );
+
+    assert!(
+        !out.transport.contains("\"at\""),
+        "the token must not reach the transport: {}",
+        out.transport
+    );
+    assert!(
+        !out.stderr.contains("\"at\""),
+        "nor the logs: {}",
+        out.stderr
+    );
+}
+
 /// `list-secrets`: the component discovers what its profile holds without
 /// acquiring anything.
 ///

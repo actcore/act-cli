@@ -110,12 +110,16 @@ only one that can drive the host's credential path end to end. It also exports
 export is not optional, because `get-secret` requires a live session.
 
 Its `whoami` tool fetches the credential under the key `probe` and returns
-its `kind`, whether the field map arrived non-empty, the field *names*, and
-the byte **length** of `std:value` — never the value. The length is the
-minimal oracle that lets `tests/credentials_e2e.rs` tell "the host handed over
-the real material" from "the host handed over an empty shell with the right
-kind on it". `list_keys` returns `list-secrets` metadata, which by
-construction cannot carry a value.
+its `kind`, whether the field map arrived non-empty, the field *names*, the
+byte **length** of `std:value` (when present), and the **CBOR major type**
+its first field decoded to (`shape`: `"text"` / `"map"` / `"other"`) — never
+the value, of either field. The length is the minimal oracle that lets
+`tests/credentials_e2e.rs` tell "the host handed over the real material" from
+"the host handed over an empty shell with the right kind on it"; `shape` is
+the same idea for a field's *encoding*, telling a CBOR map (`std:oauth2`)
+apart from CBOR text (`std:string`) without ever decoding what it holds.
+`list_keys` returns `list-secrets` metadata, which by construction cannot
+carry a value.
 
 The credential is fetched **on the tool call, never inside `open-session`**:
 the host marks a session live only once `open-session` returns, and the id is

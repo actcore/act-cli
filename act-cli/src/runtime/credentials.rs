@@ -375,22 +375,29 @@ fn sanitize_hint(hint: &str) -> String {
 }
 
 /// Encode a stored field for the guest. WIT types the value as `cbor`
-/// (`list<u8>`), so every value crosses as a dCBOR text string — the same
-/// encoding tool arguments and metadata already use.
+/// (`list<u8>`), so it is the field's *encoding* that must match its
+/// declared type (design §3.2), not one fixed shape for every field.
 ///
-/// Every builtin kind is still string-shaped at this point in the migration;
-/// per-type encoding (an object field crossing as a CBOR map) is later work.
-/// A field that is not a string is exactly the case `STORE_UNREADABLE`
-/// documents — an externally-materialised store file (spec §5.6) can hold a
-/// bare JSON number — so it is reported the same way, not a panic.
+/// `ciborium::into_writer` over the stored `serde_json::Value` does exactly
+/// that with no per-kind branching: `serde_json::Value`'s own `Serialize`
+/// impl calls `serialize_str` for a `std:string` field and `serialize_map`
+/// for a `std:oauth2` one, so ciborium emits CBOR text or a CBOR map to
+/// match — the two encodings §3.2's table names, and nothing else.
+///
+/// A field that is neither a string nor an object is refused rather than
+/// encoded: it is not a shape the design promises the guest, and it is
+/// exactly the case `STORE_UNREADABLE` documents — an externally-materialised
+/// store file (spec §5.6) can hold a bare JSON number — so it is reported the
+/// same way, not turned into CBOR the guest has no reason to expect.
 fn to_wit_secret(secret: Secret) -> Result<store::Secret, HostError> {
     let mut fields = Vec::with_capacity(secret.fields.len());
     for (name, value) in secret.fields {
-        let Some(text) = value.expose_str() else {
-            tracing::warn!(field = %name, "credential field is not string-shaped");
+        let json = value.expose();
+        if !(json.is_string() || json.is_object()) {
+            tracing::warn!(field = %name, "credential field is neither string- nor object-shaped");
             return Err(HostError::Unavailable(STORE_UNREADABLE.into()));
-        };
-        fields.push((name, act_types::cbor::to_cbor(&text.to_string())));
+        }
+        fields.push((name, act_types::cbor::to_cbor(json)));
     }
     Ok(store::Secret {
         kind: secret.kind,
@@ -1040,6 +1047,66 @@ mod tests {
         assert_eq!(name, "std:value");
         let decoded: String = act_types::cbor::from_cbor(bytes).expect("dCBOR text string");
         assert_eq!(decoded, "tok");
+    }
+
+    #[test]
+    fn an_object_field_crosses_the_boundary_as_a_cbor_map() {
+        // The other half of the mapping the test above pins for a string:
+        // `std:oauth2`'s field value is itself a JSON object, so the guest
+        // must see a CBOR map for it, not text.
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::new(dir.path().to_path_buf());
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            "std:token".to_string(),
+            SecretValue::new(serde_json::json!({
+                "std:access-token": "at",
+                "std:scopes": ["repo"],
+            })),
+        );
+        store
+            .put(
+                "comp",
+                "gh",
+                &SecretRecord {
+                    kind: "std:oauth2".into(),
+                    fields,
+                    host_only: BTreeMap::new(),
+                    description: None,
+                    expires_at: None,
+                },
+            )
+            .unwrap();
+        let h = CredentialHost::new(Arc::new(store), "comp".to_string());
+        h.note_session_opened("s1");
+
+        let wit = to_wit_secret(h.get_secret("s1", "gh").unwrap()).unwrap();
+        assert_eq!(wit.kind, "std:oauth2");
+        assert_eq!(wit.fields.len(), 1);
+        let (name, bytes) = &wit.fields[0];
+        assert_eq!(name, "std:token");
+
+        let decoded = act_types::cbor::cbor_to_json(bytes).expect("dCBOR map");
+        assert!(decoded.is_object(), "expected a CBOR map, got {decoded:?}");
+        assert_eq!(decoded["std:access-token"], "at");
+    }
+
+    #[test]
+    fn a_field_that_is_neither_string_nor_object_is_refused_not_encoded() {
+        // A `std:string` field holding a bare number — the shape an external
+        // secret-materialiser writes without being asked (spec §5.6), and
+        // exactly the case `STORE_UNREADABLE` exists to name. The guard still
+        // refuses it; only the object case above is new.
+        let mut fields = BTreeMap::new();
+        fields.insert("std:value".to_string(), SecretValue::new(987654321));
+        let secret = Secret {
+            kind: "std:string".into(),
+            fields,
+        };
+        let Err(HostError::Unavailable(msg)) = to_wit_secret(secret) else {
+            panic!("a non-string, non-object field must be refused, not encoded");
+        };
+        assert_eq!(msg, STORE_UNREADABLE);
     }
 
     #[test]
