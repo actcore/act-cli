@@ -7,6 +7,12 @@ use serde::{Deserialize, Serialize};
 pub struct FieldDef {
     pub key: String,
     pub label: String,
+    /// How this field is encoded and acquired (design §3.2). `std:opaque` is a
+    /// CBOR string obtained by prompting; `std:oauth2` is a CBOR map obtained by
+    /// running the flow. Defaults to `std:opaque` so every existing definition
+    /// and every hand-written TOML keeps working unchanged.
+    #[serde(rename = "type", default = "opaque")]
+    pub field_type: String,
     #[serde(default = "yes")]
     pub secret: bool,
     #[serde(default = "yes")]
@@ -15,6 +21,10 @@ pub struct FieldDef {
 
 fn yes() -> bool {
     true
+}
+
+fn opaque() -> String {
+    "std:opaque".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -34,6 +44,7 @@ fn f(key: &str, label: &str, secret: bool, required: bool) -> FieldDef {
     FieldDef {
         key: key.into(),
         label: label.into(),
+        field_type: opaque(),
         secret,
         required,
     }
@@ -172,5 +183,39 @@ label = "Hijacked"
             2,
             "a std: kind cannot be redefined from user data"
         );
+    }
+
+    #[test]
+    fn a_field_defaults_to_the_opaque_type() {
+        let r = KindRegistry::builtin();
+        let basic = r.get("std:basic").expect("builtin");
+        for f in &basic.fields {
+            assert_eq!(
+                f.field_type, "std:opaque",
+                "{} should default to a prompted string",
+                f.key
+            );
+        }
+    }
+
+    #[test]
+    fn a_user_kind_may_name_a_field_type() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("acme.toml"),
+            r#"
+id = "acme:badge"
+[[fields]]
+key = "acme:tenant"
+label = "Tenant"
+type = "std:opaque"
+secret = false
+"#,
+        )
+        .unwrap();
+        let r = KindRegistry::load(dir.path()).unwrap();
+        let f = &r.get("acme:badge").expect("user kind").fields[0];
+        assert_eq!(f.field_type, "std:opaque");
+        assert!(!f.secret);
     }
 }

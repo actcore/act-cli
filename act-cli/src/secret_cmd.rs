@@ -96,7 +96,16 @@ fn cmd_set(
     from_command: Option<String>,
     opts: &GlobalOpts,
 ) -> Result<()> {
-    let registry = KindRegistry::builtin();
+    // Built-ins plus whatever the operator defined. A missing directory is not
+    // an error — it is the common case — and a malformed file is, because
+    // silently ignoring it would present the operator with an "unknown kind"
+    // for a kind they can see on disk.
+    let registry = match crate::config::kinds_dir() {
+        Some(dir) => KindRegistry::load(&dir).with_context(|| {
+            format!("reading credential kind definitions from {}", dir.display())
+        })?,
+        None => KindRegistry::builtin(),
+    };
     let def = validate_kind(&registry, &kind)?;
 
     // The store is opened, and its nature disclosed, *before* the credential

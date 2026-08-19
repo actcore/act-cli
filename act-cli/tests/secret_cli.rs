@@ -1,9 +1,14 @@
 //! `act secret set/list/rm` against a temp file-backed store.
 
+use std::path::PathBuf;
 use std::process::Command;
 
 fn act() -> Command {
     Command::new(env!("CARGO_BIN_EXE_act"))
+}
+
+fn act_binary_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_act"))
 }
 
 #[test]
@@ -390,5 +395,56 @@ fn rm_of_an_absent_key_says_so_instead_of_reporting_success() {
     assert!(
         !String::from_utf8_lossy(&out.stdout).contains("removed"),
         "must not claim a removal it did not make"
+    );
+}
+
+// `dirs::config_dir()` honours XDG_CONFIG_HOME on Linux only; on macOS it
+// returns ~/Library/Application Support and ignores it, so this test would
+// read the developer's real config there.
+#[cfg(target_os = "linux")]
+#[test]
+fn act_secret_set_accepts_an_operator_defined_kind() {
+    let home = tempfile::tempdir().unwrap();
+    let kinds = home.path().join("act/kinds");
+    std::fs::create_dir_all(&kinds).unwrap();
+    std::fs::write(
+        kinds.join("acme.toml"),
+        "id = \"acme:badge\"\n[[fields]]\nkey = \"acme:tenant\"\nlabel = \"Tenant\"\n",
+    )
+    .unwrap();
+
+    let store = tempfile::tempdir().unwrap();
+    let out = std::process::Command::new(act_binary_path())
+        .args([
+            "secret",
+            "set",
+            "example.com/c:1",
+            "--key",
+            "k",
+            "--kind",
+            "acme:badge",
+            "--fields-stdin",
+        ])
+        .env("XDG_CONFIG_HOME", home.path())
+        .arg("--credentials-backend")
+        .arg(format!("file:{}", store.path().join("s.json").display()))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            use std::io::Write;
+            c.stdin
+                .as_mut()
+                .unwrap()
+                .write_all(br#"{"acme:tenant":"t1"}"#)?;
+            c.wait_with_output()
+        })
+        .expect("run act secret set");
+
+    assert!(
+        out.status.success(),
+        "an operator-defined kind must be usable: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
