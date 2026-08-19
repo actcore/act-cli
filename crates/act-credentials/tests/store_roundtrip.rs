@@ -28,8 +28,8 @@ fn put_get_list_erase_roundtrip() {
     store.put(c, "notion", &rec()).unwrap();
 
     let got = store.get(c, "notion").unwrap().expect("stored");
-    assert_eq!(got.fields["std:value"].expose(), "tok");
-    assert_eq!(got.host_only["std:refresh-token"].expose(), "rt");
+    assert_eq!(got.fields["std:value"].expose_str(), Some("tok"));
+    assert_eq!(got.host_only["std:refresh-token"].expose_str(), Some("rt"));
 
     let listed = store.list(Some(c)).unwrap();
     assert_eq!(listed.len(), 1);

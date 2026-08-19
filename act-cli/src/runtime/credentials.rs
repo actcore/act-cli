@@ -377,15 +377,25 @@ fn sanitize_hint(hint: &str) -> String {
 /// Encode a stored field for the guest. WIT types the value as `cbor`
 /// (`list<u8>`), so every value crosses as a dCBOR text string — the same
 /// encoding tool arguments and metadata already use.
-fn to_wit_secret(secret: Secret) -> store::Secret {
-    store::Secret {
-        kind: secret.kind,
-        fields: secret
-            .fields
-            .into_iter()
-            .map(|(name, value)| (name, act_types::cbor::to_cbor(&value.expose().to_string())))
-            .collect(),
+///
+/// Every builtin kind is still string-shaped at this point in the migration;
+/// per-type encoding (an object field crossing as a CBOR map) is later work.
+/// A field that is not a string is exactly the case `STORE_UNREADABLE`
+/// documents — an externally-materialised store file (spec §5.6) can hold a
+/// bare JSON number — so it is reported the same way, not a panic.
+fn to_wit_secret(secret: Secret) -> Result<store::Secret, HostError> {
+    let mut fields = Vec::with_capacity(secret.fields.len());
+    for (name, value) in secret.fields {
+        let Some(text) = value.expose_str() else {
+            tracing::warn!(field = %name, "credential field is not string-shaped");
+            return Err(HostError::Unavailable(STORE_UNREADABLE.into()));
+        };
+        fields.push((name, act_types::cbor::to_cbor(&text.to_string())));
     }
+    Ok(store::Secret {
+        kind: secret.kind,
+        fields,
+    })
 }
 
 fn to_wit_info(info: SecretInfo) -> store::SecretInfo {
@@ -446,9 +456,10 @@ async fn serve_get(
     };
     // `want.kind` is a provisioning hint, not a retrieval filter (spec
     // §3.4): the component inspects `secret.kind` and decides for itself.
-    host.get_secret(session, &want.key)
-        .map(to_wit_secret)
-        .map_err(|e| e.to_wit())
+    let secret = host
+        .get_secret(session, &want.key)
+        .map_err(|e| e.to_wit())?;
+    to_wit_secret(secret).map_err(|e| e.to_wit())
 }
 
 impl store::HostWithStore<HostState> for HasSelf<HostState> {
@@ -950,7 +961,7 @@ mod tests {
 
         h.note_session_opened("s1");
         let got = h.get_secret("s1", "notion").expect("own key still found");
-        assert_eq!(got.fields["std:value"].expose(), "tok");
+        assert_eq!(got.fields["std:value"].expose_str(), Some("tok"));
         assert_eq!(h.list_secrets(Some("s1")).unwrap().len(), 1);
     }
 
@@ -1021,7 +1032,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let h = host(dir.path());
         h.note_session_opened("s1");
-        let wit = to_wit_secret(h.get_secret("s1", "notion").unwrap());
+        let wit = to_wit_secret(h.get_secret("s1", "notion").unwrap()).unwrap();
 
         assert_eq!(wit.kind, "std:opaque");
         assert_eq!(wit.fields.len(), 1);
