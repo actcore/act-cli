@@ -803,6 +803,73 @@ mod tests {
         }
     }
 
+    /// The contract `act_sdk::credentials::Secret::as_oauth2` reads, pinned on
+    /// the host side.
+    ///
+    /// This is the property the whole field-type migration exists to establish —
+    /// that what `act secret set` writes is what the SDK reads — and it is the
+    /// one no single task tested, because the two ends live in different repos.
+    /// A literal round trip is not available yet: act-sdk is a sibling checkout
+    /// and the published 0.14.0 predates its credentials module, so a path
+    /// dev-dependency would break a lone clone of this repo. So both ends are
+    /// pinned against the written registry instead — `ACT-CONSTANTS.md` §8.3 —
+    /// and this is the host half.
+    ///
+    /// The encodings are load-bearing in a way that fails **silently**: the SDK
+    /// treats a member of the wrong CBOR type as absent, so a float expiry reads
+    /// as "never expires" and a non-array scopes list as "grants nothing",
+    /// neither of which raises anything anywhere.
+    #[test]
+    fn an_oauth2_field_encodes_to_the_map_the_sdk_reads() {
+        use ciborium::Value;
+
+        let secret = Secret {
+            kind: "std:oauth2".into(),
+            fields: BTreeMap::from([(
+                "std:token".to_string(),
+                SecretValue::new(serde_json::json!({
+                    "std:access-token": "at",
+                    "std:expires-at": 1_760_000_000u64,
+                    "std:scopes": ["repo", "read:org"],
+                })),
+            )]),
+        };
+
+        let wit = to_wit_secret(secret).expect("an object field is encodable");
+        let (name, bytes) = &wit.fields[0];
+        assert_eq!(name, "std:token");
+
+        let decoded: Value = ciborium::from_reader(bytes.as_slice()).expect("valid CBOR");
+        let Value::Map(members) = decoded else {
+            panic!("ACT-CONSTANTS 8.1: a std:oauth2 value is a CBOR map, got {decoded:?}");
+        };
+        let member = |want: &str| {
+            members
+                .iter()
+                .find(|(k, _)| matches!(k, Value::Text(s) if s == want))
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| panic!("8.3 registers {want}"))
+        };
+
+        assert!(
+            matches!(member("std:access-token"), Value::Text(s) if s == "at"),
+            "8.3: std:access-token is CBOR text"
+        );
+        assert!(
+            matches!(member("std:expires-at"), Value::Integer(i) if u64::try_from(i) == Ok(1_760_000_000)),
+            "8.3: std:expires-at is a CBOR unsigned integer — a float here reads as 'never expires'"
+        );
+        let Value::Array(scopes) = member("std:scopes") else {
+            panic!("8.3: std:scopes is a CBOR array — anything else reads as 'grants nothing'");
+        };
+        assert!(
+            scopes
+                .iter()
+                .all(|s| matches!(s, Value::Text(t) if t == "repo" || t == "read:org")),
+            "8.3: std:scopes members are CBOR text"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn a_store_decode_error_does_not_carry_stored_material_to_the_guest() {
         // The phase's central claim, on the one path that used to break it:
