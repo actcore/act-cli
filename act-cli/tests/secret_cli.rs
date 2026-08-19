@@ -24,7 +24,7 @@ fn set_then_list_shows_metadata_and_never_a_value() {
             "--key",
             "default",
             "--kind",
-            "std:opaque",
+            "std:string",
             "--description",
             "Notion workspace",
             "--credentials-backend",
@@ -84,7 +84,7 @@ fn rm_removes_the_entry() {
             "--key",
             "k",
             "--kind",
-            "std:opaque",
+            "std:string",
             "--credentials-backend",
             &backend,
             "--fields-stdin",
@@ -147,7 +147,7 @@ fn an_unknown_kind_is_rejected_with_the_known_ones_listed() {
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err.contains("std:opaque"),
+        err.contains("std:string"),
         "names the kinds that do exist: {err}"
     );
 }
@@ -188,7 +188,7 @@ fn local_refs_agree_on_one_profile_regardless_of_spelling() {
                 "--key",
                 &key,
                 "--kind",
-                "std:opaque",
+                "std:string",
                 "--credentials-backend",
                 &backend,
                 "--fields-stdin",
@@ -324,7 +324,7 @@ fn the_plaintext_notice_shows_on_the_first_set_and_falls_silent_on_the_second() 
                 "--key",
                 key,
                 "--kind",
-                "std:opaque",
+                "std:string",
                 "--credentials-backend",
                 &backend,
                 "--fields-stdin",

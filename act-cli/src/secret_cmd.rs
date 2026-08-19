@@ -30,7 +30,7 @@ pub enum SecretCmd {
         component: ComponentRef,
         #[arg(long, default_value = "default")]
         key: String,
-        #[arg(long, default_value = "std:opaque")]
+        #[arg(long, default_value = "std:string")]
         kind: String,
         #[arg(long)]
         description: Option<String>,
@@ -337,6 +337,12 @@ fn validate_kind<'a>(reg: &'a KindRegistry, kind: &str) -> Result<&'a KindDef> {
 /// legitimately be handed more than that — but an operator who misspelled
 /// `std:usrname` should hear about it. Only names are printed; the values
 /// they hold never are.
+///
+/// A *known* key's value must also match the JSON shape its `field_type`
+/// promises — `std:string` a string, `std:oauth2` an object — or the
+/// mismatch surfaces here, by name, instead of inside a component that
+/// receives a string where the SDK expects a map and fails for a reason
+/// nothing points back to this command.
 fn validate_fields(def: &KindDef, fields: &BTreeMap<String, SecretValue>) -> Result<()> {
     let missing: Vec<&str> = def
         .fields
@@ -360,32 +366,75 @@ fn validate_fields(def: &KindDef, fields: &BTreeMap<String, SecretValue>) -> Res
             missing.join(", ")
         );
     }
-    for key in fields.keys() {
-        if !def.fields.iter().any(|f| &f.key == key) {
+    for (key, value) in fields {
+        let Some(field) = def.fields.iter().find(|f| &f.key == key) else {
             eprintln!(
                 "act secret: warning: '{key}' is not a field of {}; storing it, but \
                  a component reading this credential by kind will not look for it",
                 def.id
             );
-        }
+            continue;
+        };
+        let json = value.expose();
+        let shape_ok = match field.field_type.as_str() {
+            "std:oauth2" => json.is_object(),
+            _ => json.is_string(),
+        };
+        anyhow::ensure!(
+            shape_ok,
+            "field '{key}' of credential kind '{}' has type {}, which expects {}, \
+             not {}",
+            def.id,
+            field.field_type,
+            if field.field_type == "std:oauth2" {
+                "an object"
+            } else {
+                "a string"
+            },
+            json_type_name(json)
+        );
     }
     Ok(())
 }
 
+/// A short, human name for a JSON value's shape — used only in error text, so
+/// an operator hears "a number", never a struct debug-print of the value
+/// itself (which could be the mistyped credential).
+fn json_type_name(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
+    }
+}
+
 // ── Field sources ────────────────────────────────────────────────────────
 
+/// A field-key -> value map, read from `--fields-stdin` or `--from-command`.
+/// Each value must be a JSON string (a `std:string` field) or a JSON object
+/// (a `std:oauth2` field, or any future field type shaped like one) — every
+/// other JSON type, including a bare number or `null`, is rejected here by
+/// name, before it ever reaches `validate_fields`. Which shape a *particular*
+/// field actually requires is not decided here: this function has no
+/// `KindDef` to check against, only the raw map. `validate_fields` cross-
+/// checks each value's shape against the field it names.
 fn parse_fields_json(bytes: &[u8]) -> Result<BTreeMap<String, SecretValue>> {
     let value: serde_json::Value =
         serde_json::from_slice(bytes).context("field map is not valid JSON")?;
     let obj = value
         .as_object()
-        .context("field map must be a JSON object of field-key -> string")?;
+        .context("field map must be a JSON object of field-key -> value")?;
     let mut fields = BTreeMap::new();
     for (k, v) in obj {
-        let s = v
-            .as_str()
-            .with_context(|| format!("field '{k}' must be a JSON string"))?;
-        fields.insert(k.clone(), SecretValue::new(s));
+        anyhow::ensure!(
+            v.is_string() || v.is_object(),
+            "field '{k}' must be a JSON string or object, not {}",
+            json_type_name(v)
+        );
+        fields.insert(k.clone(), SecretValue::new(v.clone()));
     }
     Ok(fields)
 }
@@ -415,6 +464,7 @@ fn read_fields_from_command(cmd: &str) -> Result<BTreeMap<String, SecretValue>> 
 
 // ── Interactive prompting ───────────────────────────────────────────────
 
+#[derive(Debug)]
 pub struct Prompt {
     pub field_key: String,
     pub label: String,
@@ -423,27 +473,43 @@ pub struct Prompt {
 
 /// Labels come from the registry, never from a caller or a component — a
 /// component that could choose the wording would phish (spec §5.5).
-pub fn prompts_for(reg: &KindRegistry, kind: &str) -> Option<Vec<Prompt>> {
-    let def = reg.get(kind)?;
-    Some(
-        def.fields
-            .iter()
-            .filter(|f| f.required)
-            .map(|f| Prompt {
-                field_key: f.key.clone(),
-                label: f.label.clone(),
-                hidden: f.secret,
-            })
-            .collect(),
-    )
+///
+/// Refuses outright if any required field's type is not `std:string`: an
+/// `std:oauth2` field is acquired by a browser flow, not typed at a
+/// terminal, and prompting for it would store a string where the SDK
+/// expects an object — a mismatch that would surface much later, inside a
+/// component, as a failure nothing points back to this command. `Result`
+/// rather than `Option` so that refusal carries the reason.
+pub fn prompts_for(reg: &KindRegistry, kind: &str) -> Result<Vec<Prompt>> {
+    let def = reg
+        .get(kind)
+        .ok_or_else(|| anyhow::anyhow!("unknown credential kind '{kind}'"))?;
+    if let Some(f) = def.fields.iter().find(|f| f.field_type != "std:string") {
+        anyhow::bail!(
+            "field {} has type {}, which cannot be typed at a prompt \
+             (a {} value is acquired by its flow, not by hand)",
+            f.key,
+            f.field_type,
+            f.field_type
+        );
+    }
+    Ok(def
+        .fields
+        .iter()
+        .filter(|f| f.required)
+        .map(|f| Prompt {
+            field_key: f.key.clone(),
+            label: f.label.clone(),
+            hidden: f.secret,
+        })
+        .collect())
 }
 
 fn prompt_fields_interactively(
     reg: &KindRegistry,
     kind: &str,
 ) -> Result<BTreeMap<String, SecretValue>> {
-    let prompts = prompts_for(reg, kind)
-        .ok_or_else(|| anyhow::anyhow!("unknown credential kind '{kind}'"))?;
+    let prompts = prompts_for(reg, kind)?;
     let mut fields = BTreeMap::new();
     for p in prompts {
         let value = if p.hidden {
@@ -537,31 +603,39 @@ mod tests {
             "both halves of a basic credential are hidden"
         );
 
-        let opaque = prompts_for(&reg, "std:opaque").unwrap();
-        assert_eq!(opaque.len(), 1);
-        assert_eq!(opaque[0].field_key, "std:value");
+        let string_kind = prompts_for(&reg, "std:string").unwrap();
+        assert_eq!(string_kind.len(), 1);
+        assert_eq!(string_kind[0].field_key, "std:value");
 
-        assert!(prompts_for(&reg, "std:nonesuch").is_none());
+        assert!(prompts_for(&reg, "std:nonesuch").is_err());
     }
 
+    // `optional_fields_are_not_prompted_for` used to exercise `std:oauth2`
+    // (expiry and scopes as optional flat fields, filtered out because
+    // `required` was false). That subject is gone: `std:oauth2` is now one
+    // required field whose value is a map, and the property that replaced
+    // it — the whole field is refused rather than partially prompted — is
+    // `an_oauth2_field_cannot_be_prompted_for` below.
+
+    /// It is acquired by a flow that does not exist yet. Prompting would
+    /// store a string where the SDK expects an object, and the user would
+    /// not learn why until the component failed much later.
     #[test]
-    fn optional_fields_are_not_prompted_for() {
+    fn an_oauth2_field_cannot_be_prompted_for() {
         let reg = KindRegistry::builtin();
-        let prompts = prompts_for(&reg, "std:oauth2").unwrap();
-        let keys: Vec<&str> = prompts.iter().map(|p| p.field_key.as_str()).collect();
-        assert_eq!(
-            keys,
-            vec!["std:access-token"],
-            "expiry and scopes are derived, not typed"
+        let err = prompts_for(&reg, "std:oauth2").expect_err("must refuse");
+        assert!(
+            err.to_string().contains("std:oauth2"),
+            "name the type: {err}"
         );
     }
 
     #[test]
     fn validate_kind_lists_the_known_kinds() {
         let reg = KindRegistry::builtin();
-        assert!(validate_kind(&reg, "std:opaque").is_ok());
+        assert!(validate_kind(&reg, "std:string").is_ok());
         let err = validate_kind(&reg, "std:nonesuch").unwrap_err().to_string();
-        assert!(err.contains("std:opaque"), "{err}");
+        assert!(err.contains("std:string"), "{err}");
         assert!(err.contains("std:basic"), "{err}");
         assert!(err.contains("std:oauth2"), "{err}");
     }
@@ -570,6 +644,47 @@ mod tests {
     fn field_map_rejects_non_string_values() {
         let err = parse_fields_json(br#"{"std:value": 7}"#).unwrap_err();
         assert!(err.to_string().contains("std:value"));
+    }
+
+    #[test]
+    fn a_string_is_still_rejected_where_a_number_was_given() {
+        // The pre-existing guard: a bare number is not a credential value.
+        assert!(parse_fields_json(br#"{"std:value": 7}"#).is_err());
+    }
+
+    #[test]
+    fn an_object_is_accepted_for_an_oauth2_field() {
+        let fields = parse_fields_json(
+            br#"{"std:token": {"std:access-token": "at", "std:scopes": ["repo"]}}"#,
+        )
+        .expect("an object is valid for a std:oauth2 field");
+        assert!(fields["std:token"].expose().is_object());
+    }
+
+    #[test]
+    fn validate_fields_rejects_a_string_for_an_oauth2_field() {
+        let reg = KindRegistry::builtin();
+        let oauth = reg.get("std:oauth2").expect("std:oauth2 registered");
+        let mut fields = BTreeMap::new();
+        fields.insert("std:token".to_string(), SecretValue::new("not-an-object"));
+        let err = validate_fields(oauth, &fields).unwrap_err().to_string();
+        assert!(err.contains("std:token"), "{err}");
+        assert!(err.contains("std:oauth2"), "{err}");
+    }
+
+    #[test]
+    fn validate_fields_rejects_an_object_for_a_string_field() {
+        let reg = KindRegistry::builtin();
+        let string_kind = reg.get("std:string").expect("std:string registered");
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            "std:value".to_string(),
+            SecretValue::new(serde_json::json!({"nested": true})),
+        );
+        let err = validate_fields(string_kind, &fields)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("std:value"), "{err}");
     }
 
     #[test]
@@ -588,14 +703,14 @@ mod tests {
     #[test]
     fn validate_fields_accepts_an_undefined_key_rather_than_rejecting_it() {
         let reg = KindRegistry::builtin();
-        let opaque = reg.get("std:opaque").expect("std:opaque registered");
+        let string_kind = reg.get("std:string").expect("std:string registered");
         let mut fields = BTreeMap::new();
         fields.insert("std:value".to_string(), SecretValue::new("v"));
         fields.insert("std:bogus".to_string(), SecretValue::new("x"));
         // A key the kind doesn't define is a warning, not a rejection: a kind
         // lists what a *reader* can rely on, and a component may legitimately
         // be handed more than that. Only the required-field check may bail.
-        assert!(validate_fields(opaque, &fields).is_ok());
+        assert!(validate_fields(string_kind, &fields).is_ok());
     }
 
     #[test]

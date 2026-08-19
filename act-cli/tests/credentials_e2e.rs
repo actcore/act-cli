@@ -271,7 +271,7 @@ async fn a_component_gets_its_credential_and_the_value_never_leaves_the_host() {
         &backend,
         &canary,
         PROBE_KEY,
-        "std:opaque",
+        "std:string",
         &format!(r#"{{"std:value":"{SECRET}"}}"#),
     );
 
@@ -291,7 +291,7 @@ async fn a_component_gets_its_credential_and_the_value_never_leaves_the_host() {
     let payload = out.payload();
     assert_eq!(
         payload.get("kind").and_then(|v| v.as_str()),
-        Some("std:opaque"),
+        Some("std:string"),
         "the component saw the kind: {}",
         out.transport
     );
@@ -336,7 +336,7 @@ async fn a_component_gets_its_credential_and_the_value_never_leaves_the_host() {
             )
         });
     assert!(issue.contains(PROBE_KEY), "it names the key: {issue}");
-    assert!(issue.contains("kind=std:opaque"), "and the kind: {issue}");
+    assert!(issue.contains("kind=std:string"), "and the kind: {issue}");
     assert!(
         issue.contains("credentials-canary.wasm"),
         "and the component: {issue}"
@@ -365,7 +365,7 @@ async fn an_undeclared_component_is_denied() {
         &backend,
         &canary,
         PROBE_KEY,
-        "std:opaque",
+        "std:string",
         &format!(r#"{{"std:value":"{SECRET}"}}"#),
     );
 
@@ -406,7 +406,7 @@ async fn an_undeclared_component_is_denied() {
     // No credential-issue record: nothing was handed over, so the audit trail
     // must not claim otherwise.
     assert!(
-        !out.stderr.contains("kind=std:opaque"),
+        !out.stderr.contains("kind=std:string"),
         "a refused request must not produce an issue record: {}",
         out.stderr
     );
@@ -429,7 +429,7 @@ async fn a_declaring_component_with_no_grant_is_refused_by_default() {
         &backend,
         &canary,
         PROBE_KEY,
-        "std:opaque",
+        "std:string",
         &format!(r#"{{"std:value":"{SECRET}"}}"#),
     );
 
@@ -489,7 +489,7 @@ async fn listing_a_profile_returns_metadata_and_no_material() {
         &backend,
         &canary,
         PROBE_KEY,
-        "std:opaque",
+        "std:string",
         &format!(r#"{{"std:value":"{SECRET}"}}"#),
     );
     provision(
@@ -519,7 +519,7 @@ async fn listing_a_profile_returns_metadata_and_no_material() {
         .and_then(|k| k.as_array())
         .unwrap_or_else(|| panic!("expected a keys array: {}", out.transport));
     assert!(
-        keys.contains(&serde_json::json!({"key": PROBE_KEY, "kind": "std:opaque"})),
+        keys.contains(&serde_json::json!({"key": PROBE_KEY, "kind": "std:string"})),
         "the listing carries key and kind: {}",
         out.transport
     );
