@@ -7,11 +7,11 @@ use serde::{Deserialize, Serialize};
 pub struct FieldDef {
     pub key: String,
     pub label: String,
-    /// How this field is encoded and acquired (design §3.2). `std:opaque` is a
+    /// How this field is encoded and acquired (design §3.2). `std:string` is a
     /// CBOR string obtained by prompting; `std:oauth2` is a CBOR map obtained by
-    /// running the flow. Defaults to `std:opaque` so every existing definition
+    /// running the flow. Defaults to `std:string` so every existing definition
     /// and every hand-written TOML keeps working unchanged.
-    #[serde(rename = "type", default = "opaque")]
+    #[serde(rename = "type", default = "string_type")]
     pub field_type: String,
     #[serde(default = "yes")]
     pub secret: bool,
@@ -23,8 +23,8 @@ fn yes() -> bool {
     true
 }
 
-fn opaque() -> String {
-    "std:opaque".to_string()
+fn string_type() -> String {
+    "std:string".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -44,7 +44,7 @@ fn f(key: &str, label: &str, secret: bool, required: bool) -> FieldDef {
     FieldDef {
         key: key.into(),
         label: label.into(),
-        field_type: opaque(),
+        field_type: string_type(),
         secret,
         required,
     }
@@ -191,7 +191,7 @@ label = "Hijacked"
         let basic = r.get("std:basic").expect("builtin");
         for f in &basic.fields {
             assert_eq!(
-                f.field_type, "std:opaque",
+                f.field_type, "std:string",
                 "{} should default to a prompted string",
                 f.key
             );
@@ -208,14 +208,14 @@ id = "acme:badge"
 [[fields]]
 key = "acme:tenant"
 label = "Tenant"
-type = "std:opaque"
+type = "std:string"
 secret = false
 "#,
         )
         .unwrap();
         let r = KindRegistry::load(dir.path()).unwrap();
         let f = &r.get("acme:badge").expect("user kind").fields[0];
-        assert_eq!(f.field_type, "std:opaque");
+        assert_eq!(f.field_type, "std:string");
         assert!(!f.secret);
     }
 }
