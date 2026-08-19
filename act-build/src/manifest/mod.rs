@@ -171,4 +171,58 @@ mod tests {
                 .contains("no component metadata found")
         );
     }
+
+    /// Resolve an `act.toml`-only project through the same resolve + validate
+    /// pipeline `pack::run` uses, for tests that only care about that layer.
+    fn parse_act_toml(act_toml_src: &str) -> Result<ComponentInfo> {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("act.toml"), act_toml_src).unwrap();
+        let info = resolve(dir.path())?;
+        validate::validate(&info.std.capabilities, &info.std.credentials)?;
+        Ok(info)
+    }
+
+    #[test]
+    fn credentials_are_packed_from_act_toml() {
+        let info = parse_act_toml(
+            r#"
+[std.capabilities."act:credentials"]
+
+[[std.credentials]]
+key = "default"
+
+[[std.credentials.fields]]
+key = "acme:tenant"
+label = "Tenant"
+type = "std:string"
+secret = false
+"#,
+        )
+        .expect("parses");
+        let c = &info.std.credentials[0];
+        assert_eq!(c.key, "default");
+        assert_eq!(c.fields[0].key, "acme:tenant");
+        assert_eq!(c.fields[0].field_type, "std:string");
+        assert!(!c.fields[0].secret);
+        assert!(c.fields[0].required, "required defaults to true");
+    }
+
+    #[test]
+    fn declaring_credentials_without_the_capability_is_rejected() {
+        // The authoring mistake this check exists for: the credential is
+        // provisioned correctly, and the component is then denied at runtime
+        // for a reason neither the user nor the author can see.
+        let err = parse_act_toml(
+            r#"
+[[std.credentials]]
+key = "default"
+"#,
+        )
+        .expect_err("must not pack");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("act:credentials") && msg.contains("capabilit"),
+            "the error must name what to add: {msg}"
+        );
+    }
 }

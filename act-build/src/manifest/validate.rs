@@ -2,11 +2,12 @@
 //! globs / hostnames fail the build instead of silently breaking
 //! enforcement at runtime.
 
-use act_types::constants::{CAP_FILESYSTEM, CAP_HTTP};
+use act_types::constants::{CAP_CREDENTIALS, CAP_FILESYSTEM, CAP_HTTP};
+use act_types::types::StdCredential;
 use act_types::{Capabilities, FilesystemAllow, HttpAllow};
 use anyhow::{Result, bail};
 
-pub fn validate(caps: &Capabilities) -> Result<()> {
+pub fn validate(caps: &Capabilities, credentials: &[StdCredential]) -> Result<()> {
     if let Some(fs_req) = caps.get(CAP_FILESYSTEM) {
         let entries = fs_req
             .constraints_as::<FilesystemAllow>()
@@ -23,6 +24,15 @@ pub fn validate(caps: &Capabilities) -> Result<()> {
             .constraints_as::<HttpAllow>()
             .map_err(|e| anyhow::anyhow!("malformed wasi:http constraints: {e}"))?;
         validate_http(&rules)?;
+    }
+    if !credentials.is_empty() && !caps.has(CAP_CREDENTIALS) {
+        bail!(
+            "act.toml declares [[std.credentials]] but no act:credentials capability.\n\
+             The declaration is descriptive; the capability is the gate, and an\n\
+             undeclared class is always denied — so this component would be refused\n\
+             its own credentials at runtime. Add:\n\n    \
+             [std.capabilities.\"act:credentials\"]"
+        );
     }
     Ok(())
 }
@@ -127,7 +137,7 @@ mod mount_validate_tests {
             serde_json::json!([{ "guest": "/ows", "host": "~/.ows" }]),
             serde_json::json!([{ "path": "~/.ows/**", "mode": "rw" }]),
         );
-        assert!(validate(&c).is_ok());
+        assert!(validate(&c, &[]).is_ok());
     }
 
     #[test]
@@ -136,7 +146,7 @@ mod mount_validate_tests {
             serde_json::json!([{ "guest": "/ows" }]),
             serde_json::json!([{ "path": "~/.ows/**", "mode": "rw" }]),
         );
-        let e = format!("{}", validate(&c).unwrap_err());
+        let e = format!("{}", validate(&c, &[]).unwrap_err());
         assert!(e.contains("host"), "got: {e}");
     }
 
@@ -146,7 +156,7 @@ mod mount_validate_tests {
             serde_json::json!([{ "type": "root", "guest": "/", "host": "/x" }]),
             serde_json::json!([{ "path": "**", "mode": "rw" }]),
         );
-        assert!(validate(&c).is_err());
+        assert!(validate(&c, &[]).is_err());
     }
 }
 
@@ -242,6 +252,38 @@ mod tests {
                 ..Default::default()
             },
         )]));
-        assert!(validate(&caps).is_err());
+        assert!(validate(&caps, &[]).is_err());
+    }
+
+    #[test]
+    fn credentials_without_capability_are_rejected() {
+        let credentials = vec![StdCredential {
+            key: "default".into(),
+            ..Default::default()
+        }];
+        let err = validate(&Capabilities::default(), &credentials).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("act:credentials") && msg.contains("capabilit"),
+            "the error must name what to add: {msg}"
+        );
+    }
+
+    #[test]
+    fn credentials_with_capability_pass() {
+        use act_types::CapabilityRequest;
+        let mut caps = Capabilities::default();
+        caps.0
+            .insert(CAP_CREDENTIALS.to_string(), CapabilityRequest::default());
+        let credentials = vec![StdCredential {
+            key: "default".into(),
+            ..Default::default()
+        }];
+        assert!(validate(&caps, &credentials).is_ok());
+    }
+
+    #[test]
+    fn no_credentials_needs_no_capability() {
+        assert!(validate(&Capabilities::default(), &[]).is_ok());
     }
 }

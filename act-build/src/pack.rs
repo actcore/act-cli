@@ -75,8 +75,11 @@ pub fn run(wasm_path: &Path, overrides: &[String]) -> Result<()> {
     );
 
     // 3. Validate capability declarations before touching the WASM file.
-    crate::manifest::validate::validate(&component_info.std.capabilities)
-        .context("capability declarations failed validation")?;
+    crate::manifest::validate::validate(
+        &component_info.std.capabilities,
+        &component_info.std.credentials,
+    )
+    .context("capability declarations failed validation")?;
 
     // 4. Read WASM file.
     let mut wasm = std::fs::read(wasm_path)
