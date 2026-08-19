@@ -154,4 +154,20 @@ cp target/wasm32-wasip2/release/credentials_canary.wasm undeclared/
 $AB pack undeclared/credentials_canary.wasm
 mv undeclared/credentials_canary.wasm \
     ../../fixtures/credentials-canary-undeclared.wasm
+
+# oauth-declaring twin — declares one credential whose field is std:oauth2,
+# which `act login` must refuse to prompt for (tests/login_cli.rs):
+cp target/wasm32-wasip2/release/credentials_canary.wasm oauth-declaring/
+$AB pack oauth-declaring/credentials_canary.wasm
+mv oauth-declaring/credentials_canary.wasm \
+    ../../fixtures/oauth-declaring-canary.wasm
+
+# creds-declaring twin — declares one std:string credential under key
+# "default", used by tests/login_cli.rs to exercise `act login`'s
+# provisioning and its overwrite guard without the field-type refusal above
+# getting in the way first:
+cp target/wasm32-wasip2/release/credentials_canary.wasm creds-declaring/
+$AB pack creds-declaring/credentials_canary.wasm
+mv creds-declaring/credentials_canary.wasm \
+    ../../fixtures/creds-declaring-canary.wasm
 ```

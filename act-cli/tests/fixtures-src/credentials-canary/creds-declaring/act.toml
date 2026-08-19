@@ -1,0 +1,23 @@
+# The credentials-canary bytes, packed declaring one credential under key
+# "default" whose single field has type `std:string`.
+#
+# Used by `tests/login_cli.rs`'s `an_existing_credential_is_not_overwritten_without_force`:
+# a plain, promptable declaration, so the test can exercise `act login`'s
+# overwrite guard without the field-type refusal (`oauth-declaring/act.toml`)
+# getting in the way first.
+[std]
+name = "creds-declaring-canary"
+version = "0.1.0"
+description = "The credentials canary, packed declaring one std:string field under key 'default'."
+default-language = "en"
+
+[std.capabilities."act:credentials"]
+
+[[std.credentials]]
+key = "default"
+description = "API token"
+
+[[std.credentials.fields]]
+key = "std:value"
+label = "API token"
+type = "std:string"

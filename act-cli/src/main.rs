@@ -1,12 +1,14 @@
 mod audit;
 mod config;
 mod format;
+mod login_cmd;
 mod resolve;
 mod rmcp_bridge;
 mod runtime;
 mod secret_cmd;
 
 use act_types::cbor;
+use login_cmd::LoginOpts;
 use resolve::ComponentRef;
 use secret_cmd::SecretCmd;
 
@@ -225,6 +227,15 @@ enum Command {
         #[command(subcommand)]
         cmd: SecretCmd,
     },
+    /// Provision a credential a component declares it expects, by prompting.
+    /// There is no non-interactive form of `login` — use `act secret set`
+    /// for that (`--fields-stdin` / `--from-command`).
+    Login {
+        /// Component reference (path, URL, OCI ref, or name)
+        component: ComponentRef,
+        #[command(flatten)]
+        opts: LoginOpts,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -325,9 +336,10 @@ async fn main() -> Result<()> {
         Command::Run { opts, .. } | Command::Call { opts, .. } | Command::Info { opts, .. } => {
             (opts.config.as_deref(), opts.no_audit, opts.audit_args)
         }
-        Command::Skill { .. } | Command::Pull { .. } | Command::Secret { .. } => {
-            (None, false, false)
-        }
+        Command::Skill { .. }
+        | Command::Pull { .. }
+        | Command::Secret { .. }
+        | Command::Login { .. } => (None, false, false),
         Command::Session(sub) => match sub {
             SessionCommand::OpenArgsSchema { opts, .. } => {
                 (opts.config.as_deref(), opts.no_audit, opts.audit_args)
@@ -462,6 +474,7 @@ async fn main() -> Result<()> {
             };
             secret_cmd::cmd_secret(cmd, &global_opts).await
         }
+        Command::Login { component, opts } => login_cmd::cmd_login(component, opts).await,
     }
 }
 

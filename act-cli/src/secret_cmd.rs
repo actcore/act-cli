@@ -224,7 +224,10 @@ fn cmd_rm(component: ComponentRef, key: String, opts: &GlobalOpts) -> Result<()>
 /// string means or where the default store is. What is decided here is only
 /// what a *missing* default means: for a write it is fatal and names the
 /// flag, where for a run it merely means there are no credentials to read.
-fn resolve_backend(explicit: Option<&str>) -> Result<BackendChoice> {
+///
+/// `pub(crate)` so `act login` (which also writes) resolves a backend the
+/// same way rather than growing its own copy of this wrapper.
+pub(crate) fn resolve_backend(explicit: Option<&str>) -> Result<BackendChoice> {
     crate::runtime::credentials::resolve_backend(explicit)?.context(
         "no default credential store location on this platform; \
          pass --credentials-backend file:<path>",
@@ -560,7 +563,7 @@ fn prompt_fields_interactively(
     Ok(fields)
 }
 
-fn read_visible_line(label: &str) -> Result<String> {
+pub(crate) fn read_visible_line(label: &str) -> Result<String> {
     eprint!("{label}: ");
     std::io::stderr().flush().ok();
     let mut line = String::new();
@@ -587,7 +590,7 @@ const ECHO_WARNING: &str = "act secret: warning: terminal echo could not be turn
 /// first, so the choice to keep typing is theirs. Silently reading with echo
 /// on would defeat the only thing this function exists for.
 #[cfg(unix)]
-fn read_hidden_line(label: &str) -> Result<String> {
+pub(crate) fn read_hidden_line(label: &str) -> Result<String> {
     let echo_disabled = std::process::Command::new("stty")
         .arg("-echo")
         .status()
@@ -617,7 +620,7 @@ fn read_hidden_line(label: &str) -> Result<String> {
 /// with the same warning and at the same point as the unix arm's failure
 /// path.
 #[cfg(not(unix))]
-fn read_hidden_line(label: &str) -> Result<String> {
+pub(crate) fn read_hidden_line(label: &str) -> Result<String> {
     eprintln!("{ECHO_WARNING}");
     read_visible_line(label)
 }

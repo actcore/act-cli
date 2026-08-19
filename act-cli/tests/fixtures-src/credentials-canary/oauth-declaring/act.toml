@@ -1,0 +1,24 @@
+# The credentials-canary bytes, packed declaring one credential whose single
+# field has type `std:oauth2`.
+#
+# Used by `tests/login_cli.rs`'s `an_unsupported_field_type_is_named_not_prompted_for`:
+# `act login` must refuse to prompt for a `std:oauth2` field (that value is
+# acquired by a browser flow this release does not implement) rather than
+# storing whatever the operator typed as though it were the flow's output.
+# See `../undeclared/act.toml` for the same trick used to build the
+# capability-negative twin.
+[std]
+name = "oauth-declaring-canary"
+version = "0.1.0"
+description = "The credentials canary, packed declaring a std:oauth2 field — act login must refuse to prompt for it."
+default-language = "en"
+
+[std.capabilities."act:credentials"]
+
+[[std.credentials]]
+key = "default"
+
+[[std.credentials.fields]]
+key = "std:token"
+label = "OAuth token"
+type = "std:oauth2"

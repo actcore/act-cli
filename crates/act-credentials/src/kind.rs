@@ -125,11 +125,43 @@ impl KindRegistry {
     pub fn ids(&self) -> impl Iterator<Item = &str> {
         self.kinds.keys().map(String::as_str)
     }
+
+    /// A registry holding exactly one kind, built in memory rather than
+    /// loaded from disk.
+    ///
+    /// `act login` uses this for a component that names its own field list
+    /// (design §4.3): rather than re-implementing the "not std:string is
+    /// refused" rule against that field list directly, it wraps the
+    /// declaration in a one-off `KindDef` and routes it through
+    /// `prompts_for` exactly as a `--kind` lookup would — one
+    /// implementation of the rule, regardless of which source the fields
+    /// came from.
+    pub fn single(def: KindDef) -> Self {
+        Self {
+            kinds: BTreeMap::from([(def.id.clone(), def)]),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn single_registers_exactly_the_one_kind_given() {
+        let def = KindDef {
+            id: "default".to_string(),
+            fields: vec![f("acme:tenant", "Tenant", false, true)],
+            description: None,
+        };
+        let reg = KindRegistry::single(def);
+        assert_eq!(reg.get("default").unwrap().fields[0].key, "acme:tenant");
+        assert!(
+            reg.get("std:string").is_none(),
+            "a one-off registry does not also carry the builtins"
+        );
+        assert_eq!(reg.ids().collect::<Vec<_>>(), vec!["default"]);
+    }
 
     #[test]
     fn builtin_kinds_are_present_and_shaped() {
