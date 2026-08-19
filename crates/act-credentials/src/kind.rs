@@ -218,15 +218,29 @@ label = "Hijacked"
     }
 
     #[test]
-    fn a_field_defaults_to_the_opaque_type() {
+    fn a_toml_field_with_no_type_defaults_to_string() {
+        // The serde default on `FieldDef::field_type`, which is what an
+        // operator relies on when they omit `type` — and which the builtins
+        // cannot exercise, because they set it explicitly.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("acme.toml"),
+            "id = \"acme:untyped\"\n[[fields]]\nkey = \"acme:k\"\nlabel = \"K\"\n",
+        )
+        .unwrap();
+        let r = KindRegistry::load(dir.path()).unwrap();
+        assert_eq!(
+            r.get("acme:untyped").expect("user kind").fields[0].field_type,
+            "std:string",
+            "a field with no `type` is a prompted string"
+        );
+    }
+
+    #[test]
+    fn the_builtin_string_shapes_are_typed_explicitly() {
         let r = KindRegistry::builtin();
-        let basic = r.get("std:basic").expect("builtin");
-        for f in &basic.fields {
-            assert_eq!(
-                f.field_type, "std:string",
-                "{} should default to a prompted string",
-                f.key
-            );
+        for f in &r.get("std:basic").expect("builtin").fields {
+            assert_eq!(f.field_type, "std:string", "{}", f.key);
         }
     }
 

@@ -679,17 +679,12 @@ mod tests {
     }
 
     #[test]
-    fn field_map_rejects_non_string_values() {
+    fn field_map_rejects_values_that_are_neither_string_nor_object() {
         let err = parse_fields_json(br#"{"std:value": 7}"#).unwrap_err();
         assert!(err.to_string().contains("std:value"));
     }
 
     #[test]
-    fn a_string_is_still_rejected_where_a_number_was_given() {
-        // The pre-existing guard: a bare number is not a credential value.
-        assert!(parse_fields_json(br#"{"std:value": 7}"#).is_err());
-    }
-
     #[test]
     fn an_oauth2_object_without_an_access_token_is_rejected() {
         // The regression this migration introduced and the final review caught:
