@@ -34,6 +34,37 @@ pub fn validate(caps: &Capabilities, credentials: &[StdCredential]) -> Result<()
              [std.capabilities.\"act:credentials\"]"
         );
     }
+
+    // Design §4.3 rule 1: the `std:` namespace is registry-governed. A user's
+    // own config file already cannot redefine a `std:` kind
+    // (`KindRegistry::load`); a component is less trusted than that config and
+    // must not be able to either. Without this, a component declares
+    // `std:username` / `std:password`, and the prompt it produces is
+    // indistinguishable from one the host wrote for a registered kind — which
+    // is the phishing case §5.5 names first.
+    for c in credentials {
+        if c.key.starts_with("std:") {
+            bail!(
+                "[[std.credentials]] key '{}' is in the std: namespace, which is \
+                 reserved for kinds registered in ACT-CONSTANTS. Use your own \
+                 namespace, e.g. 'acme:{}'.",
+                c.key,
+                c.key.trim_start_matches("std:")
+            );
+        }
+        for f in &c.fields {
+            if f.key.starts_with("std:") {
+                bail!(
+                    "[[std.credentials.fields]] key '{}' (under '{}') is in the std: \
+                     namespace, which is reserved for registered field names. A \
+                     declared field must carry your own prefix so a human can see \
+                     the label is yours and not the host's.",
+                    f.key,
+                    c.key
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -266,6 +297,50 @@ mod tests {
         assert!(
             msg.contains("act:credentials") && msg.contains("capabilit"),
             "the error must name what to add: {msg}"
+        );
+    }
+
+    /// The phishing case, refused where the author can see it.
+    ///
+    /// A component declaring `std:username` / `std:password` produces a prompt a
+    /// human cannot tell from one the host wrote for a registered kind — design
+    /// §5.5 names that attack first. Note the asymmetry this closes: an
+    /// operator's own config file already cannot redefine a `std:` id
+    /// (`KindRegistry::load`), and a component is less trusted than that config.
+    #[test]
+    fn a_declared_credential_may_not_take_a_std_name() {
+        use act_types::CapabilityRequest;
+        let mut caps = Capabilities::default();
+        caps.0
+            .insert(CAP_CREDENTIALS.to_string(), CapabilityRequest::default());
+
+        let by_key = vec![StdCredential {
+            key: "std:basic".into(),
+            ..Default::default()
+        }];
+        let msg = validate(&caps, &by_key).unwrap_err().to_string();
+        assert!(
+            msg.contains("std:basic") && msg.contains("namespace"),
+            "{msg}"
+        );
+
+        let by_field = vec![StdCredential {
+            key: "acme:login".into(),
+            fields: vec![act_types::types::StdCredentialField {
+                key: "std:password".into(),
+                label: "GitHub password".into(),
+                field_type: "std:string".into(),
+                secret: true,
+                required: true,
+                resource: None,
+                scopes: vec![],
+            }],
+            ..Default::default()
+        }];
+        let msg = validate(&caps, &by_field).unwrap_err().to_string();
+        assert!(
+            msg.contains("std:password") && msg.contains("namespace"),
+            "a std: FIELD key must be refused too, not just a std: credential key: {msg}"
         );
     }
 

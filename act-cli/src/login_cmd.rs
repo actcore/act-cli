@@ -92,7 +92,11 @@ pub async fn cmd_login(component: ComponentRef, opts: LoginOpts) -> Result<()> {
         })?,
         None => KindRegistry::builtin(),
     };
-    let (kind, prompts) = field_set(&declared, opts.kind.as_deref(), &registry)?;
+    let FieldSet {
+        kind,
+        prompts,
+        labels_are_the_components,
+    } = field_set(&declared, opts.kind.as_deref(), &registry)?;
 
     // Open the store only now: a component that fails the cheapest check or
     // the field-type check never touches it, so a headless run against the
@@ -116,13 +120,38 @@ pub async fn cmd_login(component: ComponentRef, opts: LoginOpts) -> Result<()> {
     );
 
     // 5. Prompt in order, hidden for secret fields.
+    //
+    // When the labels are the component's own words (design §4.3), say so
+    // before the first one and show each field's namespaced key beside it.
+    // Otherwise a component called `innocent-weather` prints "GitHub password:"
+    // in the host's voice, which is the attack §5.5 names first. The component
+    // reference goes above the prompts so the reader can see who is asking.
+    if labels_are_the_components {
+        eprintln!("Provisioning '{}' for {component}.", declared.key);
+        eprintln!("The prompts below use wording supplied by that component, not by act:");
+    }
     let mut fields = BTreeMap::new();
     for p in &prompts {
-        let value = if p.hidden {
-            crate::secret_cmd::read_hidden_line(&p.label)?
+        let shown = if labels_are_the_components {
+            format!("  {} [{}]", p.label, p.field_key)
         } else {
-            crate::secret_cmd::read_visible_line(&p.label)?
+            p.label.clone()
         };
+        let value = if p.hidden {
+            crate::secret_cmd::read_hidden_line(&shown)?
+        } else {
+            crate::secret_cmd::read_visible_line(&shown)?
+        };
+        // Enter on an empty prompt is the same failure as EOF one layer up: a
+        // credential that stores cleanly and holds nothing, so the operator
+        // believes they provisioned something and the component finds nothing.
+        // Someone whose credential really is the empty string has
+        // `--fields-stdin`.
+        anyhow::ensure!(
+            !value.is_empty(),
+            "'{}' cannot be empty — nothing was stored",
+            p.field_key
+        );
         fields.insert(p.field_key.clone(), SecretValue::new(value));
     }
 
@@ -212,11 +241,31 @@ fn select_credential(
 /// declaration in a one-off `KindRegistry` (`KindRegistry::single`) keyed by
 /// the credential's own key, and calls `prompts_for` against it, exactly as
 /// the `--kind` path calls it against the operator-chosen registry entry.
+/// What a credential built from a component's own field list is stored as.
+///
+/// A declaration names a key and fields, never a kind (design §4.3), so there is
+/// no kind id to record — and the key is the wrong thing to put here: it says
+/// *which* credential, where `kind` says *what shape*, and an operator reading
+/// `"kind": "default"` beside `"key": "default"` learns nothing. A constant says
+/// the true thing instead: a plain set of fields, whose meaning lives in their
+/// names. Registered in `ACT-CONSTANTS.md` §8.2.
+pub(crate) const KIND_FIELDS: &str = "std:fields";
+
+/// The prompts for a credential, and whose words the labels are.
+#[derive(Debug)]
+struct FieldSet {
+    kind: String,
+    prompts: Vec<crate::secret_cmd::Prompt>,
+    /// True when the labels came from the component's own declaration rather
+    /// than the registry. The host must then mark them as foreign (§5.5).
+    labels_are_the_components: bool,
+}
+
 fn field_set(
     declared: &StdCredential,
     kind: Option<&str>,
     registry: &KindRegistry,
-) -> Result<(String, Vec<crate::secret_cmd::Prompt>)> {
+) -> Result<FieldSet> {
     if !declared.fields.is_empty() {
         let fields: Vec<FieldDef> = declared
             .fields
@@ -229,7 +278,11 @@ fn field_set(
             description: declared.description.clone(),
         });
         let prompts = crate::secret_cmd::prompts_for(&ad_hoc, &declared.key)?;
-        return Ok((declared.key.clone(), prompts));
+        return Ok(FieldSet {
+            kind: KIND_FIELDS.to_string(),
+            prompts,
+            labels_are_the_components: true,
+        });
     }
 
     let kind = kind.ok_or_else(|| {
@@ -240,7 +293,13 @@ fn field_set(
         )
     })?;
     let prompts = crate::secret_cmd::prompts_for(registry, kind)?;
-    Ok((kind.to_string(), prompts))
+    Ok(FieldSet {
+        kind: kind.to_string(),
+        prompts,
+        // A registered kind's labels are the registry's, so the host may
+        // present them as its own.
+        labels_are_the_components: false,
+    })
 }
 
 fn field_def_from_declared(f: &StdCredentialField) -> FieldDef {
@@ -348,10 +407,29 @@ mod tests {
     fn declared_fields_are_used_over_kind() {
         let declared = cred("default", vec![string_field("std:value")]);
         let reg = KindRegistry::builtin();
-        let (kind, prompts) = field_set(&declared, None, &reg).unwrap();
-        assert_eq!(kind, "default");
-        assert_eq!(prompts.len(), 1);
-        assert_eq!(prompts[0].field_key, "std:value");
+        let fs = field_set(&declared, None, &reg).unwrap();
+        assert_eq!(fs.prompts.len(), 1);
+        assert_eq!(fs.prompts[0].field_key, "std:value");
+        // Stored as a plain field set, not under the credential's key: `kind`
+        // says what shape, `key` says which credential, and putting the key in
+        // both leaves an operator reading `"kind": "default"` none the wiser.
+        assert_eq!(fs.kind, KIND_FIELDS);
+        assert!(
+            fs.labels_are_the_components,
+            "a declared field list means the labels are the component's words"
+        );
+    }
+
+    #[test]
+    fn a_registered_kinds_labels_are_not_marked_foreign() {
+        let declared = cred("default", vec![]);
+        let reg = KindRegistry::builtin();
+        let fs = field_set(&declared, Some("std:string"), &reg).unwrap();
+        assert!(
+            !fs.labels_are_the_components,
+            "registry labels are the host's own and must not be attributed elsewhere"
+        );
+        assert_eq!(fs.kind, "std:string");
     }
 
     #[test]
@@ -366,7 +444,8 @@ mod tests {
     fn an_open_declaration_falls_back_to_kind() {
         let declared = cred("default", vec![]);
         let reg = KindRegistry::builtin();
-        let (kind, prompts) = field_set(&declared, Some("std:basic"), &reg).unwrap();
+        let fs = field_set(&declared, Some("std:basic"), &reg).unwrap();
+        let (kind, prompts) = (fs.kind, fs.prompts);
         assert_eq!(kind, "std:basic");
         assert_eq!(prompts.len(), 2);
     }

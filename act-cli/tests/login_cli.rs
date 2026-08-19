@@ -35,10 +35,21 @@ fn fixture(name: &str) -> PathBuf {
 /// before it would ever read from stdin; closing it rather than piping
 /// nothing means a regression that starts prompting anyway fails fast
 /// (immediate EOF) instead of hanging the test suite.
+///
+/// Always against a throwaway store. Without `--credentials-backend` these
+/// resolve the platform default — the developer's real credential store — and
+/// the guards under test are the only thing keeping the suite out of it. The
+/// first moment a guard regresses, the tests would write there and their own
+/// results would start depending on machine state. That is not hypothetical:
+/// it happened during this plan's Task 5, and left a fixture's credential in a
+/// real store.
 fn run_login(extra_args: &[&str], fixture_name: &str) -> Output {
+    let store = tempfile::tempdir().expect("temp store");
+    let backend = format!("file:{}", store.path().display());
     Command::new(act_binary_path())
         .arg("login")
         .arg(fixture(fixture_name))
+        .args(["--credentials-backend", &backend])
         .args(extra_args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
