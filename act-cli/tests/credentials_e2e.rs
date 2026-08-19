@@ -489,7 +489,12 @@ async fn an_oauth2_field_reaches_the_guest_as_a_map() {
         &canary,
         PROBE_KEY,
         "std:oauth2",
-        r#"{"std:token": {"std:access-token": "at", "std:scopes": ["repo"]}}"#,
+        // A distinctive sentinel PER MEMBER. A rendered map renders every
+        // member, so each is its own leak surface; a two-character token like
+        // "at" would also match half the words in a log by accident.
+        r#"{"std:token": {"std:access-token": "oauth-token-sentinel-A",
+                          "std:expires-at": 1760000000,
+                          "std:scopes": ["scope-sentinel-B"]}}"#,
     );
 
     let out = call_over_mcp(
@@ -519,16 +524,20 @@ async fn an_oauth2_field_reaches_the_guest_as_a_map() {
         out.transport
     );
 
-    assert!(
-        !out.transport.contains("\"at\""),
-        "the token must not reach the transport: {}",
-        out.transport
-    );
-    assert!(
-        !out.stderr.contains("\"at\""),
-        "nor the logs: {}",
-        out.stderr
-    );
+    // Every member, not only the token: the object shape is new, and whatever
+    // renders a map renders all of it.
+    for sentinel in ["oauth-token-sentinel-A", "scope-sentinel-B", "1760000000"] {
+        assert!(
+            !out.transport.contains(sentinel),
+            "{sentinel} reached the transport: {}",
+            out.transport
+        );
+        assert!(
+            !out.stderr.contains(sentinel),
+            "{sentinel} reached the logs: {}",
+            out.stderr
+        );
+    }
 }
 
 /// `list-secrets`: the component discovers what its profile holds without
