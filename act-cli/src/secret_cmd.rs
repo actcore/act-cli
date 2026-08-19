@@ -567,9 +567,11 @@ pub(crate) fn read_visible_line(label: &str) -> Result<String> {
     eprint!("{label}: ");
     std::io::stderr().flush().ok();
     let mut line = String::new();
-    std::io::stdin()
+    let read = std::io::stdin()
         .read_line(&mut line)
         .context("reading from stdin")?;
+    // See `read_hidden_line`: EOF is an aborted prompt, not an empty value.
+    anyhow::ensure!(read > 0, "no input for '{label}' — nothing was stored");
     Ok(line.trim_end_matches(['\n', '\r']).to_string())
 }
 
@@ -606,13 +608,19 @@ pub(crate) fn read_hidden_line(label: &str) -> Result<String> {
         std::io::stdin()
             .read_line(&mut line)
             .context("reading from stdin")
-            .map(|_| line)
+            .map(|n| (n, line))
     };
     if echo_disabled {
         let _ = std::process::Command::new("stty").arg("echo").status();
     }
     eprintln!();
-    Ok(read_result?.trim_end_matches(['\n', '\r']).to_string())
+    let (read, line) = read_result?;
+    // EOF is not an empty credential. `read_line` returns Ok(0) at end of
+    // input — a closed pipe, or Ctrl-D at the prompt — and treating that as ""
+    // stores an empty value and reports success, which is worse than failing:
+    // the operator believes they provisioned something.
+    anyhow::ensure!(read > 0, "no input for '{label}' — nothing was stored");
+    Ok(line.trim_end_matches(['\n', '\r']).to_string())
 }
 
 /// No terminal-echo control implemented on this platform yet: the value is

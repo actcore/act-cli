@@ -105,6 +105,45 @@ fn seeded_store(key: &str) -> (String, tempfile::TempDir) {
     (backend, dir)
 }
 
+/// EOF at a prompt must abort, not store an empty credential.
+///
+/// Found while reading Task 5's deliberate-break report: with the type guard
+/// removed, `act login` on an unpromptable field did not hang on closed stdin —
+/// it read EOF as `""`, stored that, and exited 0. The guard hid a second bug
+/// underneath it, and this one applies to ordinary string fields too: a piped
+/// invocation, or Ctrl-D at the prompt, silently provisioned nothing while
+/// reporting success. Storing an empty value is worse than failing, because the
+/// operator believes the credential exists.
+#[test]
+fn eof_at_a_prompt_aborts_instead_of_storing_an_empty_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = format!("file:{}", dir.path().display());
+
+    // stdin is /dev/null, so the first prompt reads EOF immediately.
+    let out = run_login_with_store(
+        &["--key", "default"],
+        "creds-declaring-canary.wasm",
+        &backend,
+    );
+    assert!(
+        !out.status.success(),
+        "an aborted prompt must not report success: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // And nothing may be left behind: a half-written credential is the state
+    // this failure mode is dangerous for.
+    let list = Command::new(act_binary_path())
+        .args(["secret", "list", "--credentials-backend", &backend])
+        .output()
+        .expect("run act secret list");
+    let listed = String::from_utf8_lossy(&list.stdout);
+    assert!(
+        listed.trim() == "{}" || !listed.contains("default"),
+        "an aborted login must store nothing, got: {listed}"
+    );
+}
+
 #[test]
 fn a_component_that_uses_no_credentials_is_told_so_first() {
     let out = run_login(&["--key", "anything"], "time.wasm");
