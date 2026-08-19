@@ -393,6 +393,44 @@ fn validate_fields(def: &KindDef, fields: &BTreeMap<String, SecretValue>) -> Res
             },
             json_type_name(json)
         );
+
+        // An object is not enough. `as_oauth2` treats a missing or mistyped
+        // member as ABSENT rather than as an error, so an oauth2 field without
+        // an access token stores cleanly and then reads as "no credential" —
+        // and a float expiry reads as "never expires", a string scopes list as
+        // "grants nothing". Before this migration the three members were
+        // required top-level fields and this input was a hard error; keeping it
+        // an error here is what stops the migration loosening the check.
+        // Members and encodings: ACT-CONSTANTS.md §8.3.
+        if field.field_type == "std:oauth2" {
+            let members = json.as_object().expect("checked by shape_ok above");
+            anyhow::ensure!(
+                members
+                    .get("std:access-token")
+                    .is_some_and(|v| v.is_string()),
+                "field '{key}' is a std:oauth2 credential but has no \
+                 'std:access-token' string; a component reading it would see no \
+                 credential at all rather than an error"
+            );
+            if let Some(exp) = members.get("std:expires-at") {
+                anyhow::ensure!(
+                    exp.is_u64(),
+                    "'std:expires-at' must be a whole number of Unix seconds, not {}; \
+                     anything else is read as 'never expires'",
+                    json_type_name(exp)
+                );
+            }
+            if let Some(scopes) = members.get("std:scopes") {
+                anyhow::ensure!(
+                    scopes
+                        .as_array()
+                        .is_some_and(|a| a.iter().all(|s| s.is_string())),
+                    "'std:scopes' must be a list of strings, not {}; anything else \
+                     is read as 'no scopes granted'",
+                    json_type_name(scopes)
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -650,6 +688,81 @@ mod tests {
     fn a_string_is_still_rejected_where_a_number_was_given() {
         // The pre-existing guard: a bare number is not a credential value.
         assert!(parse_fields_json(br#"{"std:value": 7}"#).is_err());
+    }
+
+    #[test]
+    fn an_oauth2_object_without_an_access_token_is_rejected() {
+        // The regression this migration introduced and the final review caught:
+        // an object alone satisfied the shape check, so a credential with no
+        // token stored cleanly. `as_oauth2` reads a missing member as ABSENT,
+        // never as an error, so the component would see no credential and the
+        // operator would see a success.
+        let reg = KindRegistry::builtin();
+        let def = reg.get("std:oauth2").expect("builtin");
+        let fields = BTreeMap::from([(
+            "std:token".to_string(),
+            SecretValue::new(serde_json::json!({"std:scopes": ["repo"]})),
+        )]);
+        let err = validate_fields(def, &fields).expect_err("must not store a tokenless credential");
+        assert!(
+            err.to_string().contains("std:access-token"),
+            "the error must name what is missing: {err}"
+        );
+    }
+
+    #[test]
+    fn a_mistyped_oauth2_member_is_rejected_with_what_it_would_have_meant() {
+        // Both of these degrade silently in the SDK rather than erroring, which
+        // is why they are caught at input instead. ACT-CONSTANTS 8.3.
+        let reg = KindRegistry::builtin();
+        let def = reg.get("std:oauth2").expect("builtin");
+        for (bad, expected) in [
+            (
+                serde_json::json!({"std:access-token": "at", "std:expires-at": 1.5}),
+                "never expires",
+            ),
+            (
+                serde_json::json!({"std:access-token": "at", "std:scopes": "repo"}),
+                "no scopes granted",
+            ),
+        ] {
+            let fields = BTreeMap::from([("std:token".to_string(), SecretValue::new(bad.clone()))]);
+            let err = validate_fields(def, &fields).expect_err("must reject");
+            assert!(
+                err.to_string().contains(expected),
+                "the error should say what the mistyping would have meant: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn optional_fields_are_not_prompted_for() {
+        // Re-established against a user-defined kind after the migration removed
+        // the builtin that used to carry optional fields. `prompts_for` filters
+        // on `required` and that filter is live; without a test it is not.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("acme.toml"),
+            r#"
+id = "acme:mixed"
+[[fields]]
+key = "acme:needed"
+label = "Needed"
+[[fields]]
+key = "acme:optional"
+label = "Optional"
+required = false
+"#,
+        )
+        .unwrap();
+        let reg = KindRegistry::load(dir.path()).unwrap();
+        let prompts = prompts_for(&reg, "acme:mixed").expect("all fields are std:string");
+        let keys: Vec<&str> = prompts.iter().map(|p| p.field_key.as_str()).collect();
+        assert_eq!(
+            keys,
+            ["acme:needed"],
+            "an optional field is not prompted for"
+        );
     }
 
     #[test]

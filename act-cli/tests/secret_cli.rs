@@ -11,6 +11,47 @@ fn act_binary_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_act"))
 }
 
+/// Every other test here passes `--kind` explicitly, so the flag's default was
+/// uncovered — and the bug this migration shipped was precisely a `default_value`
+/// naming a kind that had stopped existing. Omitting `--kind` failed immediately
+/// and no test noticed. One assertion for a one-assertion class of bug.
+#[test]
+fn omitting_the_kind_flag_uses_a_kind_that_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = format!("file:{}", dir.path().display());
+
+    let set = act()
+        .args([
+            "secret",
+            "set",
+            "ghcr.io/actpkg/notion",
+            "--key",
+            "default",
+            "--credentials-backend",
+            &backend,
+            "--fields-stdin",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            use std::io::Write;
+            c.stdin
+                .as_mut()
+                .unwrap()
+                .write_all(br#"{"std:value":"sekrit"}"#)?;
+            c.wait_with_output()
+        })
+        .unwrap();
+
+    assert!(
+        set.status.success(),
+        "the default --kind must name a registered kind: {}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+}
+
 #[test]
 fn set_then_list_shows_metadata_and_never_a_value() {
     let dir = tempfile::tempdir().unwrap();
