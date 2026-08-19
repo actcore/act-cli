@@ -6,10 +6,16 @@ use serde::{Deserialize, Serialize};
 /// A credential value. `Debug` and `Display` are redacted, so the spec's
 /// "never logged" holds by construction rather than by discipline — and it
 /// holds for an object's members too, which a derived Debug would print.
-/// `#[serde(transparent)]` is load-bearing and must stay: it is what keeps the
-/// stored JSON equal to the value itself, so a string field is a string on disk
-/// and an object field an object. Dropping it would wrap every existing stored
-/// credential in a layer and make it unreadable, silently.
+/// The stored JSON is the value itself — a string field is a string on disk, an
+/// object field an object — which is what lets the file store's shape follow the
+/// field's type with no envelope.
+///
+/// `#[serde(transparent)]` states that intent, but it is **not** what enforces
+/// it: serde already serialises a single-field tuple struct as its inner value,
+/// so removing the attribute would change nothing. The guarantee is pinned by
+/// `the_stored_json_is_the_value_itself` below instead, because a property this
+/// load-bearing should be held by a test rather than by an attribute that turns
+/// out to be decorative.
 ///
 /// `Eq` is deliberately absent — `serde_json::Value` holds an `f64` and is only
 /// `PartialEq`.
@@ -134,6 +140,26 @@ mod tests {
             rendered.contains("std:oauth2"),
             "non-secret fields stay legible"
         );
+    }
+
+    #[test]
+    fn the_stored_json_is_the_value_itself() {
+        // The on-disk shape, pinned. A value must serialise as itself and not
+        // gain a wrapper, or every credential already in a store becomes
+        // unreadable — silently, because the file would simply deserialise
+        // differently rather than error.
+        for (value, expected) in [
+            (SecretValue::new("v"), r#""v""#),
+            (
+                SecretValue::new(serde_json::json!({"std:access-token": "at"})),
+                r#"{"std:access-token":"at"}"#,
+            ),
+        ] {
+            let json = serde_json::to_string(&value).expect("serialise");
+            assert_eq!(json, expected, "a stored value must be its own JSON");
+            let back: SecretValue = serde_json::from_str(&json).expect("deserialise");
+            assert_eq!(back, value, "and must read back unchanged");
+        }
     }
 
     #[test]
