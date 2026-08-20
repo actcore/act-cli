@@ -62,13 +62,19 @@ fn oauth(key: &str, label: &str) -> FieldDef {
 }
 
 impl KindRegistry {
+    /// The registered multi-field shapes.
+    ///
+    /// There is deliberately **no single-string shape**. One existed, holding a
+    /// field called `std:value`, and that name was pure scaffolding: it told a
+    /// reader nothing, while the whole model rests on field names carrying the
+    /// meaning. A credential that is one string is one *named* field, and the
+    /// person storing it names it — `act secret set --field acme:token`.
+    ///
+    /// What stays registered is what is genuinely shared and genuinely
+    /// meaningful: `std:username`/`std:password`, and the OAuth credential's
+    /// `std:token`.
     pub fn builtin() -> Self {
         let defs = vec![
-            KindDef {
-                id: "std:string".into(),
-                description: Some("A single string — bearer token, API key or password".into()),
-                fields: vec![f("std:value", "Value", true, true)],
-            },
             KindDef {
                 id: "std:basic".into(),
                 description: Some("Username and password".into()),
@@ -174,10 +180,6 @@ mod tests {
             "both halves are a unit"
         );
 
-        let string = r.get("std:string").unwrap();
-        assert_eq!(string.fields.len(), 1);
-        assert_eq!(string.fields[0].key, "std:value");
-
         let oauth = r.get("std:oauth2").unwrap();
         assert_eq!(oauth.fields.len(), 1, "one field, whose value is the map");
         assert_eq!(oauth.fields[0].key, "std:token");
@@ -199,12 +201,21 @@ mod tests {
     }
 
     #[test]
-    fn the_single_value_shape_is_named_for_its_encoding() {
+    fn there_is_no_single_string_shape() {
+        // A one-string credential is one *named* field, and only the person
+        // storing it knows the name. A registered shape would have to invent
+        // one — `std:value` did, and told a reader nothing while the whole
+        // model rests on names carrying meaning. `act secret set --field NAME`
+        // replaces it.
         let r = KindRegistry::builtin();
-        assert!(r.get("std:opaque").is_none(), "renamed to std:string");
-        let s = r.get("std:string").expect("builtin");
-        assert_eq!(s.fields.len(), 1);
-        assert_eq!(s.fields[0].field_type, "std:string");
+        for gone in ["std:opaque", "std:string"] {
+            assert!(
+                r.get(gone).is_none(),
+                "{gone} must not be a registered shape"
+            );
+        }
+        assert!(r.get("std:basic").is_some(), "multi-field shapes stay");
+        assert!(r.get("std:oauth2").is_some());
     }
 
     #[test]

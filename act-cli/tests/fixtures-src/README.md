@@ -111,7 +111,7 @@ export is not optional, because `get-secret` requires a live session.
 
 Its `whoami` tool fetches the credential under the key `probe` and returns
 its `kind`, whether the field map arrived non-empty, the field *names*, the
-byte **length** of `std:value` (when present), and the **CBOR major type**
+byte **length** of `acme:value` (when present), and the **CBOR major type**
 its first field decoded to (`shape`: `"text"` / `"map"` / `"other"`) — never
 the value, of either field. The length is the minimal oracle that lets
 `tests/credentials_e2e.rs` tell "the host handed over the real material" from

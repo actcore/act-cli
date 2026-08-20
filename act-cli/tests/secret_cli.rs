@@ -11,12 +11,13 @@ fn act_binary_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_act"))
 }
 
-/// Every other test here passes `--kind` explicitly, so the flag's default was
-/// uncovered — and the bug this migration shipped was precisely a `default_value`
-/// naming a kind that had stopped existing. Omitting `--kind` failed immediately
-/// and no test noticed. One assertion for a one-assertion class of bug.
+/// There is no default shape any more, so omitting both selectors must say so
+/// rather than guess. This replaces a test of `--kind`'s default value: that
+/// default was `std:string`, a registered one-field shape that no longer
+/// exists, and its field was called `std:value` — a name that told a reader
+/// nothing while the model rests on names carrying meaning.
 #[test]
-fn omitting_the_kind_flag_uses_a_kind_that_exists() {
+fn omitting_both_kind_and_field_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let backend = format!("file:{}", dir.path().display());
 
@@ -40,15 +41,19 @@ fn omitting_the_kind_flag_uses_a_kind_that_exists() {
             c.stdin
                 .as_mut()
                 .unwrap()
-                .write_all(br#"{"std:value":"sekrit"}"#)?;
+                .write_all(br#"{"acme:value":"sekrit"}"#)?;
             c.wait_with_output()
         })
         .unwrap();
 
     assert!(
-        set.status.success(),
-        "the default --kind must name a registered kind: {}",
-        String::from_utf8_lossy(&set.stderr)
+        !set.status.success(),
+        "with neither --kind nor --field there is nothing to store"
+    );
+    let err = String::from_utf8_lossy(&set.stderr);
+    assert!(
+        err.contains("--field"),
+        "the error must point at the way out: {err}"
     );
 }
 
@@ -64,8 +69,8 @@ fn set_then_list_shows_metadata_and_never_a_value() {
             "ghcr.io/actpkg/notion",
             "--key",
             "default",
-            "--kind",
-            "std:string",
+            "--field",
+            "acme:value",
             "--description",
             "Notion workspace",
             "--credentials-backend",
@@ -80,7 +85,7 @@ fn set_then_list_shows_metadata_and_never_a_value() {
             c.stdin
                 .as_mut()
                 .unwrap()
-                .write_all(br#"{"std:value":"sekrit"}"#)?;
+                .write_all(br#"{"acme:value":"sekrit"}"#)?;
             c.wait_with_output()
         })
         .unwrap();
@@ -124,8 +129,8 @@ fn rm_removes_the_entry() {
             "comp",
             "--key",
             "k",
-            "--kind",
-            "std:string",
+            "--field",
+            "acme:value",
             "--credentials-backend",
             &backend,
             "--fields-stdin",
@@ -138,7 +143,7 @@ fn rm_removes_the_entry() {
         c.stdin
             .as_mut()
             .unwrap()
-            .write_all(br#"{"std:value":"v"}"#)
+            .write_all(br#"{"acme:value":"v"}"#)
             .unwrap();
     }
     assert!(c.wait().unwrap().success());
@@ -188,7 +193,7 @@ fn an_unknown_kind_is_rejected_with_the_known_ones_listed() {
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err.contains("std:string"),
+        err.contains("std:basic"),
         "names the kinds that do exist: {err}"
     );
 }
@@ -228,8 +233,8 @@ fn local_refs_agree_on_one_profile_regardless_of_spelling() {
                 spelling,
                 "--key",
                 &key,
-                "--kind",
-                "std:string",
+                "--field",
+                "acme:value",
                 "--credentials-backend",
                 &backend,
                 "--fields-stdin",
@@ -243,7 +248,7 @@ fn local_refs_agree_on_one_profile_regardless_of_spelling() {
                 c.stdin
                     .as_mut()
                     .unwrap()
-                    .write_all(br#"{"std:value":"v"}"#)?;
+                    .write_all(br#"{"acme:value":"v"}"#)?;
                 c.wait_with_output()
             })
             .unwrap();
@@ -364,8 +369,8 @@ fn the_plaintext_notice_shows_on_the_first_set_and_falls_silent_on_the_second() 
                 "comp",
                 "--key",
                 key,
-                "--kind",
-                "std:string",
+                "--field",
+                "acme:value",
                 "--credentials-backend",
                 &backend,
                 "--fields-stdin",
@@ -379,7 +384,7 @@ fn the_plaintext_notice_shows_on_the_first_set_and_falls_silent_on_the_second() 
                 c.stdin
                     .as_mut()
                     .unwrap()
-                    .write_all(br#"{"std:value":"v"}"#)?;
+                    .write_all(br#"{"acme:value":"v"}"#)?;
                 c.wait_with_output()
             })
             .unwrap()

@@ -7,7 +7,7 @@
 //!
 //! One tool, `whoami`, fetches the credential stored under the key `probe`
 //! and reports facts about it — its `kind`, whether the field map arrived
-//! non-empty, the **byte length** of `std:value` (when present), and the
+//! non-empty, the **byte length** of `acme:value` (when present), and the
 //! **CBOR major type** the first field decoded to (`shape`, `"text"` /
 //! `"map"` / `"other"`). Nothing else — never the value itself, of either
 //! field. The length is a deliberate, minimal oracle: without it the test
@@ -159,7 +159,7 @@ impl tool_exports::Guest for CredentialsCanary {
             name: "whoami".to_string(),
             description: core_types::LocalizedString::Plain(
                 "Fetch this component's credential and report facts about it — kind, \
-                 whether fields arrived, the length of std:value, and the CBOR shape \
+                 whether fields arrived, the length of acme:value, and the CBOR shape \
                  of the first field. Never the value."
                     .to_string(),
             ),
@@ -243,12 +243,12 @@ async fn whoami(session_id: &str) -> tool_types::ToolEvent {
             let value_len = secret
                 .fields
                 .iter()
-                .find(|(name, _)| name == "std:value")
+                .find(|(name, _)| name == "acme:value")
                 .and_then(|(_, raw)| match from_cbor(raw) {
                     serde_json::Value::String(s) => Some(s.len()),
                     _ => None,
                 });
-            // Whichever field this kind carries — `std:value` for a string
+            // Whichever field this kind carries — `acme:value` for a string
             // kind, `std:token` for `std:oauth2` — report the CBOR major
             // type it decoded to. Fields arrive already sorted by name, and
             // every kind this canary is asked about has exactly one

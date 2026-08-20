@@ -19,6 +19,6 @@ default-language = "en"
 key = "default"
 
 [[std.credentials.fields]]
-key = "std:token"
+key = "acme:token"
 label = "OAuth token"
 type = "std:oauth2"

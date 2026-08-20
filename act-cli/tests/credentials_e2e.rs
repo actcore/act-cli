@@ -110,12 +110,17 @@ impl Sandbox {
 /// needs nothing from a config file — `cmd_secret` reads only the backend, and
 /// the load that does happen feeds the log filter and audit detail, neither of
 /// which this helper asserts on. The write path is hermetic already.
-fn provision(backend: &str, component: &Path, key: &str, kind: &str, fields_json: &str) {
+/// `shape` is passed through verbatim, so a caller says either
+/// `["--kind", "std:oauth2"]` for a registered shape or `["--field", "acme:value"]`
+/// for fields it names itself. There is no default shape: a one-string
+/// credential is one *named* field and only its owner knows the name.
+fn provision(backend: &str, component: &Path, key: &str, shape: &[&str], fields_json: &str) {
     let mut child = std::process::Command::new(act_binary_path())
         .arg("secret")
         .arg("set")
         .arg(component)
-        .args(["--key", key, "--kind", kind])
+        .args(["--key", key])
+        .args(shape)
         .args(["--credentials-backend", backend])
         .arg("--fields-stdin")
         .stdin(Stdio::piped())
@@ -271,8 +276,8 @@ async fn a_component_gets_its_credential_and_the_value_never_leaves_the_host() {
         &backend,
         &canary,
         PROBE_KEY,
-        "std:string",
-        &format!(r#"{{"std:value":"{SECRET}"}}"#),
+        &["--field", "acme:value"],
+        &format!(r#"{{"acme:value":"{SECRET}"}}"#),
     );
 
     let out = call_over_mcp(
@@ -291,7 +296,7 @@ async fn a_component_gets_its_credential_and_the_value_never_leaves_the_host() {
     let payload = out.payload();
     assert_eq!(
         payload.get("kind").and_then(|v| v.as_str()),
-        Some("std:string"),
+        Some("std:fields"),
         "the component saw the kind: {}",
         out.transport
     );
@@ -336,7 +341,7 @@ async fn a_component_gets_its_credential_and_the_value_never_leaves_the_host() {
             )
         });
     assert!(issue.contains(PROBE_KEY), "it names the key: {issue}");
-    assert!(issue.contains("kind=std:string"), "and the kind: {issue}");
+    assert!(issue.contains("kind=std:fields"), "and the kind: {issue}");
     assert!(
         issue.contains("credentials-canary.wasm"),
         "and the component: {issue}"
@@ -365,8 +370,8 @@ async fn an_undeclared_component_is_denied() {
         &backend,
         &canary,
         PROBE_KEY,
-        "std:string",
-        &format!(r#"{{"std:value":"{SECRET}"}}"#),
+        &["--field", "acme:value"],
+        &format!(r#"{{"acme:value":"{SECRET}"}}"#),
     );
 
     let out = call_over_mcp(
@@ -406,7 +411,7 @@ async fn an_undeclared_component_is_denied() {
     // No credential-issue record: nothing was handed over, so the audit trail
     // must not claim otherwise.
     assert!(
-        !out.stderr.contains("kind=std:string"),
+        !out.stderr.contains("kind=std:fields"),
         "a refused request must not produce an issue record: {}",
         out.stderr
     );
@@ -429,8 +434,8 @@ async fn a_declaring_component_with_no_grant_is_refused_by_default() {
         &backend,
         &canary,
         PROBE_KEY,
-        "std:string",
-        &format!(r#"{{"std:value":"{SECRET}"}}"#),
+        &["--field", "acme:value"],
+        &format!(r#"{{"acme:value":"{SECRET}"}}"#),
     );
 
     let out = call_over_mcp(
@@ -488,7 +493,7 @@ async fn an_oauth2_field_reaches_the_guest_as_a_map() {
         &backend,
         &canary,
         PROBE_KEY,
-        "std:oauth2",
+        &["--kind", "std:oauth2"],
         // A distinctive sentinel PER MEMBER. A rendered map renders every
         // member, so each is its own leak surface; a two-character token like
         // "at" would also match half the words in a log by accident.
@@ -560,14 +565,14 @@ async fn listing_a_profile_returns_metadata_and_no_material() {
         &backend,
         &canary,
         PROBE_KEY,
-        "std:string",
-        &format!(r#"{{"std:value":"{SECRET}"}}"#),
+        &["--field", "acme:value"],
+        &format!(r#"{{"acme:value":"{SECRET}"}}"#),
     );
     provision(
         &backend,
         &canary,
         "second",
-        "std:basic",
+        &["--kind", "std:basic"],
         r#"{"std:username":"alex","std:password":"other-sekrit"}"#,
     );
 
@@ -590,7 +595,7 @@ async fn listing_a_profile_returns_metadata_and_no_material() {
         .and_then(|k| k.as_array())
         .unwrap_or_else(|| panic!("expected a keys array: {}", out.transport));
     assert!(
-        keys.contains(&serde_json::json!({"key": PROBE_KEY, "kind": "std:string"})),
+        keys.contains(&serde_json::json!({"key": PROBE_KEY, "kind": "std:fields"})),
         "the listing carries key and kind: {}",
         out.transport
     );

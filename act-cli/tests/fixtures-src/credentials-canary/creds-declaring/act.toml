@@ -18,6 +18,6 @@ key = "default"
 description = "API token"
 
 [[std.credentials.fields]]
-key = "std:value"
+key = "acme:value"
 label = "API token"
 type = "std:string"

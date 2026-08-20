@@ -354,7 +354,7 @@ mod tests {
 
     #[test]
     fn a_single_declared_entry_needs_no_key() {
-        let declared = vec![cred("default", vec![string_field("std:value")])];
+        let declared = vec![cred("default", vec![string_field("std:password")])];
         let picked = select_credential(&declared, None, &comp()).unwrap();
         assert_eq!(picked.key, "default");
     }
@@ -362,8 +362,8 @@ mod tests {
     #[test]
     fn several_declared_entries_require_a_key_naming_them() {
         let declared = vec![
-            cred("a", vec![string_field("std:value")]),
-            cred("b", vec![string_field("std:value")]),
+            cred("a", vec![string_field("std:password")]),
+            cred("b", vec![string_field("std:password")]),
         ];
         let err = select_credential(&declared, None, &comp())
             .unwrap_err()
@@ -394,8 +394,8 @@ mod tests {
     #[test]
     fn a_key_not_among_several_declared_entries_lists_what_is_declared() {
         let declared = vec![
-            cred("a", vec![string_field("std:value")]),
-            cred("b", vec![string_field("std:value")]),
+            cred("a", vec![string_field("std:password")]),
+            cred("b", vec![string_field("std:password")]),
         ];
         let err = select_credential(&declared, Some("c"), &comp())
             .unwrap_err()
@@ -405,11 +405,11 @@ mod tests {
 
     #[test]
     fn declared_fields_are_used_over_kind() {
-        let declared = cred("default", vec![string_field("std:value")]);
+        let declared = cred("default", vec![string_field("std:password")]);
         let reg = KindRegistry::builtin();
         let fs = field_set(&declared, None, &reg).unwrap();
         assert_eq!(fs.prompts.len(), 1);
-        assert_eq!(fs.prompts[0].field_key, "std:value");
+        assert_eq!(fs.prompts[0].field_key, "std:password");
         // Stored as a plain field set, not under the credential's key: `kind`
         // says what shape, `key` says which credential, and putting the key in
         // both leaves an operator reading `"kind": "default"` none the wiser.
@@ -424,12 +424,12 @@ mod tests {
     fn a_registered_kinds_labels_are_not_marked_foreign() {
         let declared = cred("default", vec![]);
         let reg = KindRegistry::builtin();
-        let fs = field_set(&declared, Some("std:string"), &reg).unwrap();
+        let fs = field_set(&declared, Some("std:basic"), &reg).unwrap();
         assert!(
             !fs.labels_are_the_components,
             "registry labels are the host's own and must not be attributed elsewhere"
         );
-        assert_eq!(fs.kind, "std:string");
+        assert_eq!(fs.kind, "std:basic");
     }
 
     #[test]

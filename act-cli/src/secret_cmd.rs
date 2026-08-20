@@ -24,23 +24,7 @@ use crate::runtime::credentials::backend_root;
 #[derive(clap::Subcommand)]
 pub enum SecretCmd {
     /// Write a credential into a component's profile.
-    Set {
-        /// Component reference (path, URL, OCI ref, or name) — the same
-        /// value `act run` / `act call` use. This is the profile namespace.
-        component: ComponentRef,
-        #[arg(long, default_value = "default")]
-        key: String,
-        #[arg(long, default_value = "std:string")]
-        kind: String,
-        #[arg(long)]
-        description: Option<String>,
-        /// Read a JSON field map from stdin, e.g. `{"std:value":"..."}`.
-        #[arg(long, conflicts_with = "from_command")]
-        fields_stdin: bool,
-        /// Run a command and read its JSON field map from stdout.
-        #[arg(long)]
-        from_command: Option<String>,
-    },
+    Set(SetArgs),
     /// List stored credentials — key, kind, description, expiry. Never a value.
     List {
         /// Component reference to filter by (omit to list every component).
@@ -52,6 +36,40 @@ pub enum SecretCmd {
         #[arg(long)]
         key: String,
     },
+}
+
+/// Arguments to `act secret set`. Grouped rather than spread across the
+/// subcommand: there are eight of them, and threading eight positionals through
+/// to `cmd_set` is what clippy's `too_many_arguments` is for.
+#[derive(clap::Args)]
+pub struct SetArgs {
+    /// Component reference (path, URL, OCI ref, or name) — the same
+    /// value `act run` / `act call` use. This is the profile namespace.
+    pub component: ComponentRef,
+    #[arg(long, default_value = "default")]
+    pub key: String,
+    /// A registered shape — `std:basic`, `std:oauth2`, or one an operator
+    /// defined. Mutually exclusive with `--field`.
+    #[arg(long, conflicts_with = "field")]
+    pub kind: Option<String>,
+    /// Name a field to store, repeatable. Use this for a credential that
+    /// is not one of the registered shapes — a single API token, say:
+    /// `--field acme:token`. Each field is a `std:string`.
+    ///
+    /// There is no built-in "one string" shape on purpose: its field would
+    /// need a name, and a name like `std:value` tells a reader nothing
+    /// while the model rests on names carrying meaning. So the person
+    /// storing the credential names it.
+    #[arg(long = "field", value_name = "NAME")]
+    pub field: Vec<String>,
+    #[arg(long)]
+    pub description: Option<String>,
+    /// Read a JSON field map from stdin, e.g. `{"acme:token":"..."}`.
+    #[arg(long, conflicts_with = "from_command")]
+    pub fields_stdin: bool,
+    /// Run a command and read its JSON field map from stdout.
+    #[arg(long)]
+    pub from_command: Option<String>,
 }
 
 /// Global flags `act secret` needs that aren't specific to one subcommand.
@@ -66,36 +84,22 @@ pub struct GlobalOpts {
 
 pub async fn cmd_secret(cmd: SecretCmd, opts: &GlobalOpts) -> Result<()> {
     match cmd {
-        SecretCmd::Set {
-            component,
-            key,
-            kind,
-            description,
-            fields_stdin,
-            from_command,
-        } => cmd_set(
-            component,
-            key,
-            kind,
-            description,
-            fields_stdin,
-            from_command,
-            opts,
-        ),
+        SecretCmd::Set(args) => cmd_set(args, opts),
         SecretCmd::List { component } => cmd_list(component, opts),
         SecretCmd::Rm { component, key } => cmd_rm(component, key, opts),
     }
 }
 
-fn cmd_set(
-    component: ComponentRef,
-    key: String,
-    kind: String,
-    description: Option<String>,
-    fields_stdin: bool,
-    from_command: Option<String>,
-    opts: &GlobalOpts,
-) -> Result<()> {
+fn cmd_set(args: SetArgs, opts: &GlobalOpts) -> Result<()> {
+    let SetArgs {
+        component,
+        key,
+        kind,
+        field,
+        description,
+        fields_stdin,
+        from_command,
+    } = args;
     // Built-ins plus whatever the operator defined. A missing directory is not
     // an error — it is the common case — and a malformed file is, because
     // silently ignoring it would present the operator with an "unknown kind"
@@ -106,6 +110,39 @@ fn cmd_set(
         })?,
         None => KindRegistry::builtin(),
     };
+    // Either a registered shape, or fields the operator named. There is no
+    // default: a credential that is one string is one *named* field, and only
+    // the person storing it knows what to call it.
+    let (kind, registry, def_owner) = match (kind.as_deref(), field.is_empty()) {
+        (Some(k), true) => {
+            validate_kind(&registry, k)?;
+            (k.to_string(), registry, None)
+        }
+        (None, false) => {
+            let ad_hoc = KindDef {
+                id: crate::login_cmd::KIND_FIELDS.to_string(),
+                description: description.clone(),
+                fields: field
+                    .iter()
+                    .map(|name| act_credentials::kind::FieldDef {
+                        key: name.clone(),
+                        label: name.clone(),
+                        field_type: "std:string".to_string(),
+                        secret: true,
+                        required: true,
+                    })
+                    .collect(),
+            };
+            let id = ad_hoc.id.clone();
+            (id, KindRegistry::single(ad_hoc), None::<()>)
+        }
+        (None, true) => anyhow::bail!(
+            "nothing to store: pass --kind for a registered shape (see `act secret set --help`) \
+             or --field NAME for each field you want, e.g. --field acme:token"
+        ),
+        (Some(_), false) => unreachable!("clap enforces conflicts_with"),
+    };
+    let _ = def_owner;
     let def = validate_kind(&registry, &kind)?;
 
     // The store is opened, and its nature disclosed, *before* the credential
@@ -652,10 +689,6 @@ mod tests {
             "both halves of a basic credential are hidden"
         );
 
-        let string_kind = prompts_for(&reg, "std:string").unwrap();
-        assert_eq!(string_kind.len(), 1);
-        assert_eq!(string_kind[0].field_key, "std:value");
-
         assert!(prompts_for(&reg, "std:nonesuch").is_err());
     }
 
@@ -682,17 +715,16 @@ mod tests {
     #[test]
     fn validate_kind_lists_the_known_kinds() {
         let reg = KindRegistry::builtin();
-        assert!(validate_kind(&reg, "std:string").is_ok());
+        assert!(validate_kind(&reg, "std:basic").is_ok());
         let err = validate_kind(&reg, "std:nonesuch").unwrap_err().to_string();
-        assert!(err.contains("std:string"), "{err}");
         assert!(err.contains("std:basic"), "{err}");
         assert!(err.contains("std:oauth2"), "{err}");
     }
 
     #[test]
     fn field_map_rejects_values_that_are_neither_string_nor_object() {
-        let err = parse_fields_json(br#"{"std:value": 7}"#).unwrap_err();
-        assert!(err.to_string().contains("std:value"));
+        let err = parse_fields_json(br#"{"std:password": 7}"#).unwrap_err();
+        assert!(err.to_string().contains("std:password"));
     }
 
     #[test]
@@ -794,16 +826,16 @@ required = false
     #[test]
     fn validate_fields_rejects_an_object_for_a_string_field() {
         let reg = KindRegistry::builtin();
-        let string_kind = reg.get("std:string").expect("std:string registered");
+        let string_kind = reg.get("std:basic").expect("std:string registered");
         let mut fields = BTreeMap::new();
         fields.insert(
-            "std:value".to_string(),
+            "std:password".to_string(),
             SecretValue::new(serde_json::json!({"nested": true})),
         );
         let err = validate_fields(string_kind, &fields)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("std:value"), "{err}");
+        assert!(err.contains("std:password"), "{err}");
     }
 
     #[test]
@@ -822,14 +854,15 @@ required = false
     #[test]
     fn validate_fields_accepts_an_undefined_key_rather_than_rejecting_it() {
         let reg = KindRegistry::builtin();
-        let string_kind = reg.get("std:string").expect("std:string registered");
+        let basic = reg.get("std:basic").expect("std:basic registered");
         let mut fields = BTreeMap::new();
-        fields.insert("std:value".to_string(), SecretValue::new("v"));
+        fields.insert("std:username".to_string(), SecretValue::new("u"));
+        fields.insert("std:password".to_string(), SecretValue::new("v"));
         fields.insert("std:bogus".to_string(), SecretValue::new("x"));
         // A key the kind doesn't define is a warning, not a rejection: a kind
         // lists what a *reader* can rely on, and a component may legitimately
         // be handed more than that. Only the required-field check may bail.
-        assert!(validate_fields(string_kind, &fields).is_ok());
+        assert!(validate_fields(basic, &fields).is_ok());
     }
 
     #[test]
@@ -874,7 +907,7 @@ required = false
                 &SecretRecord {
                     kind: "std:opaque".to_string(),
                     fields: BTreeMap::from([(
-                        "std:value".to_string(),
+                        "std:password".to_string(),
                         SecretValue::new("first-secret"),
                     )]),
                     host_only: BTreeMap::new(),

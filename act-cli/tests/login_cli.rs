@@ -89,7 +89,7 @@ fn seeded_store(key: &str) -> (String, tempfile::TempDir) {
         .arg("secret")
         .arg("set")
         .arg(fixture("creds-declaring-canary.wasm"))
-        .args(["--key", key, "--kind", "std:string"])
+        .args(["--key", key, "--field", "acme:value"])
         .args(["--credentials-backend", &backend])
         .arg("--fields-stdin")
         .stdin(Stdio::piped())
@@ -103,7 +103,7 @@ fn seeded_store(key: &str) -> (String, tempfile::TempDir) {
             .stdin
             .as_mut()
             .expect("stdin was piped")
-            .write_all(br#"{"std:value":"pre-existing-value"}"#)
+            .write_all(br#"{"acme:value":"pre-existing-value"}"#)
             .expect("write field map");
     }
     let out = child.wait_with_output().expect("act secret set");
@@ -178,7 +178,14 @@ fn an_unsupported_field_type_is_named_not_prompted_for() {
         err.contains("std:oauth2"),
         "the error must name the type: {err}"
     );
-    assert!(!err.contains("Password"), "it must not have prompted");
+    // Not `!err.contains("Password")`: this fixture's label is "OAuth token", so
+    // that assertion could never fire and passed vacuously. A prompt is only
+    // rendered as `label [field-key]: `, so the bracketed form is what proves
+    // one was never printed — and the refusal message names the key without it.
+    assert!(
+        !err.contains("OAuth token ["),
+        "it must refuse before rendering a prompt: {err}"
+    );
 }
 
 #[test]
