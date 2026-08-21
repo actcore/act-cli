@@ -14,7 +14,7 @@
 //! Around it sits the generated-trait bridge. `act:credentials/store`'s two
 //! functions are `async func` in WIT, so bindgen lowers them through
 //! `func_wrap_concurrent`: the generated `HostWithStore<T>` methods are
-//! **associated functions taking an [`Accessor`]**, not methods on `&self`, and
+//! **associated functions taking a [`wasmtime::component::Accessor`]**, not methods on `&self`, and
 //! the impl target is the `HasData` marker rather than `HostState`. The bridge
 //! reaches host state through the accessor, resolves the capability decision
 //! (which may await a human), and then calls the synchronous host. Nothing
@@ -34,7 +34,8 @@ use super::HostState;
 use super::bindings::act::credentials::{store, types};
 
 /// Why the host refused, in the terms `CredentialHost` can decide in. Maps
-/// onto the WIT `secret-error` variants and nothing else — see [`to_wit`].
+/// onto the WIT `secret-error` variants and nothing else, through this
+/// type's private `to_wit`.
 #[derive(Debug, PartialEq, Eq)]
 pub enum HostError {
     NotFound,
@@ -170,7 +171,8 @@ pub fn default_store_root() -> Option<PathBuf> {
 /// Parse `--credentials-backend`, or fall back to [`default_store_root`].
 ///
 /// The one parser for that flag: `act secret set/list/rm` and the runtime's
-/// [`crate::credential_host`] both come through here, so a store named on the
+/// the credential host [`crate::ComponentRuntime::load`] builds both come
+/// through here, so a store named on the
 /// write is the store read on the run. There is no inferred backend — an
 /// unrecognised value is an error, never a silent fall back to plaintext
 /// (design D13/§7.4).

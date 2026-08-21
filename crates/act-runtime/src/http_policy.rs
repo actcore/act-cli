@@ -38,7 +38,7 @@ type P3ErrorCode = wasmtime_wasi_http::p3::bindings::http::types::ErrorCode;
 /// Policy hook implementing both `p2::WasiHttpHooks` and `p3::WasiHttpHooks`.
 pub struct PolicyHttpHooks {
     ceiling: Arc<dyn CompiledCeiling>,
-    client: Arc<crate::runtime::http_client::ActHttpClient>,
+    client: Arc<crate::http_client::ActHttpClient>,
     prompter: Arc<dyn ConsentPrompter>,
     cache: Arc<DecisionCache>,
 }
@@ -46,7 +46,7 @@ pub struct PolicyHttpHooks {
 impl PolicyHttpHooks {
     pub fn new(
         ceiling: Arc<dyn CompiledCeiling>,
-        client: Arc<crate::runtime::http_client::ActHttpClient>,
+        client: Arc<crate::http_client::ActHttpClient>,
         prompter: Arc<dyn ConsentPrompter>,
         cache: Arc<DecisionCache>,
     ) -> Self {
@@ -301,13 +301,12 @@ mod tests {
             .block_on(HttpProvider.resolve("wasi:http", &declared, &grant))
             .expect("HttpProvider::resolve");
         let ceiling: Arc<dyn act_policy::provider::CompiledCeiling> = Arc::from(ceiling_box);
-        let http_cfg = crate::config::HttpConfig {
+        let http_cfg = act_policy::grant::HttpConfig {
             mode,
             ..Default::default()
         };
-        let client = Arc::new(
-            crate::runtime::http_client::ActHttpClient::new(http_cfg).expect("client builds"),
-        );
+        let client =
+            Arc::new(crate::http_client::ActHttpClient::new(http_cfg).expect("client builds"));
         PolicyHttpHooks::new(
             ceiling,
             client,
@@ -577,13 +576,12 @@ mod tests {
             .await
             .expect("HttpProvider::resolve");
         let ceiling: Arc<dyn CompiledCeiling> = Arc::from(ceiling_box);
-        let http_cfg = crate::config::HttpConfig {
+        let http_cfg = act_policy::grant::HttpConfig {
             mode: grant.mode,
             ..Default::default()
         };
-        let client = Arc::new(
-            crate::runtime::http_client::ActHttpClient::new(http_cfg).expect("client builds"),
-        );
+        let client =
+            Arc::new(crate::http_client::ActHttpClient::new(http_cfg).expect("client builds"));
         let mut h = PolicyHttpHooks::new(
             ceiling,
             client,

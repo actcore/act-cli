@@ -36,7 +36,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - run: wkg wit fetch --type wit
-        working-directory: act-cli
+        working-directory: crates/act-runtime
         env:
           WKG_CONFIG_FILE: wkg-registry.toml
       - uses: PyO3/maturin-action@v1
@@ -67,7 +67,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - run: wkg wit fetch --type wit
-        working-directory: act-cli
+        working-directory: crates/act-runtime
         env:
           WKG_CONFIG_FILE: wkg-registry.toml
       - uses: PyO3/maturin-action@v1

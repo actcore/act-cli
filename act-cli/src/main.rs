@@ -1,11 +1,10 @@
-mod audit;
 mod config;
+use act_runtime as runtime;
+use act_runtime::{audit, resolve};
 mod format;
 mod login_cmd;
 mod oauth;
-mod resolve;
 mod rmcp_bridge;
-mod runtime;
 mod secret_cmd;
 
 use act_types::cbor;
@@ -315,15 +314,6 @@ enum InspectCommand {
 /// reserved for untrusted guest-authored telemetry (`wasi:otel`, deferred
 /// — see `crate::audit::TARGET_GUEST`)
 /// that must never be rendered as though the host authored it.
-fn fmt_filter<S>(
-    env_filter: tracing_subscriber::EnvFilter,
-) -> impl tracing_subscriber::layer::Filter<S> {
-    use tracing_subscriber::filter::{FilterExt, filter_fn};
-    env_filter.and(filter_fn(|meta: &tracing::Metadata<'_>| {
-        meta.target() != crate::audit::TARGET_AUDIT && meta.target() != crate::audit::TARGET_GUEST
-    }))
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -392,7 +382,7 @@ async fn main() -> Result<()> {
 
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
-        .with_filter(fmt_filter(env_filter));
+        .with_filter(audit::fmt_filter(env_filter));
 
     // The audit layer carries its own filter, pinned to the audit target.
     // This is what makes the trail unreachable from RUST_LOG / -v / log-level:
@@ -565,7 +555,7 @@ fn parse_max_memory(s: &str) -> Result<usize, String> {
 /// audit header's declared-but-unreachable-`ask` warning.
 fn tty_or_deny_prompter() -> (Arc<dyn act_policy::consent::ConsentPrompter>, bool) {
     if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        (Arc::new(runtime::consent::TtyPrompter), true)
+        (Arc::new(rmcp_bridge::TtyPrompter), true)
     } else {
         (Arc::new(act_policy::consent::DenyPrompter), false)
     }
@@ -576,9 +566,6 @@ struct ResolvedOpts {
     config_file: config::ConfigFile,
     /// Resolved grant policy (uniform grants for all capability classes).
     grant_policy: config::GrantPolicy,
-    /// Filesystem mode extracted from the grant policy — used for `resolve_mounts`
-    /// before the provider registry computes the final ceiling.
-    fs_mode: config::PolicyMode,
     metadata: Option<serde_json::Value>,
     max_memory: Option<usize>,
 }
@@ -595,10 +582,6 @@ fn resolve_opts(opts: &CommonOpts) -> Result<ResolvedOpts> {
         deny_ids: opts.deny.clone(),
     };
     let grant_policy = config::build_grant_policy(&config_file, profile, &cli_grants)?;
-    // Extract fs mode for resolve_mounts (needed before instantiation).
-    let fs_mode = grant_policy
-        .resolve(act_types::constants::CAP_FILESYSTEM)
-        .mode;
     let cli_metadata = parse_cli_metadata(
         &opts.metadata,
         opts.metadata_json.as_deref(),
@@ -613,7 +596,6 @@ fn resolve_opts(opts: &CommonOpts) -> Result<ResolvedOpts> {
     Ok(ResolvedOpts {
         config_file,
         grant_policy,
-        fs_mode,
         metadata,
         max_memory: opts.max_memory,
     })
@@ -635,7 +617,7 @@ struct PreparedComponent {
 /// `prompter` selects the consent strategy for `ask`-mode capabilities:
 /// - MCP stdio: `McpElicitationPrompter` (forwards to the connected MCP client)
 /// - interactive TTY: `TtyPrompter` (y/N on stderr/stdin)
-/// - headless / ACT-HTTP: `DenyPrompter` (fail-safe deny)
+/// - headless: `DenyPrompter` (fail-safe deny)
 ///
 /// `has_prompt_channel` must agree with `prompter`'s actual kind — `true`
 /// for `TtyPrompter` / `McpElicitationPrompter`, `false` for `DenyPrompter`.
@@ -654,7 +636,7 @@ async fn prepare_component(
         opts,
         prompter,
         has_prompt_channel,
-        Arc::new(runtime::elicit::CurrentConsentSink::new()),
+        Arc::new(runtime::consent::CurrentConsentSink::new()),
         transport,
     )
     .await
@@ -663,27 +645,19 @@ async fn prepare_component(
 /// [`prepare_component`], plus the slot the actor uses to route consent
 /// questions back to the caller currently waiting on a call. Only the MCP
 /// transports need it — everything else prompts locally or denies.
+///
+/// Everything past `resolve_opts` is `act_runtime`'s: this function's job is
+/// turning command-line flags and TOML into the runtime's headless inputs, and
+/// nothing more.
 async fn prepare_component_with_consent(
     component: &ComponentRef,
     opts: &CommonOpts,
     prompter: Arc<dyn act_policy::consent::ConsentPrompter>,
     has_prompt_channel: bool,
-    current_consent: Arc<runtime::elicit::CurrentConsentSink>,
+    current_consent: Arc<runtime::consent::CurrentConsentSink>,
     transport: crate::audit::Transport,
 ) -> Result<PreparedComponent> {
     let resolved = resolve_opts(opts)?;
-
-    let component_path = resolve::resolve(component, false).await?;
-    let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
-    let info = runtime::read_component_info(&wasm_bytes)?;
-
-    let grant_policy = resolved.grant_policy;
-    let fs_mode = resolved.fs_mode;
-    let max_memory = resolved.max_memory;
-
-    let mounts = runtime::fs_policy::resolve_mounts(&info.std.capabilities, fs_mode);
-    runtime::fs_policy::create_mount_dirs(&mounts).context("creating mount directories")?;
-    let preopens = runtime::fs_policy::derive_preopens(&mounts);
 
     let metadata: runtime::Metadata = resolved
         .metadata
@@ -691,96 +665,36 @@ async fn prepare_component_with_consent(
         .map(|v| runtime::Metadata::from(v.clone()))
         .unwrap_or_default();
 
-    tracing::debug!(
-        name = %info.std.name,
-        version = %info.std.version,
-        path = %component_path.display(),
-        "Loading component"
-    );
-
-    let cache = Arc::new(act_policy::consent::DecisionCache::new());
-
-    let engine = runtime::create_engine()?;
-    let (wasm, digest) = runtime::load_component(&engine, &component_path)?;
-    let linker = runtime::create_linker(&engine)?;
-    // Built before instantiation (rather than after, as before) so
-    // `instantiate_component` can thread it into the instantiation audit
-    // header without reconstructing component_ref/digest a second time.
-    let audit = runtime::AuditContext {
-        component_ref: component.to_string(),
-        digest,
-        transport,
-        has_prompt_channel,
-        record_args: opts.audit_args,
+    let config = runtime::RuntimeConfig {
+        grants: resolved.grant_policy,
+        metadata: metadata.clone(),
+        max_memory: resolved.max_memory,
+        audit: runtime::AuditOptions {
+            transport,
+            record_args: opts.audit_args,
+        },
+        credentials: Some(runtime::CredentialsSource {
+            backend: opts.credentials_backend.clone(),
+        }),
     };
-    let (instance, session_provider, store) = runtime::instantiate_component(
-        &engine,
-        &wasm,
-        &linker,
-        &preopens,
-        &grant_policy,
-        &info,
-        max_memory,
+    let consent = runtime::ConsentConfig {
         prompter,
-        cache,
-        credential_host(component, opts.credentials_backend.as_deref())?,
-        &audit,
-    )
-    .await?;
-    let has_sessions = session_provider.is_some();
-    let handle =
-        runtime::spawn_component_actor(instance, session_provider, store, current_consent, audit);
+        has_prompt_channel,
+        sink: current_consent,
+        cache: Arc::new(act_policy::consent::DecisionCache::new()),
+    };
 
-    tracing::debug!(name = %info.std.name, version = %info.std.version, "Component ready");
+    let rt = runtime::ComponentRuntime::new()?;
+    let running = rt.load(component, &config, consent).await?;
 
     Ok(PreparedComponent {
-        info,
-        handle,
+        info: running.info().clone(),
+        handle: running.handle().clone(),
         metadata,
-        has_sessions,
+        has_sessions: running.has_sessions(),
     })
 }
 
-/// Build the credential host serving one component run, or `None` when no
-/// store was named and this platform has no data directory to put one in.
-///
-/// Takes the `ComponentRef` and derives the profile namespace itself. That is
-/// the point: the namespace is what makes one component unable to read
-/// another's credentials (design §2.1), and it must be
-/// `resolve::profile_key(component)` rather than the operator's literal
-/// spelling, or `act secret set ./x.wasm` and `act run x.wasm` land on
-/// different profiles. Taking a `&str` left that rule to prose and to whoever
-/// wrote the call — and let a test pass the right string while the call site
-/// passed the wrong one. Here it cannot be passed at all.
-///
-/// The literal spelling is still recorded, separately, as
-/// `AuditContext::component_ref`: an audit trail should say what was typed.
-/// Two values, two purposes, neither derivable from the other's variable.
-///
-/// `credentials_backend` is the operator's `--credentials-backend`, parsed by
-/// the same `resolve_backend` `act secret` uses: the reader resolves the store
-/// exactly as the writer did. The backend is named explicitly, never inferred:
-/// there is deliberately no mode that picks one for you (design §7.4).
-fn credential_host(
-    component: &ComponentRef,
-    credentials_backend: Option<&str>,
-) -> Result<Option<Arc<runtime::credentials::CredentialHost>>> {
-    let component_ref = resolve::profile_key(component);
-    let Some(choice) = runtime::credentials::resolve_backend(credentials_backend)? else {
-        return Ok(None);
-    };
-    let root = runtime::credentials::backend_root(&choice).to_path_buf();
-    let store = act_credentials::backend::select(choice, &root)
-        .with_context(|| format!("opening credential store at {}", root.display()))?;
-    Ok(Some(Arc::new(runtime::credentials::CredentialHost::new(
-        Arc::from(store),
-        component_ref,
-    ))))
-}
-
-// ── Commands ─────────────────────────────────────────────────────────────────
-
-/// Parse a listen address: either `[host]:port` or just a port number.
 fn parse_listen_addr(s: &str) -> Result<SocketAddr> {
     // Try as full socket address first
     if let Ok(addr) = s.parse::<SocketAddr>() {
@@ -838,9 +752,9 @@ async fn cmd_run(
         };
         // MCP over HTTP: use MCP elicitation so the connected MCP client
         // can approve/deny capability requests.
-        let current_consent = Arc::new(runtime::elicit::CurrentConsentSink::new());
+        let current_consent = Arc::new(runtime::consent::CurrentConsentSink::new());
         let prompter: Arc<dyn act_policy::consent::ConsentPrompter> = Arc::new(
-            runtime::elicit::McpElicitationPrompter::new(current_consent.clone()),
+            rmcp_bridge::McpElicitationPrompter::new(current_consent.clone()),
         );
         // Still MCP wire protocol (rmcp_bridge), just carried over an HTTP
         // listener instead of stdio — audited as Mcp, not Http. A connected
@@ -873,9 +787,9 @@ async fn cmd_run(
         // MCP over stdio: use MCP elicitation so the connected MCP client
         // can approve/deny capability requests interactively — a real
         // prompt channel.
-        let current_consent = Arc::new(runtime::elicit::CurrentConsentSink::new());
+        let current_consent = Arc::new(runtime::consent::CurrentConsentSink::new());
         let prompter: Arc<dyn act_policy::consent::ConsentPrompter> = Arc::new(
-            runtime::elicit::McpElicitationPrompter::new(current_consent.clone()),
+            rmcp_bridge::McpElicitationPrompter::new(current_consent.clone()),
         );
         let pc = prepare_component_with_consent(
             &component,
@@ -953,25 +867,12 @@ async fn cmd_call(
         );
     }
 
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    let request = runtime::ComponentRequest::CallTool {
-        name: tool,
-        arguments: cbor_args,
-        metadata: metadata.into(),
-        reply: reply_tx,
-        // `act call` prompts on the TTY (or denies when headless), so the
-        // gate answers locally and never routes a question anywhere.
-        consent: None,
-    };
-
-    let send_result = pc.handle.send(request).await;
-    let call_result = match send_result {
-        Err(_) => Err(anyhow::anyhow!("component actor unavailable")),
-        Ok(()) => match reply_rx.await {
-            Err(_) => Err(anyhow::anyhow!("component actor dropped reply")),
-            Ok(r) => Ok(r),
-        },
-    };
+    // `act call` prompts on the TTY (or denies when headless), so the gate
+    // answers locally and never routes a question anywhere — hence no sink.
+    let call_result = pc
+        .handle
+        .call_tool(&tool, cbor_args, metadata.into(), None)
+        .await;
 
     // Best-effort close before returning the call result, so the
     // session is closed even if the call errored.
@@ -979,7 +880,7 @@ async fn cmd_call(
         close_session_best_effort(&pc, id).await;
     }
 
-    let result = call_result?.map_err(|e| match e {
+    let result = call_result.map_err(|e| match e {
         runtime::ComponentError::Tool(te) => {
             let ls = act_types::types::LocalizedString::from(&te.message);
             anyhow::anyhow!("{}: {}", te.kind, ls.any_text())
@@ -1047,26 +948,19 @@ async fn open_session_for_call(pc: &PreparedComponent, json: &str) -> Result<Str
         wit_args.push((key, bytes));
     }
 
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    pc.handle
-        .send(runtime::ComponentRequest::OpenSession {
-            args: wit_args,
-            metadata: pc.metadata.clone().into(),
-            reply: reply_tx,
-            // Startup-time session-of-1: no client is connected yet, so a gate
-            // firing here has nobody to ask and falls back to the local prompter.
-            consent: None,
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("component actor unavailable"))?;
+    // Startup-time session-of-1: no client is connected yet, so a gate firing
+    // here has nobody to ask and falls back to the local prompter.
+    let open = pc
+        .handle
+        .open_session(wit_args, pc.metadata.clone().into(), None);
 
     // Bounded, because a guest that never returns from `open-session` would
     // otherwise hang the host forever with nothing on stderr. `act run
     // --session-args` opens the session *before* it binds the listener, so an
     // unbounded wait there is indistinguishable from a port that never came
     // up — the caller sees connection refused and no reason for it.
-    let reply = match tokio::time::timeout(OPEN_SESSION_TIMEOUT, reply_rx).await {
-        Ok(r) => r?,
+    let reply = match tokio::time::timeout(OPEN_SESSION_TIMEOUT, open).await {
+        Ok(r) => r,
         Err(_) => anyhow::bail!(
             "open-session did not return within {}s. The component is still \
              inside its `open-session` export; nothing it depends on \
@@ -1091,21 +985,14 @@ async fn open_session_for_call(pc: &PreparedComponent, json: &str) -> Result<Str
 /// because the call result is what the user asked for and a failed
 /// close should not surface as the command's exit code.
 async fn close_session_best_effort(pc: &PreparedComponent, session_id: String) {
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    if pc
-        .handle
-        .send(runtime::ComponentRequest::CloseSession {
-            session_id: session_id.clone(),
-            reply: reply_tx,
-        })
-        .await
-        .is_err()
-    {
-        tracing::debug!(%session_id, "actor unavailable for close-session");
-        return;
-    }
-    if let Err(e) = reply_rx.await {
-        tracing::debug!(%session_id, error = %e, "close-session reply dropped");
+    match pc.handle.close_session(session_id.clone()).await {
+        Ok(()) => {}
+        Err(runtime::ComponentError::Internal(e)) => {
+            tracing::debug!(%session_id, error = %e, "close-session did not complete");
+        }
+        Err(runtime::ComponentError::Tool(te)) => {
+            tracing::debug!(%session_id, kind = %te.kind, "component refused close-session");
+        }
     }
 }
 
@@ -1121,15 +1008,11 @@ async fn cmd_session_open_args_schema(component: ComponentRef, opts: CommonOpts)
         crate::audit::Transport::Cli,
     )
     .await?;
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    pc.handle
-        .send(runtime::ComponentRequest::GetOpenSessionArgsSchema {
-            metadata: pc.metadata.clone().into(),
-            reply: reply_tx,
-        })
+    match pc
+        .handle
+        .open_session_args_schema(pc.metadata.clone().into())
         .await
-        .map_err(|_| anyhow::anyhow!("component actor unavailable"))?;
-    match reply_rx.await? {
+    {
         Ok(schema) => {
             // Pretty-print if it's valid JSON; otherwise print as-is.
             match serde_json::from_str::<serde_json::Value>(&schema) {
@@ -1184,16 +1067,7 @@ async fn cmd_inspect_tools(
     )
     .await?;
 
-    let (tools_tx, tools_rx) = tokio::sync::oneshot::channel();
-    pc.handle
-        .send(runtime::ComponentRequest::ListTools {
-            metadata: pc.metadata,
-            reply: tools_tx,
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("component actor unavailable"))?;
-
-    let response = match tools_rx.await? {
+    let response = match pc.handle.list_tools(&pc.metadata).await {
         Ok(list_response) => list_response,
         Err(runtime::ComponentError::Tool(te)) => {
             let ls = act_types::types::LocalizedString::from(&te.message);
@@ -1236,16 +1110,7 @@ async fn cmd_info(
         )
         .await?;
 
-        let (tools_tx, tools_rx) = tokio::sync::oneshot::channel();
-        pc.handle
-            .send(runtime::ComponentRequest::ListTools {
-                metadata: pc.metadata,
-                reply: tools_tx,
-            })
-            .await
-            .map_err(|_| anyhow::anyhow!("component actor unavailable"))?;
-
-        match tools_rx.await? {
+        match pc.handle.list_tools(&pc.metadata).await {
             Ok(list_response) => Some(list_response.tools),
             Err(runtime::ComponentError::Tool(te)) => {
                 let ls = act_types::types::LocalizedString::from(&te.message);
@@ -1463,34 +1328,6 @@ mod tests {
         assert_eq!(result, Some(serde_json::json!({"key": "value"})));
     }
 
-    /// The reader half of the profile-namespace fix. `act secret set` keys
-    /// the write on `resolve::profile_key`; if the runtime keyed the read on
-    /// the operator's literal spelling instead, `act secret set ./x.wasm`
-    /// followed by `act run x.wasm` would miss with a bare not-found. The
-    /// writer half is covered end-to-end in `tests/secret_cli.rs`.
-    ///
-    /// It passes `credential_host` exactly what `prepare_component_with_consent`
-    /// passes it — the `ComponentRef` itself — so the normalisation under test
-    /// is the one the runtime performs, not one the test performed for it.
-    #[test]
-    fn the_runtime_reads_the_profile_the_writer_wrote() {
-        let dir = tempfile::tempdir().unwrap();
-        let backend = format!("file:{}", dir.path().display());
-        let cwd = std::env::current_dir().unwrap();
-
-        for spelling in ["./x.wasm", "x.wasm"] {
-            let component: ComponentRef = spelling.parse().unwrap();
-            let host = credential_host(&component, Some(&backend))
-                .unwrap()
-                .expect("an explicitly named backend always yields a host");
-            assert_eq!(
-                host.component(),
-                cwd.join("x.wasm").display().to_string(),
-                "{spelling} must reach the same profile as every other spelling"
-            );
-        }
-    }
-
     #[test]
     fn parse_cli_metadata_kv_values_are_strings() {
         // Bare `k=v` values are always strings; use --metadata-json for typed values.
@@ -1612,45 +1449,5 @@ mod tests {
         let json = serde_json::json!("not an object");
         let meta = runtime::Metadata::from(json.clone());
         assert!(meta.is_empty());
-    }
-
-    #[test]
-    fn fmt_filter_excludes_audit_and_guest_targets() {
-        // Pins the fmt layer's filter behaviour without touching the real
-        // subscriber or stderr: a capturing layer records every target that
-        // makes it through `fmt_filter`, and only the ordinary one should.
-        use std::sync::{Arc, Mutex};
-        use tracing_subscriber::layer::{Context, Layer};
-        use tracing_subscriber::prelude::*;
-        use tracing_subscriber::registry::LookupSpan;
-
-        #[derive(Clone, Default)]
-        struct Capture(Arc<Mutex<Vec<String>>>);
-
-        impl<S> Layer<S> for Capture
-        where
-            S: tracing::Subscriber + for<'a> LookupSpan<'a>,
-        {
-            fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
-                self.0
-                    .lock()
-                    .unwrap()
-                    .push(event.metadata().target().to_string());
-            }
-        }
-
-        let cap = Capture::default();
-        let sink = cap.clone();
-        let env_filter: tracing_subscriber::EnvFilter = "act=info".parse().unwrap();
-        let sub = tracing_subscriber::registry().with(cap.with_filter(fmt_filter(env_filter)));
-
-        tracing::subscriber::with_default(sub, || {
-            tracing::info!(target: crate::audit::TARGET_AUDIT, "audit event");
-            tracing::info!(target: crate::audit::TARGET_GUEST, "guest event");
-            tracing::info!(target: "act::runtime", "ordinary event");
-        });
-
-        let got = sink.0.lock().unwrap().clone();
-        assert_eq!(got, vec!["act::runtime".to_string()]);
     }
 }

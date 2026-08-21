@@ -1,0 +1,43 @@
+[package]
+name = "act-runtime"
+version.workspace = true
+edition.workspace = true
+description = "Embeddable wasmtime host for ACT (Agent Component Tools) components"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords = ["act", "wasm", "component-model", "runtime", "sandbox"]
+categories = ["wasm", "development-tools"]
+include = ["src/**", "wit/**"]
+
+[dependencies]
+act-types.workspace = true
+act-store = { version = "0.11.1", path = "../act-store" }
+act-policy = { version = "0.11.1", path = "../act-policy" }
+act-credentials = { version = "0.11.1", path = "../act-credentials" }
+wasmparser.workspace = true
+wasmtime = "47"
+wasmtime-wasi = { version = "47", default-features = false, features = ["p2", "p3"] }
+wasmtime-wasi-http = { version = "47", default-features = false, features = ["p2", "p3"] }
+anyhow.workspace = true
+async-trait = "0.1"
+bytes = "1"
+ciborium.workspace = true
+dirs.workspace = true
+futures-util = "0.3"
+http.workspace = true
+http-body-util = "0.1"
+hyper = "1"
+path-clean = "1"
+reqwest.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+shellexpand = "3"
+tokio = { workspace = true, features = ["full"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+toml.workspace = true

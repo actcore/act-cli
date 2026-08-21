@@ -41,6 +41,7 @@ version = "0.11.1"
 dependencies = [
  "act-credentials",
  "act-policy",
+ "act-runtime",
  "act-store",
  "act-types",
  "anyhow",
@@ -124,6 +125,39 @@ dependencies = [
  "serde",
  "serde_json",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "act-runtime"
+version = "0.11.1"
+dependencies = [
+ "act-credentials",
+ "act-policy",
+ "act-store",
+ "act-types",
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "ciborium",
+ "dirs",
+ "futures-util",
+ "http",
+ "http-body-util",
+ "hyper",
+ "path-clean",
+ "reqwest",
+ "serde_json",
+ "sha2 0.11.0",
+ "shellexpand",
+ "tempfile",
+ "tokio",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+ "wasmparser",
+ "wasmtime",
+ "wasmtime-wasi",
+ "wasmtime-wasi-http",
 ]
 
 [[package]]

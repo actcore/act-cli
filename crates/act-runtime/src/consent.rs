@@ -1,9 +1,72 @@
-//! Interactive consent: prompt-on-access for `ask`-mode capabilities,
-//! with a per-session decision cache and fail-safe (no channel = deny).
+//! Interactive consent: the question a capability gate asks a human, and the
+//! channel it travels on.
+//!
+//! The prompters themselves are not here. Which channel a host reaches a
+//! human on — a terminal, an MCP client's elicitation, a GUI dialog — is a
+//! property of the host, not of the runtime, and binding one in would drag
+//! that host's transport into every embedder.
+//!
+//! # Why consent asks travel backwards
+//!
+//! From protocol revision `2026-07-28` a server→client request must be
+//! *associated* with an in-flight client request (SEP-2260). rmcp enforces this
+//! with a tokio task-local (`ORIGINATING_REQUEST`) that it installs around the
+//! `ServerHandler` future — and that task-local, by construction, does not
+//! survive a `tokio::spawn`.
+//!
+//! ACT executes guests on the component actor task, which is spawned once at
+//! startup, so a capability gate firing mid-execution is never inside that
+//! scope. Calling the peer from there yields `invalid_request`, which the
+//! fail-safe mapping turns into a silent deny of every `ask` capability.
+//!
+//! So the elicitation is inverted: the gate does not talk to the peer. It hands
+//! a [`ConsentRequest`] to the MCP request handler over a channel and waits for
+//! the answer. The handler is already awaiting the actor's reply, so it services
+//! the ask on its own task — inside the scope — and sends the decision back.
+//!
+//! Clients that do not support elicitation still degrade ask→deny.
 
-use act_policy::consent::{ConsentAsk, ConsentPrompter};
+use act_policy::consent::ConsentAsk;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::audit::render::escape_audit_field;
+
+/// A consent question travelling from the component actor task to the MCP
+/// request handler task, with the channel to answer it on.
+pub struct ConsentRequest {
+    pub message: String,
+    pub reply: oneshot::Sender<bool>,
+}
+
+/// Handler-side sender, carried on `ComponentRequest::CallTool`. Each in-flight
+/// call gets its own, so an ask always reaches the handler whose request caused
+/// it — no correlation id needed.
+pub type ConsentSink = mpsc::Sender<ConsentRequest>;
+
+/// Slot holding the sink of the call the actor is currently executing.
+///
+/// Written by the actor, which processes requests strictly one at a time, so
+/// the slot always names the in-flight call. Read by the host's consent
+/// prompter, which runs inside that execution.
+#[derive(Default)]
+pub struct CurrentConsentSink {
+    inner: std::sync::Mutex<Option<ConsentSink>>,
+}
+
+impl CurrentConsentSink {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Install the sink for the call about to execute (actor only).
+    pub fn set(&self, sink: Option<ConsentSink>) {
+        *self.inner.lock().unwrap() = sink;
+    }
+
+    pub fn get(&self) -> Option<ConsentSink> {
+        self.inner.lock().unwrap().clone()
+    }
+}
 
 /// Render one consent question as the single line a human answers.
 ///
@@ -14,9 +77,8 @@ use crate::audit::render::escape_audit_field;
 /// `"\nACT consent: … Allow? [y/N] "` paints a second prompt line and the
 /// human answers the component's question instead of the host's.
 ///
-/// Shared by both prompters — the TTY one below and the MCP elicitation one
-/// in `runtime::elicit` — so the guarantee cannot hold on one channel and not
-/// the other, and so a capability class added later inherits it without
+/// Shared by every prompter a host installs, so the guarantee cannot hold on
+/// one channel and not another, and so a capability class added later inherits it without
 /// having to know it exists.
 pub fn consent_line(ask: &ConsentAsk) -> String {
     format!(
@@ -25,29 +87,6 @@ pub fn consent_line(ask: &ConsentAsk) -> String {
         escape_audit_field(&ask.summary),
         escape_audit_field(&ask.key),
     )
-}
-
-/// Prompts on the controlling terminal. Reads a line from stdin; `y`/`yes`
-/// (case-insensitive) allows, anything else (incl. EOF) denies.
-pub struct TtyPrompter;
-
-#[async_trait::async_trait]
-impl ConsentPrompter for TtyPrompter {
-    async fn decide(&self, ask: &ConsentAsk) -> bool {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-        let mut stderr = tokio::io::stderr();
-        let prompt = format!("\n{}\nAllow? [y/N] ", consent_line(ask));
-        if stderr.write_all(prompt.as_bytes()).await.is_err() {
-            return false;
-        }
-        let _ = stderr.flush().await;
-        let mut line = String::new();
-        let mut reader = BufReader::new(tokio::io::stdin());
-        match reader.read_line(&mut line).await {
-            Ok(0) | Err(_) => false,
-            Ok(_) => matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"),
-        }
-    }
 }
 
 #[cfg(test)]

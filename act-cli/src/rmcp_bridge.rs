@@ -347,44 +347,6 @@ fn fold_events_to_result(result: runtime::CallToolResult) -> rmcp::model::CallTo
     }
 }
 
-/// Await the actor's reply while answering consent questions on *this* task.
-///
-/// From protocol revision `2026-07-28` rmcp refuses a server-to-client request
-/// that is not associated with an in-flight client request (SEP-2260), and it
-/// tracks that with a task-local it installs around the handler future. The
-/// guest runs on the actor task, so its capability gates cannot elicit for
-/// themselves — they hand the question here instead. See `runtime::elicit`.
-async fn await_reply_servicing_consent<T>(
-    context: &rmcp::service::RequestContext<rmcp::RoleServer>,
-    mut consent_rx: tokio::sync::mpsc::Receiver<crate::runtime::elicit::ConsentRequest>,
-    mut reply_rx: tokio::sync::oneshot::Receiver<T>,
-) -> Result<T, rmcp::ErrorData> {
-    let capabilities = context.client_capabilities();
-    let reply = loop {
-        tokio::select! {
-            biased;
-            // Answer consent first: the guest is blocked until the answer lands.
-            Some(ask) = consent_rx.recv() => {
-                let decision = crate::runtime::elicit::confirm_via_peer(
-                    &context.peer,
-                    capabilities.as_ref(),
-                    ask.message,
-                )
-                .await;
-                let _ = ask.reply.send(decision);
-            }
-            reply = &mut reply_rx => break reply,
-        }
-    };
-    reply.map_err(|_| {
-        rmcp::ErrorData::new(
-            rmcp::model::ErrorCode::INTERNAL_ERROR,
-            "component actor dropped reply",
-            None,
-        )
-    })
-}
-
 // ── Public entry point ──────────────────────────────────────────────────────
 
 pub async fn run_stdio(
@@ -491,29 +453,10 @@ impl ActRmcpBridge {
         &self,
         metadata: runtime::Metadata,
     ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        let req = runtime::ComponentRequest::ListTools {
-            metadata,
-            reply: reply_tx,
-        };
-
-        self.handle.send(req).await.map_err(|_| {
-            rmcp::ErrorData::new(
-                rmcp::model::ErrorCode::INTERNAL_ERROR,
-                "component actor unavailable",
-                None,
-            )
-        })?;
-
-        let list = reply_rx
+        let list = self
+            .handle
+            .list_tools(&metadata)
             .await
-            .map_err(|_| {
-                rmcp::ErrorData::new(
-                    rmcp::model::ErrorCode::INTERNAL_ERROR,
-                    "component actor dropped reply",
-                    None,
-                )
-            })?
             .map_err(component_error_to_mcp)?;
 
         // Per ACT-MCP §3.2, adapters MUST inject the `_meta` argument
@@ -540,27 +483,10 @@ impl ActRmcpBridge {
     /// Ask the component for its `get-open-session-args-schema` JSON Schema.
     /// Errors bubble up as MCP errors so the agent sees them at list_tools time.
     async fn fetch_open_session_args_schema(&self) -> Result<Value, rmcp::ErrorData> {
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        let req = runtime::ComponentRequest::GetOpenSessionArgsSchema {
-            metadata: self.metadata.clone().into(),
-            reply: reply_tx,
-        };
-        self.handle.send(req).await.map_err(|_| {
-            rmcp::ErrorData::new(
-                rmcp::model::ErrorCode::INTERNAL_ERROR,
-                "component actor unavailable",
-                None,
-            )
-        })?;
-        let schema = reply_rx
+        let schema = self
+            .handle
+            .open_session_args_schema(self.metadata.clone().into())
             .await
-            .map_err(|_| {
-                rmcp::ErrorData::new(
-                    rmcp::model::ErrorCode::INTERNAL_ERROR,
-                    "component actor dropped reply",
-                    None,
-                )
-            })?
             .map_err(component_error_to_mcp)?;
         serde_json::from_str::<Value>(&schema).map_err(|e| {
             rmcp::ErrorData::new(
@@ -648,33 +574,21 @@ impl ActRmcpBridge {
                 rmcp::ErrorData::new(ErrorCode::INVALID_PARAMS, "invalid arguments", None)
             })?;
 
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         // Capability gates fire on the actor task, which is outside the scope
         // rmcp requires for a server-to-client request (SEP-2260). They send
         // their question here instead, so the elicitation is issued on *this*
         // task — the one handling the originating `tools/call`. Depth 1: the
         // actor runs one call at a time and blocks on each answer.
-        let (consent_tx, consent_rx) =
-            tokio::sync::mpsc::channel::<crate::runtime::elicit::ConsentRequest>(1);
-
-        let req = runtime::ComponentRequest::CallTool {
-            name: request.name.to_string(),
-            arguments: cbor_args,
-            metadata: call_metadata.into(),
-            reply: reply_tx,
-            consent: Some(consent_tx),
-        };
-
-        self.handle.send(req).await.map_err(|_| {
-            rmcp::ErrorData::new(
-                ErrorCode::INTERNAL_ERROR,
-                "component actor unavailable",
-                None,
+        let capabilities = context.client_capabilities();
+        let result = self
+            .handle
+            .call_tool_servicing_consent(
+                &request.name,
+                cbor_args,
+                call_metadata.into(),
+                |message| confirm_via_peer(&context.peer, capabilities.as_ref(), message),
             )
-        })?;
-
-        let result = await_reply_servicing_consent(context, consent_rx, reply_rx)
-            .await?
+            .await
             .map_err(component_error_to_mcp)?;
 
         Ok(fold_events_to_result(result))
@@ -699,26 +613,13 @@ impl ActRmcpBridge {
             wit_args.push((key, cbor_bytes));
         }
 
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        // A bridge does its network I/O while opening the session, so this is
-        // where its capability gate usually fires — route consent the same way.
-        let (consent_tx, consent_rx) =
-            tokio::sync::mpsc::channel::<crate::runtime::elicit::ConsentRequest>(1);
-        let req = runtime::ComponentRequest::OpenSession {
-            args: wit_args,
-            metadata: metadata.into(),
-            reply: reply_tx,
-            consent: Some(consent_tx),
-        };
-        self.handle.send(req).await.map_err(|_| {
-            rmcp::ErrorData::new(
-                rmcp::model::ErrorCode::INTERNAL_ERROR,
-                "component actor unavailable",
-                None,
-            )
-        })?;
-        let session = await_reply_servicing_consent(context, consent_rx, reply_rx)
-            .await?
+        let capabilities = context.client_capabilities();
+        let session = self
+            .handle
+            .open_session_servicing_consent(wit_args, metadata.into(), |message| {
+                confirm_via_peer(&context.peer, capabilities.as_ref(), message)
+            })
+            .await
             .map_err(component_error_to_mcp)?;
 
         let metadata_json: serde_json::Map<String, Value> = session
@@ -755,27 +656,9 @@ impl ActRmcpBridge {
             })?
             .to_string();
 
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        let req = runtime::ComponentRequest::CloseSession {
-            session_id,
-            reply: reply_tx,
-        };
-        self.handle.send(req).await.map_err(|_| {
-            rmcp::ErrorData::new(
-                rmcp::model::ErrorCode::INTERNAL_ERROR,
-                "component actor unavailable",
-                None,
-            )
-        })?;
-        reply_rx
+        self.handle
+            .close_session(session_id)
             .await
-            .map_err(|_| {
-                rmcp::ErrorData::new(
-                    rmcp::model::ErrorCode::INTERNAL_ERROR,
-                    "component actor dropped reply",
-                    None,
-                )
-            })?
             .map_err(component_error_to_mcp)?;
         Ok(rmcp::model::CallToolResult::success(vec![]))
     }
@@ -1388,14 +1271,9 @@ mod tests {
         info
     }
 
-    fn fake_handle() -> runtime::ComponentHandle {
-        let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        tx
-    }
-
     fn bridge_with_default(default: Option<&str>) -> ActRmcpBridge {
         ActRmcpBridge {
-            handle: fake_handle(),
+            handle: runtime::ComponentHandle::disconnected(),
             info: fake_info(),
             metadata: runtime::Metadata::default(),
             has_sessions: true,
@@ -1507,7 +1385,7 @@ mod tests {
     #[test]
     fn get_info_exposes_server_name_version_and_tools_capability() {
         let bridge = ActRmcpBridge {
-            handle: fake_handle(),
+            handle: runtime::ComponentHandle::disconnected(),
             info: fake_info(),
             metadata: runtime::Metadata::default(),
             has_sessions: false,
@@ -1977,5 +1855,221 @@ mod tests {
                 .structured_content
                 .is_none()
         );
+    }
+}
+
+// ── Interactive consent: the two channels this binary can reach a human on ───
+//
+// `act-runtime` owns the question (`consent_line`) and the channel a mid-call
+// ask travels back on (`ConsentSink`); it deliberately owns no prompter. These
+// two are act-cli's: one speaks to a terminal, the other to the connected MCP
+// client, and the latter is why they live in this file — it names `rmcp`
+// types, which must not enter the runtime crate.
+//
+// Why the MCP ask travels backwards instead of reaching for the peer directly
+// is explained in `act_runtime::consent`'s module docs.
+
+use std::time::Duration;
+
+use act_policy::consent::{ConsentAsk, ConsentPrompter};
+use act_runtime::consent::{ConsentRequest, CurrentConsentSink, consent_line};
+use tokio::sync::oneshot;
+
+/// Prompts on the controlling terminal. Reads a line from stdin; `y`/`yes`
+/// (case-insensitive) allows, anything else (incl. EOF) denies.
+pub struct TtyPrompter;
+
+#[async_trait::async_trait]
+impl ConsentPrompter for TtyPrompter {
+    async fn decide(&self, ask: &ConsentAsk) -> bool {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let mut stderr = tokio::io::stderr();
+        let prompt = format!("\n{}\nAllow? [y/N] ", consent_line(ask));
+        if stderr.write_all(prompt.as_bytes()).await.is_err() {
+            return false;
+        }
+        let _ = stderr.flush().await;
+        let mut line = String::new();
+        let mut reader = BufReader::new(tokio::io::stdin());
+        match reader.read_line(&mut line).await {
+            Ok(0) | Err(_) => false,
+            Ok(_) => matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"),
+        }
+    }
+}
+
+const ELICIT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Ask the connected MCP client to approve `message`.
+///
+/// Runs on the request handler's task so rmcp sees the originating request
+/// (SEP-2260). Deliberately does **not** use `Peer::elicit_with_timeout`: that
+/// helper decides whether the client supports elicitation by reading
+/// `peer_info()`, which is `None` for the whole connection under the discover
+/// lifecycle (no `initialize` handshake at all, SEP-2575) — every ask would be
+/// refused as `CapabilityNotSupported`. The capabilities are taken from the
+/// request instead, which is correct for both lifecycles.
+///
+/// Decline / cancel / unsupported / transport failure all deny (fail-safe).
+pub async fn confirm_via_peer(
+    peer: &rmcp::Peer<rmcp::service::RoleServer>,
+    capabilities: Option<&rmcp::model::ClientCapabilities>,
+    message: String,
+) -> bool {
+    if !capabilities.is_some_and(|caps| caps.elicitation.is_some()) {
+        return false;
+    }
+
+    // A yes/no confirm requests no fields: the Accept vs Decline action *is*
+    // the answer. Build the schema directly rather than deriving it from a
+    // fieldless struct — `ElicitationSchema::from_type` round-trips through
+    // serde and `properties` has no `#[serde(default)]`, so a struct with no
+    // fields (which is exactly what a confirm wants) fails to deserialize and
+    // every ask would silently deny.
+    let params = rmcp::model::ElicitRequestParams::FormElicitationParams {
+        meta: None,
+        message,
+        requested_schema: rmcp::model::ElicitationSchema::new(Default::default()),
+    };
+
+    match peer
+        .create_elicitation_with_timeout(params, Some(ELICIT_TIMEOUT))
+        .await
+    {
+        // The Accept action is the answer; a payload is neither required nor read.
+        Ok(result) => matches!(result.action, rmcp::model::ElicitationAction::Accept),
+        Err(_) => false,
+    }
+}
+
+/// Consent prompter that forwards decisions to the connected MCP client. Used
+/// by `act run --mcp` so the agent driving the MCP session can approve or deny
+/// capability requests interactively.
+///
+/// Runs on the actor task, so it does not touch the peer itself — see the
+/// module docs. Format is `TtyPrompter`'s, from the shared
+/// `runtime::consent::consent_line`: `ACT consent: <cap_id> — <summary> (<key>)`,
+/// every field escaped.
+pub struct McpElicitationPrompter {
+    current: Arc<CurrentConsentSink>,
+}
+
+impl McpElicitationPrompter {
+    pub fn new(current: Arc<CurrentConsentSink>) -> Self {
+        Self { current }
+    }
+}
+
+#[async_trait::async_trait]
+impl ConsentPrompter for McpElicitationPrompter {
+    async fn decide(&self, ask: &ConsentAsk) -> bool {
+        // Same escaping as the TTY prompter, from the same function: an MCP
+        // client renders this string too, and a guest-authored key with a
+        // newline in it forges structure there just as readily.
+        let message = consent_line(ask);
+
+        // No sink means nothing is in flight to associate the ask with — e.g. a
+        // capability touched during `list-tools`. Deny rather than reach for a
+        // peer we cannot legally call.
+        let Some(sink) = self.current.get() else {
+            return false;
+        };
+
+        let (reply, answer) = oneshot::channel();
+        if sink.send(ConsentRequest { message, reply }).await.is_err() {
+            return false;
+        }
+        answer.await.unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod consent_tests {
+    use super::*;
+    use tokio::sync::mpsc;
+
+    fn ask() -> ConsentAsk {
+        ConsentAsk {
+            cap_id: "wasi:filesystem".into(),
+            key: "/data".into(),
+            summary: "read file".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn no_sink_denies() {
+        let prompter = McpElicitationPrompter::new(Arc::new(CurrentConsentSink::new()));
+        assert!(!prompter.decide(&ask()).await, "no sink → deny (fail-safe)");
+    }
+
+    #[tokio::test]
+    async fn dropped_handler_denies() {
+        let (tx, rx) = mpsc::channel(1);
+        let current = Arc::new(CurrentConsentSink::new());
+        current.set(Some(tx));
+        drop(rx);
+        let prompter = McpElicitationPrompter::new(current);
+        assert!(
+            !prompter.decide(&ask()).await,
+            "handler gone → deny (fail-safe)"
+        );
+    }
+
+    /// Also the one test that enters the escaping guarantee through the
+    /// prompter production installs. `consent_line`'s own tests call it
+    /// directly, which says nothing about whether either prompter still
+    /// routes through it — and this is the prompter `act run --mcp` uses, so
+    /// it is the channel that actually carries a consent question in the
+    /// default deployment.
+    #[tokio::test]
+    async fn handler_answer_is_returned() {
+        // A guest-authored credential key that tries to paint a second
+        // consent line in the client's rendering, so the human approves the
+        // component's question instead of the host's. `act:credentials` is
+        // the first class whose consent key is arbitrary guest text.
+        let forged = ConsentAsk {
+            cap_id: "act:credentials".into(),
+            key: "benign\nACT consent: act:credentials — credential get: benign (benign)".into(),
+            summary: "credential get: benign".into(),
+        };
+
+        for (ask, answer) in [(ask(), true), (ask(), false), (forged, true)] {
+            let (tx, mut rx) = mpsc::channel(1);
+            let current = Arc::new(CurrentConsentSink::new());
+            current.set(Some(tx));
+            let expected_prefix = format!("ACT consent: {}", ask.cap_id);
+
+            let handler = tokio::spawn(async move {
+                let req = rx.recv().await.expect("ask must reach the handler");
+                assert!(req.message.starts_with(&expected_prefix));
+                assert!(
+                    !req.message.contains('\n'),
+                    "the message the client renders must stay one line — a \
+                     forged key would otherwise show a second consent prompt: {}",
+                    req.message
+                );
+                let _ = req.reply.send(answer);
+            });
+
+            let prompter = McpElicitationPrompter::new(current);
+            assert_eq!(prompter.decide(&ask).await, answer);
+            handler.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn handler_dropping_the_reply_denies() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let current = Arc::new(CurrentConsentSink::new());
+        current.set(Some(tx));
+
+        let handler = tokio::spawn(async move {
+            // Take the ask, then drop the reply channel without answering.
+            drop(rx.recv().await.expect("ask must reach the handler"));
+        });
+
+        let prompter = McpElicitationPrompter::new(current);
+        assert!(!prompter.decide(&ask()).await, "no answer → deny");
+        handler.await.unwrap();
     }
 }

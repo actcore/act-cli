@@ -60,8 +60,13 @@ pub mod attr {
 }
 
 /// Which transport dispatched the call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `#[non_exhaustive]`: hosts embedding this crate serve over transports the
+/// CLI has no name for, and adding one for them must not be a breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Transport {
+    #[default]
     Cli,
     Mcp,
 }

@@ -32,7 +32,7 @@ use wasmtime_wasi_http::p2::body::HyperIncomingBody;
 use wasmtime_wasi_http::p3::bindings::http::types::ErrorCode as P3ErrorCode;
 
 use crate::audit::{CapDecisionRecord, Decision4, emit_cap_decision};
-use crate::config::{HttpConfig, PolicyMode};
+use act_policy::grant::{HttpConfig, PolicyMode};
 use act_policy::net::{self as network, NetworkRule};
 
 /// reqwest DNS resolver that filters resolved addresses against both deny
@@ -550,7 +550,7 @@ async fn reqwest_response_to_p3(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::HttpConfig;
+    use act_policy::grant::HttpConfig;
     use http::Method;
     use http_body_util::combinators::UnsyncBoxBody;
     use http_body_util::{BodyExt, Empty};
@@ -676,7 +676,7 @@ mod tests {
             .unwrap();
 
         let cfg = HttpConfig {
-            mode: crate::config::PolicyMode::Open,
+            mode: act_policy::grant::PolicyMode::Open,
             ..Default::default()
         };
         let client = ActHttpClient::new(cfg).expect("client builds");

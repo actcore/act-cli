@@ -10,7 +10,7 @@ keywords = ["act", "wasm", "component-model", "mcp", "agent"]
 categories = ["command-line-utilities", "wasm"]
 
 readme.workspace = true
-include = ["src/**", "wit/**", "build.rs"]
+include = ["src/**", "build.rs"]
 
 [build-dependencies]
 embed-manifest = "1.5"
@@ -64,6 +64,7 @@ path-clean = "1"
 owo-colors = { version = "4.3.0", features = ["supports-colors"] }
 act-store = { version = "0.11.1", path = "../crates/act-store" }
 act-policy = { version = "0.11.1", path = "../crates/act-policy" }
+act-runtime = { version = "0.11.1", path = "../crates/act-runtime" }
 act-credentials = { version = "0.11.1", path = "../crates/act-credentials" }
 async-trait = "0.1"
 bytesize = "2.3.1"

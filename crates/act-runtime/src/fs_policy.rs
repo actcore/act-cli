@@ -41,10 +41,10 @@ use wasmtime_wasi::p2::{DynInputStream, DynOutputStream, FsError, FsResult};
 
 use act_types::{Capabilities, MountType};
 
-use crate::config::PolicyMode;
 use act_policy::Decision;
 use act_policy::consent::{ConsentAsk, ConsentPrompter, DecisionCache};
 use act_policy::fs_matcher::FsAccess;
+use act_policy::grant::PolicyMode;
 use act_policy::provider::{CompiledCeiling, ResourceOp};
 
 use crate::audit::{CapDecisionRecord, Decision4, emit_cap_decision};
@@ -766,7 +766,7 @@ impl HostDirectoryEntryStream for PolicyFilesystemCtxView<'_> {
 #[cfg(test)]
 mod mount_tests {
     use super::*;
-    use crate::config::PolicyMode;
+    use act_policy::grant::PolicyMode;
     use act_types::{Capabilities, CapabilityRequest, MountType};
     use std::collections::BTreeMap;
 
