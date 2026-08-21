@@ -49,7 +49,7 @@ pub enum HostError {
 /// `serde_json`'s message, and serde's `invalid type` text embeds the offending
 /// JSON scalar — so forwarding the detail hands stored credential material to
 /// the guest, which puts it in a tool result. Externally-materialised store
-/// files are a first-class source (spec §5.6), and the pipelines that render
+/// files are a first-class source (design §5.6), and the pipelines that render
 /// them emit JSON numbers without being asked, so a numeric PIN or account id
 /// is exactly the shape that reaches this path. The detail goes to the host's
 /// log at `warn`, where the operator can see it and the agent cannot.
@@ -83,8 +83,8 @@ impl CredentialHost {
 
     /// The component reference this host serves — `resolve::profile_key` of
     /// the reference the operator wrote, not the literal spelling. It is the
-    /// profile namespace — the boundary the whole design rests on (spec
-    /// §2.1) — and it is what a consent prompt must name (spec §5.5).
+    /// profile namespace — the boundary the whole design rests on (design
+    /// §2.1) — and it is what a consent prompt must name (design §5.5).
     pub fn component(&self) -> &str {
         &self.component
     }
@@ -111,11 +111,11 @@ impl CredentialHost {
     }
 
     /// A hit returns the projection only. The host-only compartment — refresh
-    /// tokens, issuer binding — never crosses the boundary (spec D4).
+    /// tokens, issuer binding — never crosses the boundary (design D4).
     ///
     /// The caller must have resolved the `act:credentials` capability decision
     /// *before* getting here: a denial must not depend on whether the key
-    /// exists, or `denied` becomes a probing channel (spec §3.4).
+    /// exists, or `denied` becomes a probing channel (design §3.4).
     pub fn get_secret(&self, session: &str, key: &str) -> Result<Secret, HostError> {
         if !self.live(session) {
             return Err(HostError::InvalidSession);
@@ -141,7 +141,7 @@ impl CredentialHost {
     }
 
     /// Metadata only — no value can reach this path, because `SecretInfo` has
-    /// no field that could hold one. Deliberately unaudited (spec §9): a
+    /// no field that could hold one. Deliberately unaudited (design §9): a
     /// listing hands over nothing, and recording it would bury the issue
     /// records that matter.
     pub fn list_secrets(&self, session: Option<&str>) -> Result<Vec<SecretInfo>, HostError> {
@@ -257,7 +257,7 @@ impl GateContext {
     /// operator through the shared prompter and per-run cache.
     ///
     /// Runs *before* the store is touched, so a refusal never depends on
-    /// whether the key exists (spec §3.4).
+    /// whether the key exists (design §3.4).
     async fn allows(&self, key: &str, action: &str, hint: Option<&str>) -> bool {
         let component = self.host.as_ref().map(|h| h.component().to_string());
         use crate::audit::{CapDecisionRecord, Decision4, emit_cap_decision};
@@ -319,7 +319,7 @@ const HINT_LIMIT: usize = 120;
 
 /// Build the one line a human is asked to approve.
 ///
-/// Everything but the hint is host-derived (spec §5.5: "a descriptor signals
+/// Everything but the hint is host-derived (design §5.5: "a descriptor signals
 /// that something is needed; it never instructs the host where to go, what to
 /// run, or what to say"). `component` leads, because §5.5 requires the
 /// component reference be displayed prominently: the whole question is
@@ -387,7 +387,7 @@ fn sanitize_hint(hint: &str) -> String {
 /// A field that is neither a string nor an object is refused rather than
 /// encoded: it is not a shape the design promises the guest, and it is
 /// exactly the case `STORE_UNREADABLE` documents — an externally-materialised
-/// store file (spec §5.6) can hold a bare JSON number — so it is reported the
+/// store file (design §5.6) can hold a bare JSON number — so it is reported the
 /// same way, not turned into CBOR the guest has no reason to expect.
 fn to_wit_secret(secret: Secret) -> Result<store::Secret, HostError> {
     let mut fields = Vec::with_capacity(secret.fields.len());
@@ -448,7 +448,7 @@ async fn serve_list(
 /// free function.
 ///
 /// The order is load-bearing: the gate resolves *before* the store is touched,
-/// so a refusal cannot depend on whether the key exists (spec §3.4 — otherwise
+/// so a refusal cannot depend on whether the key exists (design §3.4 — otherwise
 /// `denied` becomes a probing channel).
 async fn serve_get(
     ctx: &GateContext,
@@ -461,8 +461,9 @@ async fn serve_get(
     let Some(host) = &ctx.host else {
         return Err(store::SecretError::Unavailable(NO_STORE.into()));
     };
-    // `want.kind` is a provisioning hint, not a retrieval filter (spec
-    // §3.4): the component inspects `secret.kind` and decides for itself.
+    // `want.kind` is not consulted, and there is nothing it could select
+    // between: retrieval is never filtered by shape (ACT-AUTH §1.1.6). The
+    // component reads the fields it knows by name.
     let secret = host
         .get_secret(session, &want.key)
         .map_err(|e| e.to_wit())?;
@@ -557,9 +558,6 @@ mod tests {
         }
         fn components(&self) -> Result<Vec<String>, StoreError> {
             self.inner.components()
-        }
-        fn writable(&self) -> bool {
-            self.inner.writable()
         }
     }
 
@@ -660,7 +658,7 @@ mod tests {
                 store.gets.load(Ordering::SeqCst),
                 0,
                 "a refusal must not reach the store — otherwise `denied` timing \
-                 leaks whether the key exists (spec §3.4), mode {mode:?}"
+                 leaks whether the key exists (design §3.4), mode {mode:?}"
             );
         }
     }
@@ -964,7 +962,7 @@ mod tests {
 
     #[test]
     fn closing_one_session_does_not_close_another() {
-        // The bridges keep several sessions open at once (spec §8.2), so a
+        // The bridges keep several sessions open at once (design §8.2), so a
         // close must be keyed, not a flush.
         let dir = tempfile::tempdir().unwrap();
         let h = host(dir.path());
@@ -996,7 +994,7 @@ mod tests {
     #[test]
     fn a_listing_outside_any_session_is_allowed() {
         // `list-secrets` takes `option<string>` precisely so a component can
-        // inspect its profile before any session exists (spec §3.3).
+        // inspect its profile before any session exists (design §3.3).
         let dir = tempfile::tempdir().unwrap();
         let h = host(dir.path());
         assert_eq!(h.list_secrets(None).expect("listed").len(), 1);
@@ -1014,7 +1012,7 @@ mod tests {
 
     #[test]
     fn another_components_profile_is_not_visible() {
-        // The profile is the boundary (spec §2.1): the component name is
+        // The profile is the boundary (design §2.1): the component name is
         // fixed at construction and no argument can reach past it.
         let dir = tempfile::tempdir().unwrap();
         let h = host(dir.path());
@@ -1042,7 +1040,7 @@ mod tests {
 
     #[test]
     fn a_hint_cannot_forge_a_second_prompt_line() {
-        // The hint is guest-authored (spec §5.5) and lands in a prompt a
+        // The hint is guest-authored (design §5.5) and lands in a prompt a
         // human is about to answer.
         let s = consent_summary(
             Some("comp"),
@@ -1162,7 +1160,7 @@ mod tests {
     #[test]
     fn a_field_that_is_neither_string_nor_object_is_refused_not_encoded() {
         // A `std:string` field holding a bare number — the shape an external
-        // secret-materialiser writes without being asked (spec §5.6), and
+        // secret-materialiser writes without being asked (design §5.6), and
         // exactly the case `STORE_UNREADABLE` exists to name. The guard still
         // refuses it; only the object case above is new.
         let mut fields = BTreeMap::new();
@@ -1180,7 +1178,7 @@ mod tests {
     #[test]
     fn every_host_error_has_a_distinct_wit_variant() {
         // A collapse here would report a missing credential as a policy
-        // refusal, sending the user to fix the wrong thing (spec §3.4).
+        // refusal, sending the user to fix the wrong thing (design §3.4).
         assert!(matches!(
             HostError::NotFound.to_wit(),
             store::SecretError::NotFound

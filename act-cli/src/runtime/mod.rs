@@ -1165,7 +1165,7 @@ pub fn spawn_component_actor(
                                 .await;
                             // Untrack regardless of error. Credentials stop
                             // being served for this id at the same moment
-                            // (spec §3.3: "after close-session the host stops
+                            // (design §3.3: "after close-session the host stops
                             // serving that id") — a close that the component
                             // reported as failed still ends the session from
                             // the host's side, so the two must agree.

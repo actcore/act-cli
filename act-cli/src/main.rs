@@ -2,6 +2,7 @@ mod audit;
 mod config;
 mod format;
 mod login_cmd;
+mod oauth;
 mod resolve;
 mod rmcp_bridge;
 mod runtime;

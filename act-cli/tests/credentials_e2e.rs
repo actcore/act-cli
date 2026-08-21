@@ -492,13 +492,13 @@ async fn an_oauth2_field_reaches_the_guest_as_a_map() {
         &backend,
         &canary,
         PROBE_KEY,
-        &["--field", "std:token"],
+        &["--field", "acme:token=std:oauth2"],
         // A distinctive sentinel PER MEMBER. A rendered map renders every
         // member, so each is its own leak surface; a two-character token like
         // "at" would also match half the words in a log by accident.
-        r#"{"std:token": {"std:access-token": "oauth-token-sentinel-A",
-                          "std:expires-at": 1760000000,
-                          "std:scopes": ["scope-sentinel-B"]}}"#,
+        r#"{"acme:token": {"std:access-token": "oauth-token-sentinel-A",
+                           "std:expires-at": 1760000000,
+                           "std:scopes": ["scope-sentinel-B"]}}"#,
     );
 
     let out = call_over_mcp(
@@ -571,8 +571,8 @@ async fn listing_a_profile_returns_metadata_and_no_material() {
         &backend,
         &canary,
         "second",
-        &["--field", "std:username", "--field", "std:password"],
-        r#"{"std:username":"alex","std:password":"other-sekrit"}"#,
+        &["--field", "acme:username", "--field", "acme:password"],
+        r#"{"acme:username":"alex","acme:password":"other-sekrit"}"#,
     );
 
     let out = call_over_mcp(

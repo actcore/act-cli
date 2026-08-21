@@ -28,6 +28,12 @@ pub trait CredentialStore: Send + Sync {
     /// sees which key a `set` actually landed under. Component names, like
     /// `SecretInfo`, cannot carry a value.
     fn components(&self) -> Result<Vec<String>, StoreError>;
-    /// False for a mounted read-only secret; OAuth refresh needs this (spec §7.1).
-    fn writable(&self) -> bool;
 }
+
+// There is deliberately no `writable()`. It existed for the read-only reference
+// backends of design §7.1, which are an open question rather than a feature, and
+// nothing consulted it: `put` and `erase` never asked, so a backend answering
+// `false` would have been written to anyway. A trait method that every
+// implementor must write, that no caller reads, and that reads as a promise the
+// crate does not keep is worse than its absence. It comes back with the first
+// backend that can answer `false` — and with the check that honours it.

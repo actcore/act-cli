@@ -9,7 +9,7 @@ use crate::store::{CredentialStore, StoreError};
 
 /// Secrets in one JSON file next to the index. This is the only backend: the
 /// records are plaintext on disk, protected by filesystem permissions alone,
-/// and it is always selected explicitly (spec §7.4).
+/// and it is always selected explicitly (design §7.4).
 pub struct FileStore {
     root: PathBuf,
 }
@@ -99,9 +99,5 @@ impl CredentialStore for FileStore {
 
     fn components(&self) -> Result<Vec<String>, StoreError> {
         Ok(Index::load(&self.root)?.entries.into_keys().collect())
-    }
-
-    fn writable(&self) -> bool {
-        true
     }
 }

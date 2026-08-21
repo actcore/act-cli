@@ -85,7 +85,7 @@ impl Index {
 /// by an earlier build heals instead of staying loose forever. A directory
 /// widened on purpose for sharing is the attack above, not a use case this
 /// backend supports.
-pub(crate) fn create_dir_private(dir: &Path) -> Result<(), StoreError> {
+pub fn create_dir_private(dir: &Path) -> Result<(), StoreError> {
     std::fs::create_dir_all(dir)?;
     #[cfg(unix)]
     {
@@ -108,7 +108,7 @@ pub(crate) fn create_dir_private(dir: &Path) -> Result<(), StoreError> {
 /// leftover from a crash is removed first, but anything that reappears in
 /// between (a hostile pre-created file, a symlink pointed elsewhere) makes the
 /// open fail loudly instead of writing plaintext through someone else's inode.
-pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+pub fn write_private(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
     use std::io::Write;
 
     let dir = path.parent().unwrap_or_else(|| Path::new("."));

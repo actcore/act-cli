@@ -171,17 +171,24 @@ fn a_component_that_uses_no_credentials_is_told_so_first() {
     );
 }
 
+/// A `std:oauth2` field is never prompted for — and when its declaration names
+/// no resource, it cannot be acquired either.
+///
+/// The flow derives every address it contacts from the resource identifier
+/// (design §5.5), so a declaration without one describes a credential this host
+/// has no way to obtain. Refusing here, before a browser opens, is the whole
+/// difference between a clear error and a half-run flow.
+///
+/// This fixture is exactly that case. It used to prove the type was refused
+/// outright, which stopped being true when the flow landed.
 #[test]
-fn an_unsupported_field_type_is_named_not_prompted_for() {
-    // std:oauth2 arrives with the flow, which this release does not implement.
-    // Prompting for it as if it were a string would store a value the component
-    // cannot use, and the user would not learn why until much later.
+fn an_oauth2_field_without_a_resource_is_named_not_prompted_for() {
     let out = run_login(&["--key", "default"], "oauth-declaring-canary.wasm");
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err.contains("std:oauth2"),
-        "the error must name the type: {err}"
+        err.contains("std:oauth2") && err.contains("resource"),
+        "the error must name the type and what is missing: {err}"
     );
     // Not `!err.contains("Password")`: this fixture's label is "OAuth token", so
     // that assertion could never fire and passed vacuously. A prompt is only
@@ -334,5 +341,113 @@ fn an_empty_answer_on_a_required_field_is_refused() {
                 .unwrap()
                 .contains("acme:value"),
         "nothing may be left behind"
+    );
+}
+
+/// A component's description is shown while provisioning and never recorded.
+///
+/// Once in the store, a description is indistinguishable from words the operator
+/// typed with `--description`, and `list-secrets` hands it to the agent from
+/// there (ACT-AUTH §1.1.5). Prose a component wrote has to stay attributable to
+/// it (§5.5) — which it cannot be after a write that strips its origin.
+///
+/// The fixture declares `description = "API token"`, so that string is the
+/// oracle: it must appear on stderr, marked as the component's, and must not
+/// appear in what `act secret list` prints.
+#[test]
+fn the_components_description_is_shown_attributed_and_not_recorded() {
+    use std::io::Write;
+
+    let store = tempfile::tempdir().expect("temp store");
+    let backend = format!("file:{}", store.path().display());
+
+    let mut child = Command::new(act_binary_path())
+        .arg("login")
+        .arg(fixture("creds-declaring-canary.wasm"))
+        .args(["--key", "default"])
+        .args(["--description", "operators-own-words"])
+        .args(["--credentials-backend", &backend])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn act login");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin was piped")
+        .write_all(b"typed-secret\n")
+        .expect("write the answer");
+    let out = child.wait_with_output().expect("act login");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("API token"),
+        "the component's description must be shown: {stderr}"
+    );
+    assert!(
+        stderr.contains("That component describes it as"),
+        "and marked as the component's words: {stderr}"
+    );
+
+    let list = Command::new(act_binary_path())
+        .args(["secret", "list", "--credentials-backend", &backend])
+        .output()
+        .expect("run act secret list");
+    let listed = String::from_utf8_lossy(&list.stdout);
+    assert!(
+        listed.contains("operators-own-words"),
+        "the operator's own description is what gets recorded: {listed}"
+    );
+    assert!(
+        !listed.contains("API token"),
+        "the component's words must not be laundered into the store: {listed}"
+    );
+
+    // The case that actually pins it. With `--description` given, a fallback to
+    // the component's words would be invisible here — the operator's win either
+    // way. Provision a second key with no description at all: if anything falls
+    // through, this is where it shows.
+    let mut second = Command::new(act_binary_path())
+        .arg("login")
+        .arg(fixture("creds-declaring-canary.wasm"))
+        .args(["--key", "default", "--force"])
+        .args(["--credentials-backend", &backend])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn act login");
+    second
+        .stdin
+        .as_mut()
+        .expect("stdin was piped")
+        .write_all(b"typed-secret\n")
+        .expect("write the answer");
+    let out = second.wait_with_output().expect("act login");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let list = Command::new(act_binary_path())
+        .args(["secret", "list", "--credentials-backend", &backend])
+        .output()
+        .expect("run act secret list");
+    let listed = String::from_utf8_lossy(&list.stdout);
+    assert!(
+        !listed.contains("API token"),
+        "with no --description the record has none — the component's words are \
+         not a fallback: {listed}"
+    );
+    assert!(
+        !listed.contains("operators-own-words"),
+        "and --force replaced the earlier record rather than merging it: {listed}"
     );
 }
