@@ -55,6 +55,71 @@ fn oci_ref_name(reference: &str) -> &str {
     reference.strip_prefix("oci://").unwrap_or(reference)
 }
 
+fn non_empty(s: &str) -> Option<String> {
+    (!s.is_empty()).then(|| s.to_string())
+}
+
+/// Name implied by a file name: its stem, with a `.wasm` extension removed.
+fn name_from_file_name(file_name: &str) -> Option<String> {
+    non_empty(file_name.strip_suffix(".wasm").unwrap_or(file_name))
+}
+
+/// Name and version implied by an OCI reference: the repository's last path
+/// segment and the tag. A digest-pinned reference states no version.
+fn oci_name_version(reference: &str) -> (Option<String>, Option<String>) {
+    let bare = oci_ref_name(reference);
+    // The digest never contains '/', so splitting it off first leaves the
+    // repository path intact.
+    let (path, digest_pinned) = match bare.split_once('@') {
+        Some((path, _digest)) => (path, true),
+        None => (bare, false),
+    };
+    // Drop the registry before looking for a tag: the ':' in `localhost:5000`
+    // is a port, and only a ':' in a later segment separates a tag.
+    let Some((_registry, repository)) = path.split_once('/') else {
+        return (None, None);
+    };
+    let last = repository.rsplit('/').next().unwrap_or(repository);
+    let (name, tag) = match last.split_once(':') {
+        Some((name, tag)) => (name, Some(tag)),
+        None => (last, None),
+    };
+    let version = if digest_pinned {
+        None
+    } else {
+        tag.and_then(non_empty)
+    };
+    (non_empty(name), version)
+}
+
+/// Name and version *as the source implies them*.
+///
+/// The store deliberately never parses the component it holds, so this is not
+/// the component's declared identity from its `act:component` section — it is
+/// what the reference itself says. Callers use it to fill provenance at pull
+/// time, and to label entries stored before the pull path recorded either
+/// field.
+pub fn implied_name_version(source: &Source) -> (Option<String>, Option<String>) {
+    match source {
+        Source::Oci { reference } => oci_name_version(reference),
+        Source::Http { url, .. } => {
+            let name = url::Url::parse(url)
+                .ok()
+                .and_then(|u| {
+                    u.path_segments()
+                        .and_then(|mut s| s.next_back().map(str::to_string))
+                })
+                .as_deref()
+                .and_then(name_from_file_name);
+            (name, None)
+        }
+        Source::Local { path } => {
+            let last = path.rsplit(['/', '\\']).next().unwrap_or(path);
+            (name_from_file_name(last), None)
+        }
+    }
+}
+
 impl Provenance {
     pub fn to_annotations(&self) -> HashMap<String, String> {
         let mut a = HashMap::new();

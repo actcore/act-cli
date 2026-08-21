@@ -14,6 +14,10 @@ fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
+/// Manifest annotation publishers use to state the artifact's real version,
+/// which is the only version a moving tag like `:latest` can be resolved to.
+const K_OCI_VERSION: &str = "org.opencontainers.image.version";
+
 /// A reqwest client that requests + transparently decompresses gzip/br/zstd and
 /// reuses one HTTP/2 connection (ALPN-negotiated over TLS).
 pub(crate) fn compression_client() -> Result<reqwest::Client, StoreError> {
@@ -67,14 +71,16 @@ pub(crate) async fn fetch_blob(
 /// (synthesized manifest). Records the source ref as `file://<absolute path>`.
 pub fn install_local(store: &Store, path: &Path) -> Result<Stored, StoreError> {
     let bytes = std::fs::read(path)?;
+    let source = Source::Local {
+        path: local_ref(path),
+    };
+    let (name, version) = crate::provenance::implied_name_version(&source);
     let provenance = Provenance {
-        source: Source::Local {
-            path: local_ref(path),
-        },
+        source,
         digest: format!("sha256:{}", crate::layout::sha256_hex(&bytes)),
         fetched_at: now_rfc3339(),
-        name: None,
-        version: None,
+        name,
+        version,
     };
     store.put_component(&bytes, None, &provenance)
 }
@@ -94,16 +100,18 @@ pub fn store_http_bytes(
     etag: Option<String>,
     last_modified: Option<String>,
 ) -> Result<Stored, StoreError> {
+    let source = Source::Http {
+        url: url.to_string(),
+        etag,
+        last_modified,
+    };
+    let (name, version) = crate::provenance::implied_name_version(&source);
     let provenance = Provenance {
-        source: Source::Http {
-            url: url.to_string(),
-            etag,
-            last_modified,
-        },
+        source,
         digest: format!("sha256:{}", crate::layout::sha256_hex(bytes)),
         fetched_at: now_rfc3339(),
-        name: None,
-        version: None,
+        name,
+        version,
     };
     store.put_component(bytes, None, &provenance)
 }
@@ -163,14 +171,24 @@ pub fn assemble_oci(
         want(&layer.digest)?;
     }
 
+    let source = Source::Oci {
+        reference: reference.to_string(),
+    };
+    let (name, tag_version) = crate::provenance::implied_name_version(&source);
+    // A moving tag (`:latest`) says nothing about the version, so the
+    // publisher's annotation outranks it when present.
+    let annotated_version = manifest
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(K_OCI_VERSION))
+        .cloned();
+
     let provenance = Provenance {
-        source: Source::Oci {
-            reference: reference.to_string(),
-        },
+        source,
         digest: manifest_digest.to_string(),
         fetched_at: now_rfc3339(),
-        name: None,
-        version: None,
+        name,
+        version: annotated_version.or(tag_version),
     };
     store.put_oci_artifact(manifest_bytes, &blobs, &provenance)
 }
@@ -655,6 +673,99 @@ mod tests {
             std::fs::read(store.resolve("oci://ghcr.io/x/oci:1").unwrap().unwrap()).unwrap(),
             wasm
         );
+    }
+
+    /// Build a single-layer OCI manifest, optionally annotated, plus the blob
+    /// table `assemble_oci` reads through. Returns `(manifest, digest, blobs)`.
+    #[allow(clippy::type_complexity)]
+    fn oci_fixture(
+        annotations: &str,
+    ) -> (Vec<u8>, String, std::collections::HashMap<String, Vec<u8>>) {
+        let wasm = b"\0asm\x01\0\0\0named";
+        let wasm_hex = crate::layout::sha256_hex(wasm);
+        let cfg = b"\xA0";
+        let cfg_hex = crate::layout::sha256_hex(cfg);
+        let manifest = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",{annotations}"config":{{"mediaType":"application/vnd.wasm.config.v0+json","digest":"sha256:{cfg_hex}","size":{c}}},"layers":[{{"mediaType":"application/wasm","digest":"sha256:{wasm_hex}","size":{w}}}]}}"#,
+            c = cfg.len(),
+            w = wasm.len(),
+        )
+        .into_bytes();
+        let digest = format!("sha256:{}", crate::layout::sha256_hex(&manifest));
+        let mut blobs = std::collections::HashMap::new();
+        blobs.insert(wasm_hex, wasm.to_vec());
+        blobs.insert(cfg_hex, cfg.to_vec());
+        (manifest, digest, blobs)
+    }
+
+    fn assemble(reference: &str, annotations: &str) -> Stored {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let (manifest, digest, blobs) = oci_fixture(annotations);
+        assemble_oci(&store, reference, &manifest, &digest, |hex| {
+            blobs
+                .get(hex)
+                .cloned()
+                .ok_or_else(|| StoreError::Digest(hex.into()))
+        })
+        .unwrap()
+    }
+
+    /// The catalog's NAME/VERSION columns render this provenance, so a pull
+    /// that leaves both unset makes them permanently blank.
+    #[test]
+    fn assemble_oci_names_the_component_after_the_repository_and_tag() {
+        let stored = assemble("oci://actpkg.dev/library/crypto:0.4.1", "");
+        assert_eq!(stored.provenance.name.as_deref(), Some("crypto"));
+        assert_eq!(stored.provenance.version.as_deref(), Some("0.4.1"));
+    }
+
+    /// A moving tag says nothing about the version, but publishers annotate
+    /// the manifest with the real one — prefer it.
+    #[test]
+    fn assemble_oci_prefers_the_manifest_version_annotation_over_the_tag() {
+        let stored = assemble(
+            "oci://actpkg.dev/library/time:latest",
+            r#""annotations":{"org.opencontainers.image.version":"0.2.4"},"#,
+        );
+        assert_eq!(stored.provenance.name.as_deref(), Some("time"));
+        assert_eq!(stored.provenance.version.as_deref(), Some("0.2.4"));
+    }
+
+    /// A digest-pinned ref carries no tag; the name is still recoverable.
+    #[test]
+    fn assemble_oci_names_a_digest_pinned_ref_without_a_version() {
+        let stored = assemble(
+            "oci://ghcr.io/actpkg/sqlite@sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+            "",
+        );
+        assert_eq!(stored.provenance.name.as_deref(), Some("sqlite"));
+        assert_eq!(stored.provenance.version, None);
+    }
+
+    #[test]
+    fn install_local_names_the_component_after_the_file_stem() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let wasm_path = dir.path().join("filesystem.wasm");
+        std::fs::write(&wasm_path, b"local-bytes").unwrap();
+        let stored = install_local(&store, &wasm_path).unwrap();
+        assert_eq!(stored.provenance.name.as_deref(), Some("filesystem"));
+    }
+
+    #[test]
+    fn store_http_bytes_names_the_component_after_the_url_filename() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let stored = store_http_bytes(
+            &store,
+            "https://cdn.example.com/random.wasm",
+            b"http-bytes",
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(stored.provenance.name.as_deref(), Some("random"));
     }
 
     #[tokio::test]
