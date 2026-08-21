@@ -17,9 +17,9 @@ act-store = { version = "0.11.1", path = "../act-store" }
 act-policy = { version = "0.11.1", path = "../act-policy" }
 act-credentials = { version = "0.11.1", path = "../act-credentials" }
 wasmparser.workspace = true
-wasmtime = "47"
-wasmtime-wasi = { version = "47", default-features = false, features = ["p2", "p3"] }
-wasmtime-wasi-http = { version = "47", default-features = false, features = ["p2", "p3"] }
+wasmtime = "48"
+wasmtime-wasi = { version = "48", default-features = false, features = ["p2", "p3"] }
+wasmtime-wasi-http = { version = "48", default-features = false, features = ["p2", "p3"] }
 anyhow.workspace = true
 async-trait = "0.1"
 bytes = "1"

@@ -21,21 +21,21 @@
 //! - Redirect re-decision: each hop re-evaluated via `reqwest::redirect`
 //!   hook (see `http_client::build_redirect_policy`).
 
+use std::future::Future;
 use std::sync::Arc;
 
 use http::Uri;
-use wasmtime_wasi::TrappableError;
+use wasmtime_wasi_http::{Error as HttpError, RequestOptions, WasiBody};
 
 use act_policy::Decision;
 use act_policy::consent::{ConsentAsk, ConsentPrompter, DecisionCache};
 use act_policy::provider::{CompiledCeiling, ResourceOp};
 
 use crate::audit::{CapDecisionRecord, Decision4, emit_cap_decision};
+use crate::http_client::ActHttpClient;
 
-type P2ErrorCode = wasmtime_wasi_http::p2::bindings::http::types::ErrorCode;
-type P3ErrorCode = wasmtime_wasi_http::p3::bindings::http::types::ErrorCode;
-
-/// Policy hook implementing both `p2::WasiHttpHooks` and `p3::WasiHttpHooks`.
+/// The capability gate for `wasi:http`, as one `WasiHttpHooks` covering both
+/// wasip2 and wasip3 — wasmtime 48 routes them through the same hook.
 pub struct PolicyHttpHooks {
     ceiling: Arc<dyn CompiledCeiling>,
     client: Arc<crate::http_client::ActHttpClient>,
@@ -125,7 +125,8 @@ fn deny_reason(method: Option<&str>, uri: &Uri) -> String {
 
 /// Resolve an `Ask`-mode HTTP decision via the interactive prompter (cached
 /// per `host:port`), and emit the resulting `ask-allow`/`ask-deny` record.
-/// Mirrors `fs_policy::resolve_ask`; shared by both the p2 and p3 hooks so
+/// Mirrors `fs_policy::resolve_ask`; used by the one hook covering both
+/// wasip2 and wasip3, so
 /// there is exactly one place either arm can call to reach a verdict, and no
 /// way for them to drift from each other. Free function over owned data so
 /// the returned future is `Send` and usable from a spawned task.
@@ -144,133 +145,86 @@ async fn resolve_http_ask(
     allowed
 }
 
-// ── p2 hook ───────────────────────────────────────────────────────────────
+// ── the hook ──────────────────────────────────────────────────────────────
+//
+// One implementation since wasmtime 48, which routes both wasip2 and wasip3
+// outgoing requests through a single `WasiHttpHooks::send_request`. Before
+// that there were two hooks with two error enums and two body types, and the
+// gate had to be written — and kept in step — twice.
 
-impl wasmtime_wasi_http::p2::WasiHttpHooks for PolicyHttpHooks {
+impl wasmtime_wasi_http::WasiHttpHooks for PolicyHttpHooks {
     fn send_request(
         &mut self,
-        request: hyper::Request<wasmtime_wasi_http::p2::body::HyperOutgoingBody>,
-        config: wasmtime_wasi_http::p2::types::OutgoingRequestConfig,
-    ) -> wasmtime_wasi_http::p2::HttpResult<wasmtime_wasi_http::p2::types::HostFutureIncomingResponse>
-    {
-        let method = Some(request.method().as_str());
-        let uri = request.uri().clone();
-        match self.decide_uri(method, &uri) {
-            Decision::Deny => {
-                tracing::warn!(?method, %uri, "{}", deny_reason(method, &uri));
-                Err(wasmtime_wasi_http::p2::HttpError::from(
-                    P2ErrorCode::HttpRequestDenied,
-                ))
-            }
-            Decision::Allow => {
-                tracing::debug!(?method, %uri, "http policy allow (p2)");
-                let client = self.client.clone();
-                let handle = wasmtime_wasi::runtime::spawn(async move {
-                    Ok(client.send_p2(request, config).await)
-                });
-                Ok(wasmtime_wasi_http::p2::types::HostFutureIncomingResponse::pending(handle))
-            }
-            Decision::Ask => {
-                // Resolve interactive consent in the spawned future so the
-                // sync hook can return a pending response immediately.
-                let client = self.client.clone();
-                let cache = self.cache.clone();
-                let prompter = self.prompter.clone();
-                let ask = Self::http_ask(method, &uri);
-                let log_uri = uri.clone();
-                let handle = wasmtime_wasi::runtime::spawn(async move {
-                    if resolve_http_ask(cache, prompter, ask).await {
-                        tracing::debug!(%log_uri, "http policy ask allowed (p2)");
-                        Ok(client.send_p2(request, config).await)
-                    } else {
-                        tracing::warn!(%log_uri, "http policy ask denied (p2)");
-                        Ok(Err(P2ErrorCode::HttpRequestDenied))
-                    }
-                });
-                Ok(wasmtime_wasi_http::p2::types::HostFutureIncomingResponse::pending(handle))
-            }
-        }
-    }
-}
-
-// ── p3 hook ───────────────────────────────────────────────────────────────
-
-impl wasmtime_wasi_http::p3::WasiHttpHooks for PolicyHttpHooks {
-    fn send_request(
-        &mut self,
-        request: http::Request<
-            http_body_util::combinators::UnsyncBoxBody<bytes::Bytes, P3ErrorCode>,
-        >,
-        options: Option<wasmtime_wasi_http::p3::RequestOptions>,
-        fut: Box<dyn Future<Output = Result<(), P3ErrorCode>> + Send>,
+        request: http::Request<WasiBody>,
+        options: Option<RequestOptions>,
+        fut: Box<dyn Future<Output = Result<(), HttpError>> + Send>,
     ) -> Box<
         dyn Future<
                 Output = Result<
                     (
-                        http::Response<
-                            http_body_util::combinators::UnsyncBoxBody<bytes::Bytes, P3ErrorCode>,
-                        >,
-                        Box<dyn Future<Output = Result<(), P3ErrorCode>> + Send>,
+                        http::Response<WasiBody>,
+                        Box<dyn Future<Output = Result<(), HttpError>> + Send>,
                     ),
-                    TrappableError<P3ErrorCode>,
+                    HttpError,
                 >,
             > + Send,
     > {
+        // `fut` reports a *response*-processing error back to the guest. The
+        // gate has no opinion on one: by the time a response is being consumed
+        // the request was already allowed.
+        let _ = fut;
+
         let method = Some(request.method().as_str().to_string());
         let uri = request.uri().clone();
         let decision = self.decide_uri(method.as_deref(), &uri);
+        let client = self.client.clone();
+
         match decision {
             Decision::Allow => {
-                tracing::debug!(?method, %uri, "http policy allow (p3)");
-                let _ = fut;
-                let _ = options;
-                let client = self.client.clone();
-                Box::new(async move {
-                    match client.send_p3(request).await {
-                        Ok((resp, io)) => {
-                            let io: Box<dyn Future<Output = Result<(), P3ErrorCode>> + Send> =
-                                Box::new(io);
-                            Ok((resp, io))
-                        }
-                        Err(code) => Err(TrappableError::<P3ErrorCode>::from(code)),
-                    }
-                })
+                tracing::debug!(?method, %uri, "http policy allow");
+                Box::new(async move { send(client, request, options).await })
             }
             Decision::Ask => {
-                let _ = fut;
-                let _ = options;
-                let client = self.client.clone();
                 let cache = self.cache.clone();
                 let prompter = self.prompter.clone();
                 let ask = Self::http_ask(method.as_deref(), &uri);
                 let log_uri = uri.clone();
                 Box::new(async move {
                     if !resolve_http_ask(cache, prompter, ask).await {
-                        tracing::warn!(%log_uri, "http policy ask denied (p3)");
-                        return Err(TrappableError::<P3ErrorCode>::from(
-                            P3ErrorCode::HttpRequestDenied,
-                        ));
+                        tracing::warn!(%log_uri, "http policy ask denied");
+                        return Err(HttpError::HttpRequestDenied);
                     }
-                    tracing::debug!(%log_uri, "http policy ask allowed (p3)");
-                    match client.send_p3(request).await {
-                        Ok((resp, io)) => {
-                            let io: Box<dyn Future<Output = Result<(), P3ErrorCode>> + Send> =
-                                Box::new(io);
-                            Ok((resp, io))
-                        }
-                        Err(code) => Err(TrappableError::<P3ErrorCode>::from(code)),
-                    }
+                    tracing::debug!(%log_uri, "http policy ask allowed");
+                    send(client, request, options).await
                 })
             }
             Decision::Deny => {
                 tracing::warn!(?method, %uri, "{}", deny_reason(method.as_deref(), &uri));
-                Box::new(async move {
-                    Err(TrappableError::<P3ErrorCode>::from(
-                        P3ErrorCode::HttpRequestDenied,
-                    ))
-                })
+                Box::new(async move { Err(HttpError::HttpRequestDenied) })
             }
         }
+    }
+}
+
+/// Hand an allowed request to the policy-aware client, in the box-of-futures
+/// shape the hook must return.
+async fn send(
+    client: Arc<ActHttpClient>,
+    request: http::Request<WasiBody>,
+    options: Option<RequestOptions>,
+) -> Result<
+    (
+        http::Response<WasiBody>,
+        Box<dyn Future<Output = Result<(), HttpError>> + Send>,
+    ),
+    HttpError,
+> {
+    match client.send(request, options).await {
+        Ok((resp, io)) => {
+            let io: Box<dyn Future<Output = Result<(), HttpError>> + Send> = Box::new(io);
+            Ok((resp, io))
+        }
+        Err(code) => Err(code),
     }
 }
 
@@ -526,31 +480,28 @@ mod tests {
         assert!(r.reason.is_none());
     }
 
-    /// `p2::WasiHttpHooks::send_request`'s `Decision::Ask` arm is otherwise
-    /// unreached by anything in this repo: every real fixture that drives
-    /// outbound HTTP (`ask-canary`, `components/http-client`) goes through
-    /// the `wasi-fetch` crate, which imports `wasip3::http::*` exclusively —
-    /// so only the p3 hook ever fires for a real component, and a bug
-    /// confined to the p2 arm (this one, or a future edit) would be
-    /// invisible to `cargo test --workspace`. Drives `send_request` on the
-    /// real `p2::WasiHttpHooks` trait method directly, the same way
-    /// `decide_uri` is already driven directly by the tests above, and
-    /// captures the audit trail via a real `AuditLayer` (not just the
-    /// record constructors) so the assertion is on the actual emission,
-    /// not on `resolve_http_ask`'s return value alone — that would still
-    /// pass even if the `emit_cap_decision` call inside it were deleted.
+    /// Drives `send_request`'s `Decision::Ask` arm through the real
+    /// `WasiHttpHooks` trait method, the same way `decide_uri` is driven
+    /// directly by the tests above, and captures the audit trail through a
+    /// real `AuditLayer` rather than the record constructors — so the
+    /// assertion is on the actual emission, not on `resolve_http_ask`'s
+    /// return value, which would still pass with the `emit_cap_decision`
+    /// call inside it deleted.
     ///
-    /// `p3`'s equivalent arm has its own independent coverage:
-    /// `tests/audit_cli.rs`'s `http_ask_resolution_reaches_the_audit_trail`
-    /// runs the real binary against `ask-canary`, which is p3-only.
+    /// This test was written when there were two hooks and the p2 one was
+    /// unreached by any fixture (every component driving outbound HTTP goes
+    /// through `wasi-fetch`, which imports `wasip3::http::*` exclusively).
+    /// wasmtime 48 collapsed both onto one hook, so that gap is gone and
+    /// this is now a unit-level companion to `tests/audit_cli.rs`'s
+    /// `http_ask_resolution_reaches_the_audit_trail`, which exercises the
+    /// same arm end to end through the real binary.
     #[tokio::test(flavor = "current_thread")]
-    async fn p2_ask_arm_resolves_and_audits_the_denial() {
+    async fn the_ask_arm_resolves_and_audits_the_denial() {
         use crate::audit::layer::AuditWriter;
         use http_body_util::{BodyExt, Empty};
         use std::sync::Mutex;
         use tracing_subscriber::prelude::*;
-        use wasmtime_wasi_http::p2::WasiHttpHooks as _;
-        use wasmtime_wasi_http::p2::types::HostFutureIncomingResponse;
+        use wasmtime_wasi_http::WasiHttpHooks as _;
 
         #[derive(Clone, Default)]
         struct CapturingWriter(Arc<Mutex<Vec<String>>>);
@@ -589,20 +540,18 @@ mod tests {
             Arc::new(act_policy::consent::DecisionCache::new()),
         );
 
-        let body: http_body_util::combinators::UnsyncBoxBody<bytes::Bytes, P2ErrorCode> =
-            Empty::<bytes::Bytes>::new()
-                .map_err(|_| unreachable!())
-                .boxed_unsync();
-        let request = hyper::Request::builder()
+        let body: WasiBody = Empty::<bytes::Bytes>::new()
+            .map_err(|_| unreachable!())
+            .boxed_unsync();
+        let request = http::Request::builder()
             .method("GET")
             .uri("https://api.example.com/")
             .body(body)
             .unwrap();
-        let config = wasmtime_wasi_http::p2::types::OutgoingRequestConfig {
-            use_tls: true,
-            connect_timeout: std::time::Duration::from_secs(5),
-            first_byte_timeout: std::time::Duration::from_secs(5),
-            between_bytes_timeout: std::time::Duration::from_secs(5),
+        let options = RequestOptions {
+            connect_timeout: Some(std::time::Duration::from_secs(5)),
+            first_byte_timeout: Some(std::time::Duration::from_secs(5)),
+            between_bytes_timeout: Some(std::time::Duration::from_secs(5)),
         };
 
         let writer = CapturingWriter::default();
@@ -621,13 +570,12 @@ mod tests {
         // this same OS thread and observes this thread-local default.
         let _guard = tracing::subscriber::set_default(sub);
 
-        let pending = h
-            .send_request(request, config)
-            .expect("send_request returns a pending response for Ask");
-        let resolved = match pending {
-            HostFutureIncomingResponse::Pending(handle) => handle.await,
-            other => panic!("expected a Pending response for Ask, got {other:?}"),
-        };
+        // The hook hands back a boxed future; the consent resolution and the
+        // audit emission both happen inside it, so it has to be driven to
+        // completion under the guard installed above.
+        let resolved =
+            std::pin::Pin::from(h.send_request(request, Some(options), Box::new(async { Ok(()) })))
+                .await;
 
         drop(_guard);
 
@@ -635,8 +583,8 @@ mod tests {
         // every ask degrades to deny deterministically, same as a headless
         // `act call` with stdin closed.
         assert!(
-            matches!(resolved, Ok(Err(P2ErrorCode::HttpRequestDenied))),
-            "expected the ask to degrade to a denied response, got {resolved:?}"
+            matches!(resolved, Err(HttpError::HttpRequestDenied)),
+            "expected the ask to degrade to a denied response"
         );
 
         let lines = sink.lock().unwrap().clone();

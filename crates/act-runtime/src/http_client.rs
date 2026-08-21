@@ -21,15 +21,10 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use bytes::Bytes;
-use futures_util::TryStreamExt;
-use http_body_util::combinators::UnsyncBoxBody;
-use http_body_util::{BodyExt, StreamBody};
+use http_body_util::BodyExt;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::redirect;
-use wasmtime_wasi_http::p2::bindings::http::types::ErrorCode as P2ErrorCode;
-use wasmtime_wasi_http::p2::body::HyperIncomingBody;
-use wasmtime_wasi_http::p3::bindings::http::types::ErrorCode as P3ErrorCode;
+use wasmtime_wasi_http::{Error as HttpError, RequestOptions, WasiBody};
 
 use crate::audit::{CapDecisionRecord, Decision4, emit_cap_decision};
 use act_policy::grant::{HttpConfig, PolicyMode};
@@ -51,7 +46,7 @@ use act_policy::net::{self as network, NetworkRule};
 ///
 /// If no addresses survive, returns an empty iterator — reqwest surfaces
 /// this as a DNS error, which our `reqwest_to_p2_error` /
-/// `reqwest_to_p3_error` maps to `ErrorCode::DnsError`.
+/// `reqwest_to_error` maps to `ErrorCode::DnsError`.
 struct PolicyDnsResolver {
     allow_nets: Arc<Vec<NetworkRule>>,
     deny_nets: Arc<Vec<NetworkRule>>,
@@ -246,136 +241,39 @@ impl ActHttpClient {
         })
     }
 
-    /// Perform an outgoing request on the p2 WASI HTTP path.
-    pub async fn send_p2(
+    /// Perform an outgoing request.
+    ///
+    /// One method since wasmtime 48, which routes p2 and p3 through the same
+    /// hook. `options` carries the guest's `wasi:http/types.request-options`;
+    /// each field falls back to 600 s, matching what wasmtime itself supplies
+    /// when the guest sets none, so the p2 path keeps the deadline it always
+    /// had and the p3 path gains the one it should have had.
+    pub async fn send(
         &self,
-        request: hyper::Request<UnsyncBoxBody<Bytes, P2ErrorCode>>,
-        config: wasmtime_wasi_http::p2::types::OutgoingRequestConfig,
-    ) -> Result<wasmtime_wasi_http::p2::types::IncomingResponse, P2ErrorCode> {
-        let reqwest_req = p2_to_reqwest(request, config.use_tls)?;
-        let resp = tokio::time::timeout(
-            config.connect_timeout + config.first_byte_timeout,
-            self.client.execute(reqwest_req),
-        )
-        .await
-        .map_err(|_| P2ErrorCode::ConnectionTimeout)?
-        .map_err(reqwest_to_p2_error)?;
-
-        let hyper_resp = reqwest_response_to_hyper(resp).await?;
-        Ok(wasmtime_wasi_http::p2::types::IncomingResponse {
-            resp: hyper_resp,
-            between_bytes_timeout: config.between_bytes_timeout,
-            worker: None,
-        })
-    }
-
-    /// Perform an outgoing request on the p3 WASI HTTP path. Returns the
-    /// response plus a completion future matching the p3 hook signature.
-    pub async fn send_p3(
-        &self,
-        request: http::Request<UnsyncBoxBody<Bytes, P3ErrorCode>>,
+        request: http::Request<WasiBody>,
+        options: Option<RequestOptions>,
     ) -> Result<
         (
-            http::Response<UnsyncBoxBody<Bytes, P3ErrorCode>>,
-            Pin<Box<dyn Future<Output = Result<(), P3ErrorCode>> + Send>>,
+            http::Response<WasiBody>,
+            Pin<Box<dyn Future<Output = Result<(), HttpError>> + Send>>,
         ),
-        P3ErrorCode,
+        HttpError,
     > {
-        let reqwest_req = p3_to_reqwest(request)?;
-        let resp = self
-            .client
-            .execute(reqwest_req)
+        const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+        let deadline = options
+            .and_then(|o| o.connect_timeout)
+            .unwrap_or(DEFAULT_TIMEOUT)
+            + options
+                .and_then(|o| o.first_byte_timeout)
+                .unwrap_or(DEFAULT_TIMEOUT);
+
+        let reqwest_req = to_reqwest(request)?;
+        let resp = tokio::time::timeout(deadline, self.client.execute(reqwest_req))
             .await
-            .map_err(reqwest_to_p3_error)?;
-        reqwest_response_to_p3(resp).await
+            .map_err(|_| HttpError::ConnectionTimeout)?
+            .map_err(reqwest_to_error)?;
+        reqwest_response_to_wasi(resp).await
     }
-}
-
-/// Convert an outgoing `hyper::Request` from the p2 WASI HTTP binding into
-/// a `reqwest::Request`. `use_tls` controls the default scheme if the URI
-/// doesn't include one (the guest may build requests with scheme-less
-/// authorities).
-///
-/// The body streams through to reqwest via `Body::wrap_stream` — we don't
-/// buffer. `reqwest::Body::wrap` can't take `UnsyncBoxBody` directly (it
-/// requires `Send + Sync`), but `wrap_stream` only needs `Send`, so we
-/// convert via `http_body_util::BodyStream`. `Frame` data chunks pass
-/// through; trailer frames are dropped (reqwest doesn't propagate request
-/// trailers through `wrap_stream` anyway).
-fn p2_to_reqwest(
-    request: hyper::Request<UnsyncBoxBody<Bytes, P2ErrorCode>>,
-    use_tls: bool,
-) -> Result<reqwest::Request, P2ErrorCode> {
-    use futures_util::StreamExt;
-    use http_body_util::BodyStream;
-
-    let (parts, body) = request.into_parts();
-    let scheme = parts
-        .uri
-        .scheme_str()
-        .map(str::to_string)
-        .unwrap_or_else(|| {
-            if use_tls {
-                "https".into()
-            } else {
-                "http".into()
-            }
-        });
-    let authority = parts
-        .uri
-        .authority()
-        .map(|a| a.to_string())
-        .ok_or(P2ErrorCode::HttpRequestUriInvalid)?;
-    let path_and_query = parts
-        .uri
-        .path_and_query()
-        .map(|p| p.as_str())
-        .unwrap_or("/");
-    let url_str = format!("{scheme}://{authority}{path_and_query}");
-    let url = reqwest::Url::parse(&url_str).map_err(|_| P2ErrorCode::HttpRequestUriInvalid)?;
-
-    let method = reqwest::Method::from_bytes(parts.method.as_str().as_bytes())
-        .map_err(|_| P2ErrorCode::HttpProtocolError)?;
-
-    let data_stream = BodyStream::new(body).filter_map(|frame_res| async move {
-        match frame_res {
-            Ok(frame) => frame.into_data().ok().map(Ok::<_, std::io::Error>),
-            Err(_) => Some(Err(std::io::Error::other("wasi http body stream error"))),
-        }
-    });
-    let body = reqwest::Body::wrap_stream(data_stream);
-
-    let mut builder = reqwest::Client::new().request(method, url).body(body);
-    for (name, value) in parts.headers.iter() {
-        builder = builder.header(name, value);
-    }
-    builder.build().map_err(|_| P2ErrorCode::HttpProtocolError)
-}
-
-/// Convert a `reqwest::Response` to a `hyper::Response<HyperIncomingBody>`
-/// the p2 WASI HTTP layer expects. The body is wrapped as a streaming
-/// `StreamBody` so we don't buffer — the guest reads progressively.
-async fn reqwest_response_to_hyper(
-    resp: reqwest::Response,
-) -> Result<hyper::Response<HyperIncomingBody>, P2ErrorCode> {
-    let status = resp.status();
-    let version = resp.version();
-    let headers = resp.headers().clone();
-
-    let byte_stream = resp
-        .bytes_stream()
-        .map_ok(hyper::body::Frame::data)
-        .map_err(reqwest_to_p2_error);
-    let body = StreamBody::new(byte_stream);
-    let body: HyperIncomingBody = BodyExt::boxed_unsync(body);
-
-    let mut builder = hyper::Response::builder().status(status).version(version);
-    if let Some(hdrs) = builder.headers_mut() {
-        hdrs.extend(headers);
-    }
-    builder
-        .body(body)
-        .map_err(|_| P2ErrorCode::HttpProtocolError)
 }
 
 /// Walk the whole `source()` chain of a reqwest error, returning the first
@@ -394,49 +292,11 @@ fn error_chain_contains(err: &dyn Error, needles: &[&str]) -> bool {
     false
 }
 
-/// Translate a reqwest error to the closest wasi:http/types::ErrorCode.
-fn reqwest_to_p2_error(err: reqwest::Error) -> P2ErrorCode {
-    if err.is_timeout() {
-        return P2ErrorCode::ConnectionTimeout;
-    }
-    if error_chain_contains(&err, &["deny cidr", "failed to lookup", "dns"]) {
-        return P2ErrorCode::DnsError(
-            wasmtime_wasi_http::p2::bindings::http::types::DnsErrorPayload {
-                rcode: Some(err.to_string()),
-                info_code: None,
-            },
-        );
-    }
-    if err.is_connect() {
-        return P2ErrorCode::ConnectionRefused;
-    }
-    if err.is_redirect() {
-        // Our redirect policy stopped the chain; surface as
-        // HttpRequestDenied so callers can distinguish from protocol
-        // errors.
-        return P2ErrorCode::HttpRequestDenied;
-    }
-    if err.is_decode() {
-        return P2ErrorCode::HttpProtocolError;
-    }
-    if err.is_request() {
-        return P2ErrorCode::HttpRequestUriInvalid;
-    }
-    if err.is_body() {
-        return P2ErrorCode::HttpRequestBodySize(None);
-    }
-    P2ErrorCode::HttpProtocolError
-}
-
-// ── p3 helpers ────────────────────────────────────────────────────────────
-
-/// Convert an outgoing p3 request into a reqwest::Request. Streaming body,
-/// same approach as p2_to_reqwest — we wrap the UnsyncBoxBody as a Stream
+/// Convert an outgoing request into a reqwest::Request. Streaming body,
+/// we wrap the UnsyncBoxBody as a Stream
 /// and feed it through reqwest::Body::wrap_stream, because UnsyncBoxBody
 /// is !Sync and wrap() requires Sync.
-fn p3_to_reqwest(
-    request: http::Request<UnsyncBoxBody<Bytes, P3ErrorCode>>,
-) -> Result<reqwest::Request, P3ErrorCode> {
+fn to_reqwest(request: http::Request<WasiBody>) -> Result<reqwest::Request, HttpError> {
     use futures_util::StreamExt;
     use http_body_util::BodyStream;
 
@@ -450,21 +310,21 @@ fn p3_to_reqwest(
         .uri
         .authority()
         .map(|a| a.to_string())
-        .ok_or(P3ErrorCode::HttpRequestUriInvalid)?;
+        .ok_or(HttpError::HttpRequestUriInvalid)?;
     let path_and_query = parts
         .uri
         .path_and_query()
         .map(|p| p.as_str())
         .unwrap_or("/");
     let url_str = format!("{scheme}://{authority}{path_and_query}");
-    let url = reqwest::Url::parse(&url_str).map_err(|_| P3ErrorCode::HttpRequestUriInvalid)?;
+    let url = reqwest::Url::parse(&url_str).map_err(|_| HttpError::HttpRequestUriInvalid)?;
     let method = reqwest::Method::from_bytes(parts.method.as_str().as_bytes())
-        .map_err(|_| P3ErrorCode::HttpProtocolError)?;
+        .map_err(|_| HttpError::HttpProtocolError)?;
 
     let data_stream = BodyStream::new(body).filter_map(|frame_res| async move {
         match frame_res {
             Ok(frame) => frame.into_data().ok().map(Ok::<_, std::io::Error>),
-            Err(_) => Some(Err(std::io::Error::other("wasi http p3 body stream error"))),
+            Err(_) => Some(Err(std::io::Error::other("wasi:http body stream error"))),
         }
     });
     let body = reqwest::Body::wrap_stream(data_stream);
@@ -473,54 +333,55 @@ fn p3_to_reqwest(
     for (name, value) in parts.headers.iter() {
         builder = builder.header(name, value);
     }
-    builder.build().map_err(|_| P3ErrorCode::HttpProtocolError)
+    builder.build().map_err(|_| HttpError::HttpProtocolError)
 }
 
-/// Error mapper for the p3 path. Same taxonomy as p2 but different ErrorCode
-/// enum.
-fn reqwest_to_p3_error(err: reqwest::Error) -> P3ErrorCode {
+/// Translate a reqwest error to the closest `wasi:http` error.
+///
+/// One mapper since wasmtime 48: `Error` is a superset of what the p2 and p3
+/// bindings each used to have, and the two mappers this replaced were
+/// line-for-line identical but for the enum they named.
+fn reqwest_to_error(err: reqwest::Error) -> HttpError {
     if err.is_timeout() {
-        return P3ErrorCode::ConnectionTimeout;
+        return HttpError::ConnectionTimeout;
     }
     if error_chain_contains(&err, &["deny cidr", "failed to lookup", "dns"]) {
-        return P3ErrorCode::DnsError(
-            wasmtime_wasi_http::p3::bindings::http::types::DnsErrorPayload {
-                rcode: Some(err.to_string()),
-                info_code: None,
-            },
-        );
+        return HttpError::DnsError {
+            rcode: Some(err.to_string()),
+            info_code: None,
+        };
     }
     if err.is_connect() {
-        return P3ErrorCode::ConnectionRefused;
+        return HttpError::ConnectionRefused;
     }
     if err.is_redirect() {
-        return P3ErrorCode::HttpRequestDenied;
+        return HttpError::HttpRequestDenied;
     }
     if err.is_decode() {
-        return P3ErrorCode::HttpProtocolError;
+        return HttpError::HttpProtocolError;
     }
     if err.is_request() {
-        return P3ErrorCode::HttpRequestUriInvalid;
+        return HttpError::HttpRequestUriInvalid;
     }
     if err.is_body() {
-        return P3ErrorCode::HttpRequestBodySize(None);
+        return HttpError::HttpRequestBodySize(None);
     }
-    P3ErrorCode::HttpProtocolError
+    HttpError::HttpProtocolError
 }
 
-/// Convert a reqwest response to the p3 shape the hook expects:
-/// http::Response<UnsyncBoxBody<Bytes, P3ErrorCode>> plus a
-/// Future<Output = Result<(), P3ErrorCode>> representing the body
+/// Convert a reqwest response to the shape the hook expects:
+/// http::Response<WasiBody> plus a
+/// Future<Output = Result<(), HttpError>> representing the body
 /// completion (reqwest handles this transparently; we return Ok(())
 /// immediately since body errors surface through the stream).
-async fn reqwest_response_to_p3(
+async fn reqwest_response_to_wasi(
     resp: reqwest::Response,
 ) -> Result<
     (
-        http::Response<UnsyncBoxBody<Bytes, P3ErrorCode>>,
-        Pin<Box<dyn Future<Output = Result<(), P3ErrorCode>> + Send>>,
+        http::Response<WasiBody>,
+        Pin<Box<dyn Future<Output = Result<(), HttpError>> + Send>>,
     ),
-    P3ErrorCode,
+    HttpError,
 > {
     let status = resp.status();
     let mut headers = resp.headers().clone();
@@ -532,8 +393,7 @@ async fn reqwest_response_to_p3(
     // `is_end_stream()` override (StreamBody always returns `false`, which
     // confuses wasi-fetch guests into trapping mid-read on HTTP/2 responses).
     let reqwest_body = reqwest::Body::from(resp);
-    let body: UnsyncBoxBody<Bytes, P3ErrorCode> =
-        BodyExt::boxed_unsync(BodyExt::map_err(reqwest_body, reqwest_to_p3_error));
+    let body: WasiBody = BodyExt::boxed_unsync(BodyExt::map_err(reqwest_body, reqwest_to_error));
 
     let mut builder = http::Response::builder().status(status);
     if let Some(hdrs) = builder.headers_mut() {
@@ -541,8 +401,8 @@ async fn reqwest_response_to_p3(
     }
     let resp = builder
         .body(body)
-        .map_err(|_| P3ErrorCode::HttpProtocolError)?;
-    let io: Pin<Box<dyn Future<Output = Result<(), P3ErrorCode>> + Send>> =
+        .map_err(|_| HttpError::HttpProtocolError)?;
+    let io: Pin<Box<dyn Future<Output = Result<(), HttpError>> + Send>> =
         Box::pin(async { Ok(()) });
     Ok((resp, io))
 }
@@ -555,7 +415,6 @@ mod tests {
     use http_body_util::combinators::UnsyncBoxBody;
     use http_body_util::{BodyExt, Empty};
     use std::sync::Mutex;
-    use wasmtime_wasi_http::p2::bindings::http::types::ErrorCode as P2ErrorCode;
 
     #[tokio::test(flavor = "current_thread")]
     async fn converts_reqwest_response_status_headers_body() {
@@ -568,9 +427,7 @@ mod tests {
             .unwrap();
         let resp = reqwest::Response::from(http_resp);
 
-        let incoming = reqwest_response_to_hyper(resp)
-            .await
-            .expect("conversion ok");
+        let (incoming, _io) = reqwest_response_to_wasi(resp).await.expect("conversion ok");
 
         assert_eq!(incoming.status(), hyper::StatusCode::OK);
         assert_eq!(
@@ -617,7 +474,7 @@ mod tests {
             .body(body)
             .expect("hyper request builds");
 
-        let reqwest_req = p2_to_reqwest(hyper_req, false).expect("conversion succeeds");
+        let reqwest_req = to_reqwest(hyper_req).expect("conversion succeeds");
 
         assert_eq!(reqwest_req.method(), &reqwest::Method::GET);
         assert_eq!(
@@ -636,10 +493,9 @@ mod tests {
     #[test]
     fn converts_post_request_with_body_and_port() {
         let body_bytes = bytes::Bytes::from_static(b"payload");
-        let body: UnsyncBoxBody<bytes::Bytes, P2ErrorCode> =
-            http_body_util::Full::new(body_bytes.clone())
-                .map_err(|_| unreachable!())
-                .boxed_unsync();
+        let body: WasiBody = http_body_util::Full::new(body_bytes.clone())
+            .map_err(|_| unreachable!())
+            .boxed_unsync();
         let hyper_req = hyper::Request::builder()
             .method(Method::POST)
             .uri("http://api.example.com:8080/v1/create")
@@ -647,7 +503,7 @@ mod tests {
             .body(body)
             .expect("hyper request builds");
 
-        let reqwest_req = p2_to_reqwest(hyper_req, false).expect("conversion succeeds");
+        let reqwest_req = to_reqwest(hyper_req).expect("conversion succeeds");
 
         assert_eq!(reqwest_req.method(), &reqwest::Method::POST);
         assert_eq!(
@@ -664,9 +520,9 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn send_p2_fetches_example_dot_com() {
+    async fn send_fetches_example_dot_com() {
         // Integration-style test: requires network.
-        let body: UnsyncBoxBody<bytes::Bytes, P2ErrorCode> = Empty::<bytes::Bytes>::new()
+        let body: WasiBody = Empty::<bytes::Bytes>::new()
             .map_err(|_| unreachable!())
             .boxed_unsync();
         let hyper_req = hyper::Request::builder()
@@ -680,18 +536,17 @@ mod tests {
             ..Default::default()
         };
         let client = ActHttpClient::new(cfg).expect("client builds");
-        let config = wasmtime_wasi_http::p2::types::OutgoingRequestConfig {
-            use_tls: true,
-            connect_timeout: std::time::Duration::from_secs(10),
-            first_byte_timeout: std::time::Duration::from_secs(10),
-            between_bytes_timeout: std::time::Duration::from_secs(10),
+        let options = RequestOptions {
+            connect_timeout: Some(std::time::Duration::from_secs(10)),
+            first_byte_timeout: Some(std::time::Duration::from_secs(10)),
+            between_bytes_timeout: Some(std::time::Duration::from_secs(10)),
         };
-        let incoming = client
-            .send_p2(hyper_req, config)
+        let (incoming, _io) = client
+            .send(hyper_req, Some(options))
             .await
             .expect("send succeeds");
         assert_eq!(
-            incoming.resp.status().as_u16(),
+            incoming.status().as_u16(),
             200,
             "example.com should return 200"
         );
@@ -718,13 +573,13 @@ mod tests {
                 .expect_err("must fail")
         });
 
-        let mapped = reqwest_to_p2_error(err);
+        let mapped = reqwest_to_error(err);
         assert!(
             matches!(
                 mapped,
-                P2ErrorCode::ConnectionTimeout
-                    | P2ErrorCode::ConnectionRefused
-                    | P2ErrorCode::HttpResponseTimeout
+                HttpError::ConnectionTimeout
+                    | HttpError::ConnectionRefused
+                    | HttpError::HttpResponseTimeout
             ),
             "expected a connection-class error, got {mapped:?}"
         );
@@ -783,7 +638,7 @@ mod tests {
             }],
         };
         let client = ActHttpClient::new(cfg).expect("client builds");
-        let body: UnsyncBoxBody<bytes::Bytes, P2ErrorCode> = Empty::<bytes::Bytes>::new()
+        let body: WasiBody = Empty::<bytes::Bytes>::new()
             .map_err(|_| unreachable!())
             .boxed_unsync();
         let hyper_req = hyper::Request::builder()
@@ -791,22 +646,21 @@ mod tests {
             .uri("http://localhost/")
             .body(body)
             .unwrap();
-        let config = wasmtime_wasi_http::p2::types::OutgoingRequestConfig {
-            use_tls: false,
-            connect_timeout: std::time::Duration::from_secs(5),
-            first_byte_timeout: std::time::Duration::from_secs(5),
-            between_bytes_timeout: std::time::Duration::from_secs(5),
+        let options = RequestOptions {
+            connect_timeout: Some(std::time::Duration::from_secs(5)),
+            first_byte_timeout: Some(std::time::Duration::from_secs(5)),
+            between_bytes_timeout: Some(std::time::Duration::from_secs(5)),
         };
-        let err = client
-            .send_p2(hyper_req, config)
-            .await
-            .expect_err("localhost resolves into denied 127/8, should fail");
+        let err = match client.send(hyper_req, Some(options)).await {
+            Ok(_) => panic!("localhost resolves into denied 127/8, should fail"),
+            Err(e) => e,
+        };
         // DnsError because the resolver returned zero non-denied addresses.
         // (Or ConnectionRefused if the test harness has nothing listening on 127.0.0.1:80,
         //  in which case the DNS filter wasn't applied — test is weak but valid positive-deny check.)
         assert!(
-            matches!(err, P2ErrorCode::DnsError(_))
-                || matches!(err, P2ErrorCode::ConnectionRefused),
+            matches!(err, HttpError::DnsError { .. })
+                || matches!(err, HttpError::ConnectionRefused),
             "expected DnsError or ConnectionRefused, got {err:?}"
         );
     }
@@ -831,7 +685,7 @@ mod tests {
             deny: vec![],
         };
         let client = ActHttpClient::new(cfg).expect("client builds");
-        let body: UnsyncBoxBody<bytes::Bytes, P2ErrorCode> = Empty::<bytes::Bytes>::new()
+        let body: WasiBody = Empty::<bytes::Bytes>::new()
             .map_err(|_| unreachable!())
             .boxed_unsync();
         let hyper_req = hyper::Request::builder()
@@ -839,18 +693,17 @@ mod tests {
             .uri("https://example.com/")
             .body(body)
             .unwrap();
-        let config = wasmtime_wasi_http::p2::types::OutgoingRequestConfig {
-            use_tls: true,
-            connect_timeout: std::time::Duration::from_secs(5),
-            first_byte_timeout: std::time::Duration::from_secs(5),
-            between_bytes_timeout: std::time::Duration::from_secs(5),
+        let options = RequestOptions {
+            connect_timeout: Some(std::time::Duration::from_secs(5)),
+            first_byte_timeout: Some(std::time::Duration::from_secs(5)),
+            between_bytes_timeout: Some(std::time::Duration::from_secs(5)),
         };
-        let err = client
-            .send_p2(hyper_req, config)
-            .await
-            .expect_err("example.com IPs not in 10/8, must fail at DNS");
+        let err = match client.send(hyper_req, Some(options)).await {
+            Ok(_) => panic!("example.com IPs not in 10/8, must fail at DNS"),
+            Err(e) => e,
+        };
         assert!(
-            matches!(err, P2ErrorCode::DnsError(_)),
+            matches!(err, HttpError::DnsError { .. }),
             "expected DnsError, got {err:?}"
         );
     }
@@ -885,7 +738,7 @@ mod tests {
             deny: vec![],
         };
         let client = ActHttpClient::new(cfg).expect("client builds");
-        let body: UnsyncBoxBody<bytes::Bytes, P2ErrorCode> = Empty::<bytes::Bytes>::new()
+        let body: WasiBody = Empty::<bytes::Bytes>::new()
             .map_err(|_| unreachable!())
             .boxed_unsync();
         let hyper_req = hyper::Request::builder()
@@ -893,17 +746,16 @@ mod tests {
             .uri("https://example.com/")
             .body(body)
             .unwrap();
-        let config = wasmtime_wasi_http::p2::types::OutgoingRequestConfig {
-            use_tls: true,
-            connect_timeout: std::time::Duration::from_secs(10),
-            first_byte_timeout: std::time::Duration::from_secs(10),
-            between_bytes_timeout: std::time::Duration::from_secs(10),
+        let options = RequestOptions {
+            connect_timeout: Some(std::time::Duration::from_secs(10)),
+            first_byte_timeout: Some(std::time::Duration::from_secs(10)),
+            between_bytes_timeout: Some(std::time::Duration::from_secs(10)),
         };
-        let incoming = client
-            .send_p2(hyper_req, config)
+        let (incoming, _io) = client
+            .send(hyper_req, Some(options))
             .await
             .expect("example.com allowed via host rule");
-        assert_eq!(incoming.resp.status().as_u16(), 200);
+        assert_eq!(incoming.status().as_u16(), 200);
     }
 
     /// A capturing `AuditWriter`, local to this module — `crate::audit`'s own
@@ -928,11 +780,11 @@ mod tests {
     /// continues to).
     ///
     /// Builds a bare `reqwest::Client` with `build_redirect_policy` directly,
-    /// rather than going through `ActHttpClient::send_p2`: `p2_to_reqwest`
+    /// rather than going through `ActHttpClient::send`: `to_reqwest`
     /// wraps every outgoing body — even an empty GET's — via
     /// `reqwest::Body::wrap_stream`, and reqwest silently declines to follow
     /// a redirect at all when the original body isn't provably re-sendable,
-    /// so `send_p2` never reaches the redirect policy for *any* outcome
+    /// so `send` never reaches the redirect policy for *any* outcome
     /// (allow or deny). That's a real, separate gap in the WASI conversion
     /// layer — outside this task's scope (it would affect the redirect
     /// *decision* on the allow side too, not just this audit gap) — noted in
@@ -1055,7 +907,7 @@ mod tests {
             ],
         };
         let client = ActHttpClient::new(cfg).expect("client builds");
-        let body: UnsyncBoxBody<bytes::Bytes, P2ErrorCode> = Empty::<bytes::Bytes>::new()
+        let body: WasiBody = Empty::<bytes::Bytes>::new()
             .map_err(|_| unreachable!())
             .boxed_unsync();
         let hyper_req = hyper::Request::builder()
@@ -1063,11 +915,10 @@ mod tests {
             .uri("http://localhost/")
             .body(body)
             .unwrap();
-        let config = wasmtime_wasi_http::p2::types::OutgoingRequestConfig {
-            use_tls: false,
-            connect_timeout: std::time::Duration::from_secs(5),
-            first_byte_timeout: std::time::Duration::from_secs(5),
-            between_bytes_timeout: std::time::Duration::from_secs(5),
+        let options = RequestOptions {
+            connect_timeout: Some(std::time::Duration::from_secs(5)),
+            first_byte_timeout: Some(std::time::Duration::from_secs(5)),
+            between_bytes_timeout: Some(std::time::Duration::from_secs(5)),
         };
 
         let writer = CapturingWriter::default();
@@ -1078,15 +929,15 @@ mod tests {
         ));
         let _guard = tracing::subscriber::set_default(sub);
 
-        let err = client
-            .send_p2(hyper_req, config)
-            .await
-            .expect_err("both loopback families are denied, must fail at DNS");
+        let err = match client.send(hyper_req, Some(options)).await {
+            Ok(_) => panic!("both loopback families are denied, must fail at DNS"),
+            Err(e) => e,
+        };
 
         drop(_guard);
 
         assert!(
-            matches!(err, P2ErrorCode::DnsError(_)),
+            matches!(err, HttpError::DnsError { .. }),
             "expected DnsError, got {err:?}"
         );
 

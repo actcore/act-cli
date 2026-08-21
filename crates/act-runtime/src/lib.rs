@@ -49,7 +49,7 @@ pub mod sessions;
 mod actor;
 mod engine;
 mod info;
-mod store;
+pub(crate) mod store;
 
 // Generated bindings from WIT — fully auto-generated, no manual patching.
 #[allow(unused_mut, unused_variables, dead_code)]

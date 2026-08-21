@@ -49,9 +49,6 @@ tar.workspace = true
 url.workspace = true
 shellexpand = "3"
 wasmparser.workspace = true
-wasmtime = "47"
-wasmtime-wasi = { version = "47", default-features = false, features = ["p2", "p3"] }
-wasmtime-wasi-http = { version = "47", default-features = false, features = ["p2", "p3"] }
 http.workspace = true
 http-body-util = "0.1"
 hyper = "1"

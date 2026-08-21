@@ -684,3 +684,55 @@ async fn a_closed_actor_channel_surfaces_as_an_internal_error() {
         ComponentError::Tool(_) => panic!("a dead actor is a host failure, not a tool error"),
     }
 }
+
+// ── the sockets gate's local-bind waiver ─────────────────────────────────────
+
+#[test]
+fn the_wildcard_bind_wasmtime_checks_before_a_connect_is_waved_through() {
+    use std::net::SocketAddr;
+    use wasmtime_wasi::sockets::SocketAddrUse;
+
+    // What wasmtime 48 passes before connecting an unbound socket, for both
+    // address families. Putting these through the ceiling denies every
+    // outbound connection an allowlist was written to permit.
+    for addr in ["0.0.0.0:0", "[::]:0"] {
+        let addr: SocketAddr = addr.parse().unwrap();
+        assert!(
+            store::is_local_implicit_bind(addr, SocketAddrUse::TcpBind),
+            "{addr} is the local side of an outbound socket, not a destination"
+        );
+        assert!(store::is_local_implicit_bind(addr, SocketAddrUse::UdpBind));
+    }
+}
+
+#[test]
+fn nothing_that_confers_reach_is_waved_through() {
+    use std::net::SocketAddr;
+    use wasmtime_wasi::sockets::SocketAddrUse;
+
+    let wildcard: SocketAddr = "0.0.0.0:0".parse().unwrap();
+    // The waiver is scoped to *binding*. Every operation that actually reaches
+    // a peer, or accepts one, still meets the ceiling — including on the very
+    // same wildcard address.
+    for reason in [
+        SocketAddrUse::TcpConnect,
+        SocketAddrUse::TcpListen,
+        SocketAddrUse::TcpAccept,
+        SocketAddrUse::UdpSend,
+        SocketAddrUse::UdpReceive,
+    ] {
+        assert!(
+            !store::is_local_implicit_bind(wildcard, reason),
+            "{reason:?} confers reach and must be gated even on {wildcard}"
+        );
+    }
+
+    // A bind to a real address is a real request, wildcard IP or not.
+    for addr in ["0.0.0.0:8080", "127.0.0.1:0", "10.0.0.1:53"] {
+        let addr: SocketAddr = addr.parse().unwrap();
+        assert!(
+            !store::is_local_implicit_bind(addr, SocketAddrUse::TcpBind),
+            "{addr} names something concrete and must meet the ceiling"
+        );
+    }
+}

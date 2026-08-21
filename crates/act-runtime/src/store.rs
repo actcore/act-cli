@@ -7,7 +7,7 @@ use wasmtime::component::ResourceTable;
 use wasmtime::{Engine, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use wasmtime_wasi_http::WasiHttpCtx;
-use wasmtime_wasi_http::p3::WasiHttpCtxView;
+use wasmtime_wasi_http::WasiHttpCtxView;
 
 use crate::info::ComponentInfo;
 use crate::{credentials, fs_policy, http_client, http_policy};
@@ -16,8 +16,7 @@ use crate::{credentials, fs_policy, http_client, http_policy};
 pub struct HostState {
     pub(crate) wasi: WasiCtx,
     pub(crate) table: ResourceTable,
-    pub(crate) http_p2: WasiHttpCtx,
-    pub(crate) http_p3: WasiHttpCtx,
+    pub(crate) http: WasiHttpCtx,
     pub(crate) http_hooks: http_policy::PolicyHttpHooks,
     #[allow(dead_code)] // retained for Task 10 DNS resolver hook access
     pub(crate) http_client: Arc<http_client::ActHttpClient>,
@@ -63,24 +62,46 @@ impl WasiView for HostState {
         }
     }
 }
-impl wasmtime_wasi_http::p2::WasiHttpView for HostState {
-    fn http(&mut self) -> wasmtime_wasi_http::p2::WasiHttpCtxView<'_> {
-        wasmtime_wasi_http::p2::WasiHttpCtxView {
-            ctx: &mut self.http_p2,
-            table: &mut self.table,
-            hooks: &mut self.http_hooks,
-        }
-    }
-}
-impl wasmtime_wasi_http::p3::WasiHttpView for HostState {
+impl wasmtime_wasi_http::WasiHttpView for HostState {
     fn http(&mut self) -> WasiHttpCtxView<'_> {
         WasiHttpCtxView {
-            ctx: &mut self.http_p3,
+            ctx: &mut self.http,
             table: &mut self.table,
             hooks: &mut self.http_hooks,
         }
     }
 }
+/// Whether this check is the local side of an outbound socket rather than a
+/// destination the component asked to reach.
+///
+/// Since wasmtime 48 an outbound `connect` on an unbound socket — and a
+/// `listen` on one — is preceded by a bind check carrying the *wildcard*
+/// address, because the OS is about to bind there implicitly. That is
+/// documented on `SocketAddrUse::TcpBind`: "the address that is passed to the
+/// check is the address provided to `bind` for explicit binds, or the wildcard
+/// address for implicit binds".
+///
+/// `0.0.0.0:0` is not a destination and no allowlist would ever name one, so
+/// putting it through the ceiling denies every outbound connection the
+/// allowlist was written to permit — which is what the wasmtime 48 upgrade
+/// first did.
+///
+/// Waving it through grants nothing by itself. Reaching a peer still has to
+/// pass `TcpConnect` on the real address; accepting one still has to pass
+/// `TcpListen`, and then `TcpAccept` per client. An explicit
+/// `bind("0.0.0.0:0")` is indistinguishable from the implicit one at this
+/// point and takes the same path, to the same effect and for the same reason:
+/// binding confers no reach on its own.
+pub(crate) fn is_local_implicit_bind(
+    addr: std::net::SocketAddr,
+    reason: wasmtime_wasi::sockets::SocketAddrUse,
+) -> bool {
+    use wasmtime_wasi::sockets::SocketAddrUse;
+    matches!(reason, SocketAddrUse::TcpBind | SocketAddrUse::UdpBind)
+        && addr.ip().is_unspecified()
+        && addr.port() == 0
+}
+
 /// Declared constraints for one capability class, as `CapabilityProvider::resolve`
 /// expects them.
 ///
@@ -327,12 +348,7 @@ pub async fn create_store(
     let mut preopen_pairs = Vec::with_capacity(preopens.len());
     for mount in preopens {
         builder
-            .preopened_dir(
-                &mount.host,
-                &mount.guest,
-                wasmtime_wasi::DirPerms::all(),
-                wasmtime_wasi::FilePerms::all(),
-            )
+            .preopened_dir(&mount.host, &mount.guest, wasmtime_wasi::FsPerms::ReadWrite)
             .map_err(|e| {
                 anyhow::anyhow!(
                     "failed to preopen host dir '{}' as guest '{}': {}",
@@ -356,9 +372,24 @@ pub async fn create_store(
                 let cache = cache_clone.clone();
                 Box::pin(async move {
                     use wasmtime_wasi::sockets::SocketAddrUse;
+
+                    if is_local_implicit_bind(addr, reason) {
+                        return true;
+                    }
+
+                    // Exhaustive on purpose: a `_` arm silently filed
+                    // wasmtime 48's new `TcpListen` and `TcpAccept` under
+                    // "udp", in the audit trail and in the attrs a rule
+                    // matches on. The next added variant should fail to
+                    // compile rather than repeat that.
                     let proto = match reason {
-                        SocketAddrUse::TcpBind | SocketAddrUse::TcpConnect => "tcp",
-                        _ => "udp",
+                        SocketAddrUse::TcpBind
+                        | SocketAddrUse::TcpListen
+                        | SocketAddrUse::TcpAccept
+                        | SocketAddrUse::TcpConnect => "tcp",
+                        SocketAddrUse::UdpBind
+                        | SocketAddrUse::UdpSend
+                        | SocketAddrUse::UdpReceive => "udp",
                     };
                     let key = format!("{}:{}", addr.ip(), addr.port());
                     let op = ResourceOp {
@@ -439,8 +470,7 @@ pub async fn create_store(
     let state = HostState {
         wasi,
         table: ResourceTable::new(),
-        http_p2: WasiHttpCtx::new(),
-        http_p3: WasiHttpCtx::new(),
+        http: WasiHttpCtx::new(),
         http_hooks: http_policy::PolicyHttpHooks::new(
             http_ceiling,
             http_client.clone(),
