@@ -35,18 +35,18 @@ pub fn validate(caps: &Capabilities, credentials: &[StdCredential]) -> Result<()
         );
     }
 
-    // Design §4.3 rule 1: the `std:` namespace is registry-governed. A user's
-    // own config file already cannot redefine a `std:` kind
-    // (`KindRegistry::load`); a component is less trusted than that config and
+    // Design §4.3 rule 1: the `std:` namespace is registry-governed. An
+    // operator's own config file already cannot redefine a `std:` field name
+    // (`FieldRegistry::load`); a component is less trusted than that config and
     // must not be able to either. Without this, a component declares
     // `std:username` / `std:password`, and the prompt it produces is
-    // indistinguishable from one the host wrote for a registered kind — which
+    // indistinguishable from one the host wrote for a registered name — which
     // is the phishing case §5.5 names first.
     for c in credentials {
         if c.key.starts_with("std:") {
             bail!(
                 "[[std.credentials]] key '{}' is in the std: namespace, which is \
-                 reserved for kinds registered in ACT-CONSTANTS. Use your own \
+                 reserved for names registered in ACT-CONSTANTS. Use your own \
                  namespace, e.g. 'acme:{}'.",
                 c.key,
                 c.key.trim_start_matches("std:")
@@ -303,10 +303,10 @@ mod tests {
     /// The phishing case, refused where the author can see it.
     ///
     /// A component declaring `std:username` / `std:password` produces a prompt a
-    /// human cannot tell from one the host wrote for a registered kind — design
+    /// human cannot tell from one the host wrote for a registered name — design
     /// §5.5 names that attack first. Note the asymmetry this closes: an
-    /// operator's own config file already cannot redefine a `std:` id
-    /// (`KindRegistry::load`), and a component is less trusted than that config.
+    /// operator's own config file already cannot redefine a `std:` name
+    /// (`FieldRegistry::load`), and a component is less trusted than that config.
     #[test]
     fn a_declared_credential_may_not_take_a_std_name() {
         use act_types::CapabilityRequest;
@@ -315,12 +315,12 @@ mod tests {
             .insert(CAP_CREDENTIALS.to_string(), CapabilityRequest::default());
 
         let by_key = vec![StdCredential {
-            key: "std:basic".into(),
+            key: "std:login".into(),
             ..Default::default()
         }];
         let msg = validate(&caps, &by_key).unwrap_err().to_string();
         assert!(
-            msg.contains("std:basic") && msg.contains("namespace"),
+            msg.contains("std:login") && msg.contains("namespace"),
             "{msg}"
         );
 

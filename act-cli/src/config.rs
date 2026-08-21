@@ -122,10 +122,11 @@ pub fn default_config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("act").join("config.toml"))
 }
 
-/// Directory holding operator-defined credential field-type definitions, one
-/// `*.toml` per kind. Read by `KindRegistry::load`; absent is not an error.
-pub fn kinds_dir() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("act").join("kinds"))
+/// Directory holding operator-defined credential **field** definitions, one
+/// `*.toml` per field name. Read by `FieldRegistry::load`; absent is not an
+/// error, and is the common case.
+pub fn fields_dir() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("act").join("fields"))
 }
 
 /// Load and parse a TOML config file. Returns `ConfigFile::default()` if the file doesn't exist.

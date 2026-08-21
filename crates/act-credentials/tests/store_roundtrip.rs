@@ -6,11 +6,11 @@ use act_credentials::store::CredentialStore;
 
 fn rec() -> SecretRecord {
     let mut fields = BTreeMap::new();
-    fields.insert("std:value".to_string(), SecretValue::new("tok"));
+    fields.insert("acme:token".to_string(), SecretValue::new("tok"));
     let mut host_only = BTreeMap::new();
     host_only.insert("std:refresh-token".to_string(), SecretValue::new("rt"));
     SecretRecord {
-        kind: "std:opaque".into(),
+        kind: "std:fields".into(),
         fields,
         host_only,
         description: Some("Notion work".into()),
@@ -28,7 +28,7 @@ fn put_get_list_erase_roundtrip() {
     store.put(c, "notion", &rec()).unwrap();
 
     let got = store.get(c, "notion").unwrap().expect("stored");
-    assert_eq!(got.fields["std:value"].expose_str(), Some("tok"));
+    assert_eq!(got.fields["acme:token"].expose_str(), Some("tok"));
     assert_eq!(got.host_only["std:refresh-token"].expose_str(), Some("rt"));
 
     let listed = store.list(Some(c)).unwrap();

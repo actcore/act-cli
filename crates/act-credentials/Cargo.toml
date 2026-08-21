@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Credential profiles, kinds and storage backends for the ACT host"
+description = "Credential profiles, field definitions and storage backends for the ACT host"
 keywords = ["act", "wasm", "credentials"]
 
 [dependencies]

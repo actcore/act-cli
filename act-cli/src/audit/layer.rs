@@ -539,7 +539,7 @@ mod tests {
             component_ref: "ghcr.io/actpkg/notion@0.1.0".into(),
             session_id: "sess-7".into(),
             key: "notion-work".into(),
-            kind: "std:opaque".into(),
+            kind: "std:fields".into(),
         }
     }
 
@@ -552,7 +552,7 @@ mod tests {
         let out = run(|| emit_credential_issue(&issue()));
         assert_eq!(out.len(), 1, "expected one line, got {out:?}");
         assert!(out[0].contains("notion-work"), "key missing: {}", out[0]);
-        assert!(out[0].contains("std:opaque"), "kind missing: {}", out[0]);
+        assert!(out[0].contains("std:fields"), "kind missing: {}", out[0]);
         assert!(
             out[0].contains("ghcr.io/actpkg/notion@0.1.0"),
             "component missing: {}",

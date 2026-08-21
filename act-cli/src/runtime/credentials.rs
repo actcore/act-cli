@@ -499,7 +499,7 @@ mod tests {
     fn host(dir: &std::path::Path) -> CredentialHost {
         let store = FileStore::new(dir.to_path_buf());
         let mut fields = BTreeMap::new();
-        fields.insert("std:value".to_string(), SecretValue::new("tok"));
+        fields.insert("acme:token".to_string(), SecretValue::new("tok"));
         let mut host_only = BTreeMap::new();
         host_only.insert("std:refresh-token".to_string(), SecretValue::new("rt"));
         store
@@ -507,7 +507,7 @@ mod tests {
                 "comp",
                 "notion",
                 &SecretRecord {
-                    kind: "std:opaque".into(),
+                    kind: "std:fields".into(),
                     fields,
                     host_only,
                     description: None,
@@ -712,7 +712,7 @@ mod tests {
         let got = serve_get(&ctx, "s1", &want("notion"))
             .await
             .expect("served");
-        assert_eq!(got.kind, "std:opaque");
+        assert_eq!(got.kind, "std:fields");
         assert_eq!(store.gets.load(Ordering::SeqCst), 1);
 
         // Second request for the same key: the per-run cache answers, so the
@@ -773,14 +773,15 @@ mod tests {
     const MATERIAL: &str = "987654321";
 
     /// A `secrets.json` the way an external secret-materialiser writes one:
-    /// `std:value` as a JSON number, which the CLI's own `set` cannot produce
-    /// but `jq` / `op` / `kubectl get secret -o json` do without being asked.
+    /// the field's value as a JSON number, which the CLI's own `set` cannot
+    /// produce but `jq` / `op` / `kubectl get secret -o json` do without being
+    /// asked.
     fn seed_numeric_value(dir: &std::path::Path) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(
             act_credentials::backend::file::secrets_path(dir),
             format!(
-                r#"{{"entries":{{"comp":{{"notion":{{"kind":"std:opaque","fields":{{"std:value":{MATERIAL}}},"host_only":{{}},"description":null,"expires_at":null}}}}}}}}"#
+                r#"{{"entries":{{"comp":{{"notion":{{"kind":"std:fields","fields":{{"acme:token":{MATERIAL}}},"host_only":{{}},"description":null,"expires_at":null}}}}}}}}"#
             ),
         )
         .unwrap();
@@ -923,9 +924,9 @@ mod tests {
         h.note_session_opened("s1");
 
         let got = h.get_secret("s1", "notion").expect("found");
-        assert_eq!(got.kind, "std:opaque");
+        assert_eq!(got.kind, "std:fields");
         let keys: Vec<&String> = got.fields.keys().collect();
-        assert_eq!(keys, vec!["std:value"]);
+        assert_eq!(keys, vec!["acme:token"]);
     }
 
     #[test]
@@ -986,7 +987,7 @@ mod tests {
         let listed = h.list_secrets(Some("s1")).expect("listed");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].key, "notion");
-        assert_eq!(listed[0].kind, "std:opaque");
+        assert_eq!(listed[0].kind, "std:fields");
         // The whole rendering, not just the fields we assert on: a value
         // reaching a listing at all is the failure this guards.
         assert!(!format!("{listed:?}").contains("tok"));
@@ -1018,13 +1019,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let h = host(dir.path());
         let mut fields = BTreeMap::new();
-        fields.insert("std:value".to_string(), SecretValue::new("other"));
+        fields.insert("acme:token".to_string(), SecretValue::new("other"));
         FileStore::new(dir.path().to_path_buf())
             .put(
                 "someone-else",
                 "notion",
                 &SecretRecord {
-                    kind: "std:opaque".into(),
+                    kind: "std:fields".into(),
                     fields,
                     host_only: BTreeMap::new(),
                     description: None,
@@ -1035,7 +1036,7 @@ mod tests {
 
         h.note_session_opened("s1");
         let got = h.get_secret("s1", "notion").expect("own key still found");
-        assert_eq!(got.fields["std:value"].expose_str(), Some("tok"));
+        assert_eq!(got.fields["acme:token"].expose_str(), Some("tok"));
         assert_eq!(h.list_secrets(Some("s1")).unwrap().len(), 1);
     }
 
@@ -1108,10 +1109,10 @@ mod tests {
         h.note_session_opened("s1");
         let wit = to_wit_secret(h.get_secret("s1", "notion").unwrap()).unwrap();
 
-        assert_eq!(wit.kind, "std:opaque");
+        assert_eq!(wit.kind, "std:fields");
         assert_eq!(wit.fields.len(), 1);
         let (name, bytes) = &wit.fields[0];
-        assert_eq!(name, "std:value");
+        assert_eq!(name, "acme:token");
         let decoded: String = act_types::cbor::from_cbor(bytes).expect("dCBOR text string");
         assert_eq!(decoded, "tok");
     }
@@ -1165,7 +1166,7 @@ mod tests {
         // exactly the case `STORE_UNREADABLE` exists to name. The guard still
         // refuses it; only the object case above is new.
         let mut fields = BTreeMap::new();
-        fields.insert("std:value".to_string(), SecretValue::new(987654321));
+        fields.insert("acme:token".to_string(), SecretValue::new(987654321));
         let secret = Secret {
             kind: "std:string".into(),
             fields,
@@ -1202,7 +1203,7 @@ mod tests {
     fn a_negative_expiry_reads_as_no_expiry_rather_than_a_far_future_date() {
         let info = to_wit_info(SecretInfo {
             key: "k".into(),
-            kind: "std:opaque".into(),
+            kind: "std:fields".into(),
             description: None,
             expires_at: Some(-1),
         });
@@ -1210,7 +1211,7 @@ mod tests {
 
         let ok = to_wit_info(SecretInfo {
             key: "k".into(),
-            kind: "std:opaque".into(),
+            kind: "std:fields".into(),
             description: Some("note".into()),
             expires_at: Some(1_800_000_000),
         });

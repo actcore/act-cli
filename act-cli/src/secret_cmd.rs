@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::io::{IsTerminal, Read, Write};
 
 use act_credentials::backend::{self, BackendChoice};
-use act_credentials::kind::{KindDef, KindRegistry};
+use act_credentials::field::{FieldDef, FieldRegistry};
 use act_credentials::record::SecretRecord;
 use act_credentials::record::SecretValue;
 use act_credentials::store::CredentialStore;
@@ -39,8 +39,8 @@ pub enum SecretCmd {
 }
 
 /// Arguments to `act secret set`. Grouped rather than spread across the
-/// subcommand: there are eight of them, and threading eight positionals through
-/// to `cmd_set` is what clippy's `too_many_arguments` is for.
+/// subcommand: threading each one through to `cmd_set` as its own positional
+/// is what clippy's `too_many_arguments` is for.
 #[derive(clap::Args)]
 pub struct SetArgs {
     /// Component reference (path, URL, OCI ref, or name) — the same
@@ -48,19 +48,17 @@ pub struct SetArgs {
     pub component: ComponentRef,
     #[arg(long, default_value = "default")]
     pub key: String,
-    /// A registered shape — `std:basic`, `std:oauth2`, or one an operator
-    /// defined. Mutually exclusive with `--field`.
-    #[arg(long, conflicts_with = "field")]
-    pub kind: Option<String>,
-    /// Name a field to store, repeatable. Use this for a credential that
-    /// is not one of the registered shapes — a single API token, say:
-    /// `--field acme:token`. Each field is a `std:string`.
+    /// Name a field to store, repeatable and required: a credential IS its
+    /// set of named fields. `--field std:username --field std:password` is
+    /// a password credential; `--field acme:token` is a single API token.
     ///
-    /// There is no built-in "one string" shape on purpose: its field would
-    /// need a name, and a name like `std:value` tells a reader nothing
-    /// while the model rests on names carrying meaning. So the person
-    /// storing the credential names it.
-    #[arg(long = "field", value_name = "NAME")]
+    /// A registered name (ACT-CONSTANTS §8.2) carries its type and label;
+    /// an unregistered one is a secret `std:string` labelled by itself, so
+    /// a component's own namespace works without any host-side definition.
+    /// There is no built-in "one string" name on purpose — `std:value` would
+    /// tell a reader nothing, in a model that rests on names carrying the
+    /// meaning. The person storing the credential names it.
+    #[arg(long = "field", value_name = "NAME", required = true)]
     pub field: Vec<String>,
     #[arg(long)]
     pub description: Option<String>,
@@ -94,7 +92,6 @@ fn cmd_set(args: SetArgs, opts: &GlobalOpts) -> Result<()> {
     let SetArgs {
         component,
         key,
-        kind,
         field,
         description,
         fields_stdin,
@@ -102,48 +99,27 @@ fn cmd_set(args: SetArgs, opts: &GlobalOpts) -> Result<()> {
     } = args;
     // Built-ins plus whatever the operator defined. A missing directory is not
     // an error — it is the common case — and a malformed file is, because
-    // silently ignoring it would present the operator with an "unknown kind"
-    // for a kind they can see on disk.
-    let registry = match crate::config::kinds_dir() {
-        Some(dir) => KindRegistry::load(&dir).with_context(|| {
-            format!("reading credential kind definitions from {}", dir.display())
+    // silently ignoring it would present the operator with a field definition
+    // they can see on disk but the command cannot.
+    let registry = match crate::config::fields_dir() {
+        Some(dir) => FieldRegistry::load(&dir).with_context(|| {
+            format!(
+                "reading credential field definitions from {}",
+                dir.display()
+            )
         })?,
-        None => KindRegistry::builtin(),
+        None => FieldRegistry::builtin(),
     };
-    // Either a registered shape, or fields the operator named. There is no
-    // default: a credential that is one string is one *named* field, and only
-    // the person storing it knows what to call it.
-    let (kind, registry, def_owner) = match (kind.as_deref(), field.is_empty()) {
-        (Some(k), true) => {
-            validate_kind(&registry, k)?;
-            (k.to_string(), registry, None)
-        }
-        (None, false) => {
-            let ad_hoc = KindDef {
-                id: crate::login_cmd::KIND_FIELDS.to_string(),
-                description: description.clone(),
-                fields: field
-                    .iter()
-                    .map(|name| act_credentials::kind::FieldDef {
-                        key: name.clone(),
-                        label: name.clone(),
-                        field_type: "std:string".to_string(),
-                        secret: true,
-                        required: true,
-                    })
-                    .collect(),
-            };
-            let id = ad_hoc.id.clone();
-            (id, KindRegistry::single(ad_hoc), None::<()>)
-        }
-        (None, true) => anyhow::bail!(
-            "nothing to store: pass --kind for a registered shape (see `act secret set --help`) \
-             or --field NAME for each field you want, e.g. --field acme:token"
-        ),
-        (Some(_), false) => unreachable!("clap enforces conflicts_with"),
-    };
-    let _ = def_owner;
-    let def = validate_kind(&registry, &kind)?;
+    // The fields to store, in the order they were named. A registered name
+    // brings its label, type and secrecy from the registry; anything else is a
+    // secret string labelled by its own name (design §3.2 — meaning lives in
+    // names, so an unregistered one is presented verbatim rather than dressed
+    // in invented words).
+    // `--field` is `required` at the clap layer, so an empty list never
+    // reaches here and there is no second guard for it: two enforcement points
+    // for one rule means one of them is untested.
+    let defs: Vec<act_credentials::field::FieldDef> =
+        field.iter().map(|name| registry.resolve(name)).collect();
 
     // The store is opened, and its nature disclosed, *before* the credential
     // is read. Interactively the operator has to learn the store is plaintext
@@ -163,18 +139,21 @@ fn cmd_set(args: SetArgs, opts: &GlobalOpts) -> Result<()> {
     } else if let Some(cmd_str) = from_command.as_deref() {
         read_fields_from_command(cmd_str)?
     } else if std::io::stdin().is_terminal() {
-        prompt_fields_interactively(&registry, &kind)?
+        prompt_fields_interactively(&defs)?
     } else {
         anyhow::bail!(
             "no credential source: stdin is not a terminal, so a value \
              cannot be prompted for. Use --fields-stdin or --from-command."
         );
     };
-    validate_fields(def, &fields)?;
+    validate_fields(&defs, &fields)?;
 
     let profile = resolve::profile_key(&component);
     let record = SecretRecord {
-        kind: kind.clone(),
+        // Every credential is a set of named fields now, so the stored `kind`
+        // says exactly that. The WIT requires the field; this is the true thing
+        // to put in it.
+        kind: crate::login_cmd::KIND_FIELDS.to_string(),
         fields,
         host_only: BTreeMap::new(),
         description,
@@ -184,7 +163,15 @@ fn cmd_set(args: SetArgs, opts: &GlobalOpts) -> Result<()> {
         .put(&profile, &key, &record)
         .with_context(|| format!("writing credential '{key}' for {profile}"))?;
 
-    println!("stored '{key}' ({kind}) for {profile}");
+    // Prompt order, filtered by what is actually in the record — an optional
+    // field that was skipped was never stored and must not be reported as if
+    // it were.
+    let names: Vec<&str> = defs
+        .iter()
+        .map(|d| d.key.as_str())
+        .filter(|k| record.fields.contains_key(*k))
+        .collect();
+    println!("stored '{key}' for {profile}: {}", names.join(", "));
     Ok(())
 }
 
@@ -352,29 +339,18 @@ fn disclose_if_first_write_to(
 
 /// Returns the definition, not just `Ok(())`: the caller needs it to check
 /// the fields against the kind that names them.
-fn validate_kind<'a>(reg: &'a KindRegistry, kind: &str) -> Result<&'a KindDef> {
-    if let Some(def) = reg.get(kind) {
-        return Ok(def);
-    }
-    let known: Vec<&str> = reg.ids().collect();
-    anyhow::bail!(
-        "unknown credential kind '{kind}'; known kinds: {}",
-        known.join(", ")
-    );
-}
-
-/// A field map has to satisfy the kind that names it.
+/// A field map has to satisfy the fields that were asked for.
 ///
-/// Without this, `--kind std:basic --fields-stdin '{"token":"…"}'` is stored
-/// happily and the mistake surfaces much later, inside a component, as a
+/// Without this, `--field std:username --fields-stdin '{"token":"…"}'` is
+/// stored happily and the mistake surfaces much later, inside a component, as a
 /// missing field it cannot explain. The interactive path is already
 /// registry-driven and cannot produce a map that fails here; the two scripted
 /// paths accept whatever they are handed, which is exactly where a typo
 /// enters.
 ///
 /// Missing required fields are an error. Unknown keys are a warning and are
-/// stored: a kind lists what a *reader* can rely on, and a component may
-/// legitimately be handed more than that — but an operator who misspelled
+/// stored: the asked-for list is what a *reader* can rely on, and a component
+/// may legitimately be handed more than that — but an operator who misspelled
 /// `std:usrname` should hear about it. Only names are printed; the values
 /// they hold never are.
 ///
@@ -383,9 +359,8 @@ fn validate_kind<'a>(reg: &'a KindRegistry, kind: &str) -> Result<&'a KindDef> {
 /// mismatch surfaces here, by name, instead of inside a component that
 /// receives a string where the SDK expects a map and fails for a reason
 /// nothing points back to this command.
-fn validate_fields(def: &KindDef, fields: &BTreeMap<String, SecretValue>) -> Result<()> {
-    let missing: Vec<&str> = def
-        .fields
+fn validate_fields(defs: &[FieldDef], fields: &BTreeMap<String, SecretValue>) -> Result<()> {
+    let missing: Vec<&str> = defs
         .iter()
         .filter(|f| f.required)
         .map(|f| f.key.as_str())
@@ -400,18 +375,13 @@ fn validate_fields(def: &KindDef, fields: &BTreeMap<String, SecretValue>) -> Res
                 fields.keys().cloned().collect::<Vec<_>>().join(", ")
             )
         };
-        anyhow::bail!(
-            "credential kind '{}' requires {} — {given}",
-            def.id,
-            missing.join(", ")
-        );
+        anyhow::bail!("missing {} — {given}", missing.join(", "));
     }
     for (key, value) in fields {
-        let Some(field) = def.fields.iter().find(|f| &f.key == key) else {
+        let Some(field) = defs.iter().find(|f| &f.key == key) else {
             eprintln!(
-                "act secret: warning: '{key}' is not a field of {}; storing it, but \
-                 a component reading this credential by kind will not look for it",
-                def.id
+                "act secret: warning: '{key}' was not among the fields asked for; \
+                 storing it, but nothing will look for it under that name"
             );
             continue;
         };
@@ -422,9 +392,7 @@ fn validate_fields(def: &KindDef, fields: &BTreeMap<String, SecretValue>) -> Res
         };
         anyhow::ensure!(
             shape_ok,
-            "field '{key}' of credential kind '{}' has type {}, which expects {}, \
-             not {}",
-            def.id,
+            "field '{key}' has type {}, which expects {}, not {}",
             field.field_type,
             if field.field_type == "std:oauth2" {
                 "an object"
@@ -547,6 +515,32 @@ pub struct Prompt {
     pub field_key: String,
     pub label: String,
     pub hidden: bool,
+    /// False for a field the declaration marked optional. Such a field is
+    /// still prompted for — it is skipped by answering nothing, not by being
+    /// hidden from the only interactive path there is.
+    pub required: bool,
+}
+
+impl Prompt {
+    /// The line the operator reads.
+    ///
+    /// `show_key` puts the field's namespaced key beside the label, which is
+    /// how a component's own wording is marked as foreign (design §5.5). The
+    /// skip hint is the host's own words and is appended last, so a component
+    /// cannot author a prompt that looks skippable when it is not — and if it
+    /// copies the wording into its label, answering nothing still fails on a
+    /// required field.
+    pub fn line(&self, show_key: bool) -> String {
+        let mut line = if show_key {
+            format!("  {} [{}]", self.label, self.field_key)
+        } else {
+            self.label.clone()
+        };
+        if !self.required {
+            line.push_str(" (optional — Enter to skip)");
+        }
+        line
+    }
 }
 
 /// Labels come from the registry, never from a caller or a component — a
@@ -558,11 +552,8 @@ pub struct Prompt {
 /// expects an object — a mismatch that would surface much later, inside a
 /// component, as a failure nothing points back to this command. `Result`
 /// rather than `Option` so that refusal carries the reason.
-pub fn prompts_for(reg: &KindRegistry, kind: &str) -> Result<Vec<Prompt>> {
-    let def = reg
-        .get(kind)
-        .ok_or_else(|| anyhow::anyhow!("unknown credential kind '{kind}'"))?;
-    if let Some(f) = def.fields.iter().find(|f| f.field_type != "std:string") {
+pub fn prompts_for(defs: &[FieldDef]) -> Result<Vec<Prompt>> {
+    if let Some(f) = defs.iter().find(|f| f.field_type != "std:string") {
         anyhow::bail!(
             "field {} has type {}, which cannot be typed at a prompt \
              (a {} value is acquired by its flow, not by hand)",
@@ -571,31 +562,53 @@ pub fn prompts_for(reg: &KindRegistry, kind: &str) -> Result<Vec<Prompt>> {
             f.field_type
         );
     }
-    Ok(def
-        .fields
+    Ok(defs
         .iter()
-        .filter(|f| f.required)
         .map(|f| Prompt {
             field_key: f.key.clone(),
             label: f.label.clone(),
             hidden: f.secret,
+            required: f.required,
         })
         .collect())
 }
 
-fn prompt_fields_interactively(
-    reg: &KindRegistry,
-    kind: &str,
-) -> Result<BTreeMap<String, SecretValue>> {
-    let prompts = prompts_for(reg, kind)?;
+/// Reads one field. `None` means an optional field was skipped.
+///
+/// The empty answer carries both meanings, which is why this is one function
+/// and not two call sites deciding for themselves. On a **required** field it
+/// is the same failure as EOF one layer up: a credential that stores cleanly
+/// and holds nothing, so the operator believes they provisioned something and
+/// the component finds nothing. On an **optional** field it is the whole point
+/// — that is how the field is left out. Someone whose credential really is the
+/// empty string has `--fields-stdin`.
+pub(crate) fn prompt_one(p: &Prompt, show_key: bool) -> Result<Option<SecretValue>> {
+    let shown = p.line(show_key);
+    let value = if p.hidden {
+        read_hidden_line(&shown)?
+    } else {
+        read_visible_line(&shown)?
+    };
+    if value.is_empty() {
+        anyhow::ensure!(
+            !p.required,
+            "'{}' cannot be empty — nothing was stored",
+            p.field_key
+        );
+        return Ok(None);
+    }
+    Ok(Some(SecretValue::new(value)))
+}
+
+fn prompt_fields_interactively(defs: &[FieldDef]) -> Result<BTreeMap<String, SecretValue>> {
+    let prompts = prompts_for(defs)?;
     let mut fields = BTreeMap::new();
-    for p in prompts {
-        let value = if p.hidden {
-            read_hidden_line(&p.label)?
-        } else {
-            read_visible_line(&p.label)?
-        };
-        fields.insert(p.field_key, SecretValue::new(value));
+    for p in &prompts {
+        // `show_key = false`: every label here came from the registry or is a
+        // field name the operator typed, so none of it is a component's prose.
+        if let Some(value) = prompt_one(p, false)? {
+            fields.insert(p.field_key.clone(), value);
+        }
     }
     Ok(fields)
 }
@@ -673,52 +686,54 @@ pub(crate) fn read_hidden_line(label: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use act_credentials::kind::KindRegistry;
+    use act_credentials::field::FieldRegistry;
     use std::path::PathBuf;
 
+    /// The field definitions a caller would get for these names — the same
+    /// path `cmd_set` takes for `--field`.
+    fn defs(names: &[&str]) -> Vec<FieldDef> {
+        let reg = FieldRegistry::builtin();
+        names.iter().map(|n| reg.resolve(n)).collect()
+    }
+
     #[test]
-    fn prompts_are_built_from_the_kind_registry_not_from_the_caller() {
-        let reg = KindRegistry::builtin();
-        let prompts = prompts_for(&reg, "std:basic").unwrap();
+    fn prompts_are_built_from_the_registry_not_from_the_caller() {
+        let prompts = prompts_for(&defs(&["std:username", "std:password"])).unwrap();
         assert_eq!(
             prompts.iter().map(|p| p.label.as_str()).collect::<Vec<_>>(),
             vec!["Username", "Password"]
         );
         assert!(
             prompts.iter().all(|p| p.hidden),
-            "both halves of a basic credential are hidden"
+            "both halves of a password credential are hidden"
         );
-
-        assert!(prompts_for(&reg, "std:nonesuch").is_err());
     }
 
-    // `optional_fields_are_not_prompted_for` used to exercise `std:oauth2`
-    // (expiry and scopes as optional flat fields, filtered out because
-    // `required` was false). That subject is gone: `std:oauth2` is now one
-    // required field whose value is a map, and the property that replaced
-    // it — the whole field is refused rather than partially prompted — is
-    // `an_oauth2_field_cannot_be_prompted_for` below.
+    #[test]
+    fn an_unregistered_name_is_prompted_for_as_a_secret_string_labelled_by_itself() {
+        let prompts = prompts_for(&defs(&["acme:token"])).unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].field_key, "acme:token");
+        assert_eq!(
+            prompts[0].label, "acme:token",
+            "an unregistered name is shown verbatim, not dressed in invented words"
+        );
+        assert!(
+            prompts[0].hidden,
+            "a name nobody registered is credential material until someone says otherwise"
+        );
+    }
 
     /// It is acquired by a flow that does not exist yet. Prompting would
     /// store a string where the SDK expects an object, and the user would
     /// not learn why until the component failed much later.
     #[test]
     fn an_oauth2_field_cannot_be_prompted_for() {
-        let reg = KindRegistry::builtin();
-        let err = prompts_for(&reg, "std:oauth2").expect_err("must refuse");
+        let err = prompts_for(&defs(&["std:token"])).expect_err("must refuse");
         assert!(
             err.to_string().contains("std:oauth2"),
             "name the type: {err}"
         );
-    }
-
-    #[test]
-    fn validate_kind_lists_the_known_kinds() {
-        let reg = KindRegistry::builtin();
-        assert!(validate_kind(&reg, "std:basic").is_ok());
-        let err = validate_kind(&reg, "std:nonesuch").unwrap_err().to_string();
-        assert!(err.contains("std:basic"), "{err}");
-        assert!(err.contains("std:oauth2"), "{err}");
     }
 
     #[test]
@@ -728,20 +743,18 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn an_oauth2_object_without_an_access_token_is_rejected() {
         // The regression this migration introduced and the final review caught:
         // an object alone satisfied the shape check, so a credential with no
         // token stored cleanly. `as_oauth2` reads a missing member as ABSENT,
         // never as an error, so the component would see no credential and the
         // operator would see a success.
-        let reg = KindRegistry::builtin();
-        let def = reg.get("std:oauth2").expect("builtin");
         let fields = BTreeMap::from([(
             "std:token".to_string(),
             SecretValue::new(serde_json::json!({"std:scopes": ["repo"]})),
         )]);
-        let err = validate_fields(def, &fields).expect_err("must not store a tokenless credential");
+        let err = validate_fields(&defs(&["std:token"]), &fields)
+            .expect_err("must not store a tokenless credential");
         assert!(
             err.to_string().contains("std:access-token"),
             "the error must name what is missing: {err}"
@@ -752,8 +765,6 @@ mod tests {
     fn a_mistyped_oauth2_member_is_rejected_with_what_it_would_have_meant() {
         // Both of these degrade silently in the SDK rather than erroring, which
         // is why they are caught at input instead. ACT-CONSTANTS 8.3.
-        let reg = KindRegistry::builtin();
-        let def = reg.get("std:oauth2").expect("builtin");
         for (bad, expected) in [
             (
                 serde_json::json!({"std:access-token": "at", "std:expires-at": 1.5}),
@@ -765,7 +776,7 @@ mod tests {
             ),
         ] {
             let fields = BTreeMap::from([("std:token".to_string(), SecretValue::new(bad.clone()))]);
-            let err = validate_fields(def, &fields).expect_err("must reject");
+            let err = validate_fields(&defs(&["std:token"]), &fields).expect_err("must reject");
             assert!(
                 err.to_string().contains(expected),
                 "the error should say what the mistyping would have meant: {err}"
@@ -774,32 +785,88 @@ mod tests {
     }
 
     #[test]
-    fn optional_fields_are_not_prompted_for() {
-        // Re-established against a user-defined kind after the migration removed
-        // the builtin that used to carry optional fields. `prompts_for` filters
-        // on `required` and that filter is live; without a test it is not.
+    fn an_optional_field_is_prompted_for_with_a_way_to_skip_it() {
+        // `required` is meaningful for a *declared* field — a component may
+        // mark one optional — and it must not remove the field from the only
+        // interactive path there is. An optional field the operator never sees
+        // can only be set by hand-writing JSON for `--fields-stdin`, which is
+        // the ceremony `act login` exists to remove.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
-            dir.path().join("acme.toml"),
-            r#"
-id = "acme:mixed"
-[[fields]]
-key = "acme:needed"
-label = "Needed"
-[[fields]]
-key = "acme:optional"
-label = "Optional"
-required = false
-"#,
+            dir.path().join("needed.toml"),
+            "key = \"acme:needed\"\nlabel = \"Needed\"\n",
         )
         .unwrap();
-        let reg = KindRegistry::load(dir.path()).unwrap();
-        let prompts = prompts_for(&reg, "acme:mixed").expect("all fields are std:string");
+        std::fs::write(
+            dir.path().join("optional.toml"),
+            "key = \"acme:optional\"\nlabel = \"Optional\"\nrequired = false\n",
+        )
+        .unwrap();
+        let reg = FieldRegistry::load(dir.path()).unwrap();
+        let defs: Vec<FieldDef> = ["acme:needed", "acme:optional"]
+            .iter()
+            .map(|n| reg.resolve(n))
+            .collect();
+        let prompts = prompts_for(&defs).expect("both fields are std:string");
         let keys: Vec<&str> = prompts.iter().map(|p| p.field_key.as_str()).collect();
         assert_eq!(
             keys,
-            ["acme:needed"],
-            "an optional field is not prompted for"
+            ["acme:needed", "acme:optional"],
+            "an optional field is offered, not hidden"
+        );
+
+        let needed = &prompts[0];
+        let optional = &prompts[1];
+        assert!(needed.required && !optional.required);
+        assert!(
+            !needed.line(false).contains("Enter to skip"),
+            "a required field must not look skippable: {}",
+            needed.line(false)
+        );
+        assert!(
+            optional.line(false).contains("Enter to skip"),
+            "the way out has to be visible at the prompt: {}",
+            optional.line(false)
+        );
+    }
+
+    /// The skip hint is the host's words, appended after the component's.
+    ///
+    /// A component that copies "(optional — Enter to skip)" into its own label
+    /// gains nothing: the flag decides, not the wording, so answering nothing
+    /// on its required field still refuses.
+    #[test]
+    fn the_skip_hint_cannot_be_forged_by_a_label() {
+        let forged = FieldDef {
+            key: "acme:token".into(),
+            label: "Token (optional — Enter to skip)".into(),
+            field_type: "std:string".into(),
+            secret: true,
+            required: true,
+        };
+        let prompts = prompts_for(&[forged]).unwrap();
+        assert!(prompts[0].required, "the label does not decide this");
+        assert!(
+            prompts[0].line(true).contains("[acme:token]"),
+            "a component's own wording is still marked foreign: {}",
+            prompts[0].line(true)
+        );
+    }
+
+    #[test]
+    fn an_operator_file_cannot_redefine_a_registered_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("password.toml"),
+            "key = \"std:password\"\nlabel = \"Not a password\"\nsecret = false\n",
+        )
+        .unwrap();
+        let reg = FieldRegistry::load(dir.path()).unwrap();
+        let def = reg.get("std:password").expect("builtin");
+        assert_eq!(def.label, "Password");
+        assert!(
+            def.secret,
+            "a local file must not turn a registered secret into a visible one"
         );
     }
 
@@ -814,25 +881,23 @@ required = false
 
     #[test]
     fn validate_fields_rejects_a_string_for_an_oauth2_field() {
-        let reg = KindRegistry::builtin();
-        let oauth = reg.get("std:oauth2").expect("std:oauth2 registered");
         let mut fields = BTreeMap::new();
         fields.insert("std:token".to_string(), SecretValue::new("not-an-object"));
-        let err = validate_fields(oauth, &fields).unwrap_err().to_string();
+        let err = validate_fields(&defs(&["std:token"]), &fields)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("std:token"), "{err}");
         assert!(err.contains("std:oauth2"), "{err}");
     }
 
     #[test]
     fn validate_fields_rejects_an_object_for_a_string_field() {
-        let reg = KindRegistry::builtin();
-        let string_kind = reg.get("std:basic").expect("std:string registered");
         let mut fields = BTreeMap::new();
         fields.insert(
             "std:password".to_string(),
             SecretValue::new(serde_json::json!({"nested": true})),
         );
-        let err = validate_fields(string_kind, &fields)
+        let err = validate_fields(&defs(&["std:password"]), &fields)
             .unwrap_err()
             .to_string();
         assert!(err.contains("std:password"), "{err}");
@@ -840,29 +905,30 @@ required = false
 
     #[test]
     fn validate_fields_errors_on_a_missing_required_field() {
-        let reg = KindRegistry::builtin();
-        let basic = reg.get("std:basic").expect("std:basic registered");
         let mut fields = BTreeMap::new();
         fields.insert("std:username".to_string(), SecretValue::new("alice"));
-        // std:password is required and absent — this must be an error, not a
-        // credential silently missing half of what a component expects.
-        let err = validate_fields(basic, &fields).unwrap_err().to_string();
+        // std:password was asked for and is absent — this must be an error, not
+        // a credential silently missing half of what a component expects.
+        let err = validate_fields(&defs(&["std:username", "std:password"]), &fields)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("std:password"), "{err}");
-        assert!(err.contains("std:basic"), "{err}");
+        assert!(
+            err.contains("std:username"),
+            "say what WAS given, so the operator can see the difference: {err}"
+        );
     }
 
     #[test]
-    fn validate_fields_accepts_an_undefined_key_rather_than_rejecting_it() {
-        let reg = KindRegistry::builtin();
-        let basic = reg.get("std:basic").expect("std:basic registered");
+    fn validate_fields_accepts_an_unasked_for_key_rather_than_rejecting_it() {
         let mut fields = BTreeMap::new();
         fields.insert("std:username".to_string(), SecretValue::new("u"));
         fields.insert("std:password".to_string(), SecretValue::new("v"));
-        fields.insert("std:bogus".to_string(), SecretValue::new("x"));
-        // A key the kind doesn't define is a warning, not a rejection: a kind
-        // lists what a *reader* can rely on, and a component may legitimately
-        // be handed more than that. Only the required-field check may bail.
-        assert!(validate_fields(basic, &fields).is_ok());
+        fields.insert("acme:extra".to_string(), SecretValue::new("x"));
+        // A key nobody asked for is a warning, not a rejection: the field list
+        // says what a *reader* can rely on, and a component may legitimately be
+        // handed more than that. Only the required-field check may bail.
+        assert!(validate_fields(&defs(&["std:username", "std:password"]), &fields).is_ok());
     }
 
     #[test]
@@ -905,7 +971,7 @@ required = false
                 "example-component",
                 "default",
                 &SecretRecord {
-                    kind: "std:opaque".to_string(),
+                    kind: crate::login_cmd::KIND_FIELDS.to_string(),
                     fields: BTreeMap::from([(
                         "std:password".to_string(),
                         SecretValue::new("first-secret"),

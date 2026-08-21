@@ -10,8 +10,8 @@
 //! 2. Which declared credential? (`select_credential`)
 //! 3. What fields does it need, and can they be acquired at a prompt?
 //!    (`field_set`, which never duplicates `secret_cmd::prompts_for`'s
-//!    "not std:string is refused" rule — it routes every field list through
-//!    that one check instead, declared or `--kind`.)
+//!    "a type this host cannot prompt for is refused" rule — it routes every
+//!    field list through that one check instead, declared or `--field`.)
 //! 4. Does a credential already sit under that key? Never overwritten
 //!    without `--force`.
 //! 5. Prompt, hidden for secret fields.
@@ -22,8 +22,8 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result};
 
 use act_credentials::backend;
-use act_credentials::kind::{FieldDef, KindDef, KindRegistry};
-use act_credentials::record::{SecretRecord, SecretValue};
+use act_credentials::field::{FieldDef, FieldRegistry};
+use act_credentials::record::SecretRecord;
 
 use crate::resolve::{self, ComponentRef};
 use crate::runtime::credentials::backend_root;
@@ -44,11 +44,11 @@ pub struct LoginOpts {
     #[arg(long)]
     pub key: Option<String>,
 
-    /// Credential kind (field shape) to prompt for. Only consulted when the
+    /// Name a field to prompt for, repeatable. Only consulted when the
     /// selected credential declares no field list of its own — a component
     /// that names its own fields always wins.
-    #[arg(long)]
-    pub kind: Option<String>,
+    #[arg(long = "field", value_name = "NAME")]
+    pub field: Vec<String>,
 
     /// Replace a credential already stored under the same key. Without this,
     /// an existing credential is left untouched and reported, not silently
@@ -83,20 +83,22 @@ pub async fn cmd_login(component: ComponentRef, opts: LoginOpts) -> Result<()> {
     let declared = select_credential(&info.std.credentials, opts.key.as_deref(), &component)?;
 
     // 3. Resolve the field set: the declaration if it names one, else the
-    // registry entry named by --kind. Refuses a field type this release
+    // definitions the registry resolves for --field. Refuses a field type this release
     // cannot acquire (std:oauth2 needs the browser flow, not a prompt) —
     // one implementation of that rule, inside `field_set`.
-    let registry = match crate::config::kinds_dir() {
-        Some(dir) => KindRegistry::load(&dir).with_context(|| {
-            format!("reading credential kind definitions from {}", dir.display())
+    let registry = match crate::config::fields_dir() {
+        Some(dir) => FieldRegistry::load(&dir).with_context(|| {
+            format!(
+                "reading credential field definitions from {}",
+                dir.display()
+            )
         })?,
-        None => KindRegistry::builtin(),
+        None => FieldRegistry::builtin(),
     };
     let FieldSet {
-        kind,
         prompts,
         labels_are_the_components,
-    } = field_set(&declared, opts.kind.as_deref(), &registry)?;
+    } = field_set(&declared, &opts.field, &registry)?;
 
     // Open the store only now: a component that fails the cheapest check or
     // the field-type check never touches it, so a headless run against the
@@ -119,7 +121,8 @@ pub async fn cmd_login(component: ComponentRef, opts: LoginOpts) -> Result<()> {
         declared.key
     );
 
-    // 5. Prompt in order, hidden for secret fields.
+    // 5. Prompt in order, hidden for secret fields, skippable for optional
+    // ones.
     //
     // When the labels are the component's own words (design §4.3), say so
     // before the first one and show each field's namespaced key beside it.
@@ -132,33 +135,25 @@ pub async fn cmd_login(component: ComponentRef, opts: LoginOpts) -> Result<()> {
     }
     let mut fields = BTreeMap::new();
     for p in &prompts {
-        let shown = if labels_are_the_components {
-            format!("  {} [{}]", p.label, p.field_key)
-        } else {
-            p.label.clone()
-        };
-        let value = if p.hidden {
-            crate::secret_cmd::read_hidden_line(&shown)?
-        } else {
-            crate::secret_cmd::read_visible_line(&shown)?
-        };
-        // Enter on an empty prompt is the same failure as EOF one layer up: a
-        // credential that stores cleanly and holds nothing, so the operator
-        // believes they provisioned something and the component finds nothing.
-        // Someone whose credential really is the empty string has
-        // `--fields-stdin`.
-        anyhow::ensure!(
-            !value.is_empty(),
-            "'{}' cannot be empty — nothing was stored",
-            p.field_key
-        );
-        fields.insert(p.field_key.clone(), SecretValue::new(value));
+        // `prompt_one` owns what an empty answer means — a refusal on a
+        // required field, a skip on an optional one — so the rule lives in one
+        // place and `act secret set` cannot drift from `act login`.
+        if let Some(value) = crate::secret_cmd::prompt_one(p, labels_are_the_components)? {
+            fields.insert(p.field_key.clone(), value);
+        }
     }
 
-    // 6. Write, and report what was stored — never a value.
-    let field_names: Vec<&str> = prompts.iter().map(|p| p.field_key.as_str()).collect();
+    // 6. Write, and report what was stored — never a value, and never a field
+    // that was skipped.
+    let field_names: Vec<&str> = prompts
+        .iter()
+        .map(|p| p.field_key.as_str())
+        .filter(|k| fields.contains_key(*k))
+        .collect();
     let record = SecretRecord {
-        kind,
+        // Every credential is a set of named fields, whether the component
+        // declared them or the user named them, so the stored kind says so.
+        kind: KIND_FIELDS.to_string(),
         fields,
         host_only: BTreeMap::new(),
         description: declared.description.clone(),
@@ -184,7 +179,7 @@ pub async fn cmd_login(component: ComponentRef, opts: LoginOpts) -> Result<()> {
 /// - No declared entries at all: the set is open by nature (a bridge that
 ///   accepts whatever key an operator names), so `--key` is mandatory — there
 ///   is nothing here to default to — and the error hands back a copy-
-///   pasteable command that supplies both `--key` and `--kind`.
+///   pasteable command that supplies both `--key` and `--field`.
 fn select_credential(
     declared: &[StdCredential],
     key: Option<&str>,
@@ -197,7 +192,7 @@ fn select_credential(
         if declared.is_empty() {
             // Open by nature: nothing declared to match against, so the
             // named key stands on its own with no field list of its own —
-            // `field_set` falls back to `--kind` for its shape.
+            // `field_set` falls back to the `--field` names the user gave.
             return Ok(StdCredential {
                 key: key.to_string(),
                 description: None,
@@ -213,7 +208,7 @@ fn select_credential(
     match declared {
         [] => anyhow::bail!(
             "{component} declares an open credential set with no fixed key; pass \
-             --key (and --kind, e.g. `act login {component} --key default --kind std:string`)"
+             --key (and --field, e.g. `act login {component} --key default --field acme:token`)"
         ),
         [one] => Ok(one.clone()),
         many => {
@@ -227,77 +222,73 @@ fn select_credential(
     }
 }
 
-/// Resolves the field list to prompt for, and the string recorded as the
-/// credential's kind.
+/// What every credential this host writes is stored as.
 ///
-/// A component that names its own fields (the common case, design §4.3)
-/// wins outright — `--kind` is not consulted when it did. A declaration with
-/// no field list of its own is open by nature, and an operator must say
-/// which registry kind shapes it.
+/// A credential is a set of named fields and nothing else (design §3.2): there
+/// are no registered shapes left to name, so there is no shape id to record.
+/// The credential's own key is the wrong thing to put here — it says *which*
+/// credential, and an operator reading `"kind": "default"` beside
+/// `"key": "default"` learns nothing. The constant says the true thing: a
+/// plain set of fields, whose meaning lives in their names.
 ///
-/// Either way the "not std:string is refused" rule lives in exactly one
-/// place: `secret_cmd::prompts_for`. The declared-fields path does not
-/// re-implement that check against `StdCredentialField` — it wraps the
-/// declaration in a one-off `KindRegistry` (`KindRegistry::single`) keyed by
-/// the credential's own key, and calls `prompts_for` against it, exactly as
-/// the `--kind` path calls it against the operator-chosen registry entry.
-/// What a credential built from a component's own field list is stored as.
-///
-/// A declaration names a key and fields, never a kind (design §4.3), so there is
-/// no kind id to record — and the key is the wrong thing to put here: it says
-/// *which* credential, where `kind` says *what shape*, and an operator reading
-/// `"kind": "default"` beside `"key": "default"` learns nothing. A constant says
-/// the true thing instead: a plain set of fields, whose meaning lives in their
-/// names. Registered in `ACT-CONSTANTS.md` §8.2.
+/// It exists at all because `secret-kind` is a required member of the
+/// published `act:credentials@0.1.0` `secret` record, which cannot be removed
+/// from a published WIT package. See `ACT-CONSTANTS.md` §8.2 and design §14.0.
 pub(crate) const KIND_FIELDS: &str = "std:fields";
 
 /// The prompts for a credential, and whose words the labels are.
 #[derive(Debug)]
 struct FieldSet {
-    kind: String,
     prompts: Vec<crate::secret_cmd::Prompt>,
     /// True when the labels came from the component's own declaration rather
     /// than the registry. The host must then mark them as foreign (§5.5).
     labels_are_the_components: bool,
 }
 
+/// Resolves the field list to prompt for.
+///
+/// A component that names its own fields (the common case, design §4.3) wins
+/// outright — `--field` is not consulted when it did. A declaration with no
+/// field list of its own is open by nature (a bridge), and the user names the
+/// fields instead.
+///
+/// Either way the "a type this host cannot prompt for is refused" rule lives
+/// in exactly one place: `secret_cmd::prompts_for`. The declared-fields path
+/// does not re-implement that check against `StdCredentialField`; it converts
+/// each declared field to a `FieldDef` and calls `prompts_for`, exactly as the
+/// `--field` path calls it against definitions the registry resolved.
 fn field_set(
     declared: &StdCredential,
-    kind: Option<&str>,
-    registry: &KindRegistry,
+    field: &[String],
+    registry: &FieldRegistry,
 ) -> Result<FieldSet> {
+    // A component's own declaration wins: it is the point of `act login` that
+    // the user need not know what the component wants.
     if !declared.fields.is_empty() {
-        let fields: Vec<FieldDef> = declared
+        let defs: Vec<FieldDef> = declared
             .fields
             .iter()
             .map(field_def_from_declared)
             .collect();
-        let ad_hoc = KindRegistry::single(KindDef {
-            id: declared.key.clone(),
-            fields,
-            description: declared.description.clone(),
-        });
-        let prompts = crate::secret_cmd::prompts_for(&ad_hoc, &declared.key)?;
         return Ok(FieldSet {
-            kind: KIND_FIELDS.to_string(),
-            prompts,
+            prompts: crate::secret_cmd::prompts_for(&defs)?,
             labels_are_the_components: true,
         });
     }
 
-    let kind = kind.ok_or_else(|| {
-        anyhow::anyhow!(
-            "no field list declared for key '{}'; pass --kind to choose the credential's \
-             shape (e.g. --kind std:string)",
-            declared.key
-        )
-    })?;
-    let prompts = crate::secret_cmd::prompts_for(registry, kind)?;
+    // Nothing declared — a bridge, whose credential set is open by nature. The
+    // user names the fields, and a registered name brings the registry's own
+    // label, which the host may present as its own.
+    anyhow::ensure!(
+        !field.is_empty(),
+        "no fields are declared for credential '{}', so there is nothing to \
+         prompt for. Name them: --field std:username --field std:password, or \
+         --field acme:token.",
+        declared.key
+    );
+    let defs: Vec<FieldDef> = field.iter().map(|n| registry.resolve(n)).collect();
     Ok(FieldSet {
-        kind: kind.to_string(),
-        prompts,
-        // A registered kind's labels are the registry's, so the host may
-        // present them as its own.
+        prompts: crate::secret_cmd::prompts_for(&defs)?,
         labels_are_the_components: false,
     })
 }
@@ -379,7 +370,7 @@ mod tests {
             .to_string();
         assert!(err.contains("--key"), "{err}");
         assert!(
-            err.contains("--kind"),
+            err.contains("--field"),
             "hands back a copy-pasteable command: {err}"
         );
     }
@@ -404,16 +395,13 @@ mod tests {
     }
 
     #[test]
-    fn declared_fields_are_used_over_kind() {
+    fn declared_fields_are_used_over_named_ones() {
         let declared = cred("default", vec![string_field("std:password")]);
-        let reg = KindRegistry::builtin();
-        let fs = field_set(&declared, None, &reg).unwrap();
+        let reg = FieldRegistry::builtin();
+        // The user named a different field; the declaration still wins.
+        let fs = field_set(&declared, &["acme:token".to_string()], &reg).unwrap();
         assert_eq!(fs.prompts.len(), 1);
         assert_eq!(fs.prompts[0].field_key, "std:password");
-        // Stored as a plain field set, not under the credential's key: `kind`
-        // says what shape, `key` says which credential, and putting the key in
-        // both leaves an operator reading `"kind": "default"` none the wiser.
-        assert_eq!(fs.kind, KIND_FIELDS);
         assert!(
             fs.labels_are_the_components,
             "a declared field list means the labels are the component's words"
@@ -421,40 +409,48 @@ mod tests {
     }
 
     #[test]
-    fn a_registered_kinds_labels_are_not_marked_foreign() {
+    fn registry_labels_are_not_marked_foreign() {
         let declared = cred("default", vec![]);
-        let reg = KindRegistry::builtin();
-        let fs = field_set(&declared, Some("std:basic"), &reg).unwrap();
+        let reg = FieldRegistry::builtin();
+        let fs = field_set(
+            &declared,
+            &["std:username".to_string(), "std:password".to_string()],
+            &reg,
+        )
+        .unwrap();
+        assert_eq!(fs.prompts.len(), 2);
         assert!(
             !fs.labels_are_the_components,
             "registry labels are the host's own and must not be attributed elsewhere"
         );
-        assert_eq!(fs.kind, "std:basic");
     }
 
     #[test]
     fn a_declared_oauth2_field_is_refused_not_prompted_for() {
         let declared = cred("default", vec![oauth_field("std:token")]);
-        let reg = KindRegistry::builtin();
-        let err = field_set(&declared, None, &reg).unwrap_err().to_string();
+        let reg = FieldRegistry::builtin();
+        let err = field_set(&declared, &[], &reg).unwrap_err().to_string();
         assert!(err.contains("std:oauth2"), "{err}");
     }
 
     #[test]
-    fn an_open_declaration_falls_back_to_kind() {
+    fn an_unregistered_field_name_is_prompted_for_as_a_secret_string() {
         let declared = cred("default", vec![]);
-        let reg = KindRegistry::builtin();
-        let fs = field_set(&declared, Some("std:basic"), &reg).unwrap();
-        let (kind, prompts) = (fs.kind, fs.prompts);
-        assert_eq!(kind, "std:basic");
-        assert_eq!(prompts.len(), 2);
+        let reg = FieldRegistry::builtin();
+        let fs = field_set(&declared, &["acme:token".to_string()], &reg).unwrap();
+        assert_eq!(fs.prompts.len(), 1);
+        assert_eq!(fs.prompts[0].field_key, "acme:token");
+        assert!(
+            fs.prompts[0].hidden,
+            "an unknown field is credential material until someone says otherwise"
+        );
     }
 
     #[test]
-    fn an_open_declaration_without_kind_says_so() {
+    fn an_open_declaration_without_named_fields_says_so() {
         let declared = cred("default", vec![]);
-        let reg = KindRegistry::builtin();
-        let err = field_set(&declared, None, &reg).unwrap_err().to_string();
-        assert!(err.contains("--kind"), "{err}");
+        let reg = FieldRegistry::builtin();
+        let err = field_set(&declared, &[], &reg).unwrap_err().to_string();
+        assert!(err.contains("--field"), "{err}");
     }
 }

@@ -4,18 +4,23 @@
 //! built: the same `credentials-canary` bytes, packed against a second
 //! `act.toml`).
 //!
-//! Every case here is a refusal, on purpose: the three properties that matter
-//! most for a command that writes secrets are the ones that stop it from
+//! Nearly every case here is a refusal, on purpose: the three properties that
+//! matter most for a command that writes secrets are the ones that stop it from
 //! writing at all — an undeclared component is told so before anything else
 //! runs, a field type this release cannot acquire is named rather than
 //! prompted for, and an existing credential is never overwritten silently.
-//! The success path (prompting, hidden input, the actual write) is covered by
-//! `secret_cmd`'s unit tests and `login_cmd`'s own — piping a real hidden
-//! prompt through a subprocess's stdin buys little a unit test on
+//! The ordinary success path (prompting, hidden input, the actual write) is
+//! covered by `secret_cmd`'s unit tests and `login_cmd`'s own — piping a real
+//! hidden prompt through a subprocess's stdin buys little a unit test on
 //! `field_set`/`select_credential` doesn't already cover, and it risks a
-//! flaky or hanging test if the guard under test regresses (see the last
-//! test below, which relies on exactly that risk to prove the type check
-//! bites).
+//! flaky or hanging test if the guard under test regresses (see
+//! `an_unsupported_field_type_is_named_not_prompted_for`, which relies on
+//! exactly that risk to prove the type check bites).
+//!
+//! The one exception is `an_optional_field_can_be_skipped_by_answering_nothing`.
+//! Skipping IS the success path there — a unit test can prove the prompt is
+//! offered, but only a real run proves that answering nothing leaves the field
+//! out of the record instead of storing an empty string or aborting.
 
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
@@ -195,4 +200,139 @@ fn an_existing_credential_is_not_overwritten_without_force() {
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("--force"), "must say how to replace it: {err}");
+}
+
+/// Answering nothing at an optional field's prompt leaves it out of the record.
+///
+/// Driven through the operator's field definitions rather than a component's
+/// declaration, because that needs no fixture rebuild and exercises the same
+/// `prompts_for` → `prompt_one` path; `field_def_from_declared` copies
+/// `required` across unchanged, and `login_cmd`'s unit tests cover that hop.
+///
+/// The three outcomes this separates are the whole point: **stored** (the
+/// required field), **absent** (the optional one), and **an empty string**,
+/// which is the failure mode that looks like success. Asserting only the exit
+/// code would pass on all three.
+#[test]
+fn an_optional_field_can_be_skipped_by_answering_nothing() {
+    use std::io::Write;
+
+    let home = tempfile::tempdir().expect("config home");
+    let fields = home.path().join("act/fields");
+    std::fs::create_dir_all(&fields).expect("fields dir");
+    std::fs::write(
+        fields.join("note.toml"),
+        "key = \"acme:note\"\nlabel = \"Note\"\nsecret = false\nrequired = false\n",
+    )
+    .expect("write field definition");
+
+    let store = tempfile::tempdir().expect("temp store");
+    let backend = format!("file:{}", store.path().display());
+
+    let mut child = Command::new(act_binary_path())
+        .arg("login")
+        .arg(fixture("credentials-canary.wasm"))
+        .args([
+            "--key",
+            "k",
+            "--field",
+            "acme:token",
+            "--field",
+            "acme:note",
+        ])
+        .args(["--credentials-backend", &backend])
+        .env("XDG_CONFIG_HOME", home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn act login");
+    // The required field, then an empty line for the optional one.
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin was piped")
+        .write_all(b"typed-secret\n\n")
+        .expect("write answers");
+    let out = child.wait_with_output().expect("act login");
+
+    assert!(
+        out.status.success(),
+        "skipping an optional field is not an error: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Enter to skip"),
+        "the prompt must have offered the way out: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("acme:token") && !stdout.contains("acme:note"),
+        "it must report what was stored, not what was asked for: {stdout}"
+    );
+
+    // Read the store itself: `act secret list` prints no field names, so it
+    // cannot tell an absent field from one holding "".
+    let raw = std::fs::read_to_string(store.path().join("secrets.json")).expect("read store");
+    assert!(
+        raw.contains("acme:token"),
+        "the required field is missing: {raw}"
+    );
+    assert!(
+        !raw.contains("acme:note"),
+        "a skipped field must be absent, not empty: {raw}"
+    );
+    assert!(
+        !raw.contains(r#""""#),
+        "nothing may have been stored as an empty string: {raw}"
+    );
+}
+
+/// The same empty answer, on a required field, must refuse.
+///
+/// `eof_at_a_prompt_aborts_instead_of_storing_an_empty_value` does not cover
+/// this: EOF is caught one layer down, by the read itself. Pressing Enter is a
+/// successful read of an empty line, and it reaches a different branch — the
+/// one that now has to tell "skip me" from "I have no value", where before the
+/// optional case existed there was nothing to tell apart.
+#[test]
+fn an_empty_answer_on_a_required_field_is_refused() {
+    use std::io::Write;
+
+    let store = tempfile::tempdir().expect("temp store");
+    let backend = format!("file:{}", store.path().display());
+
+    let mut child = Command::new(act_binary_path())
+        .arg("login")
+        .arg(fixture("creds-declaring-canary.wasm"))
+        .args(["--key", "default"])
+        .args(["--credentials-backend", &backend])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn act login");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin was piped")
+        .write_all(b"\n")
+        .expect("write an empty answer");
+    let out = child.wait_with_output().expect("act login");
+
+    assert!(
+        !out.status.success(),
+        "an empty required field must not report success: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("cannot be empty"), "and must say why: {err}");
+    assert!(
+        !store.path().join("secrets.json").exists()
+            || !std::fs::read_to_string(store.path().join("secrets.json"))
+                .unwrap()
+                .contains("acme:value"),
+        "nothing may be left behind"
+    );
 }

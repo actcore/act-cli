@@ -11,13 +11,13 @@ fn act_binary_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_act"))
 }
 
-/// There is no default shape any more, so omitting both selectors must say so
-/// rather than guess. This replaces a test of `--kind`'s default value: that
-/// default was `std:string`, a registered one-field shape that no longer
+/// A credential is a set of named fields, so with no field named there is
+/// nothing to store and nothing to guess. This replaces a test of `--kind`'s
+/// default value: that default was a registered one-field shape that no longer
 /// exists, and its field was called `std:value` — a name that told a reader
 /// nothing while the model rests on names carrying meaning.
 #[test]
-fn omitting_both_kind_and_field_is_refused() {
+fn omitting_field_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let backend = format!("file:{}", dir.path().display());
 
@@ -48,7 +48,7 @@ fn omitting_both_kind_and_field_is_refused() {
 
     assert!(
         !set.status.success(),
-        "with neither --kind nor --field there is nothing to store"
+        "with no --field there is nothing to store"
     );
     let err = String::from_utf8_lossy(&set.stderr);
     assert!(
@@ -171,8 +171,12 @@ fn rm_removes_the_entry() {
     assert!(!String::from_utf8_lossy(&list.stdout).contains("\"k\""));
 }
 
+/// The counterpart to `an_operator_file_cannot_redefine_a_registered_name`:
+/// a name nobody registered is not an error. There is no closed list of
+/// credential shapes to be outside of any more, so `--field acme:token`
+/// stores under exactly that name, with no host-side definition anywhere.
 #[test]
-fn an_unknown_kind_is_rejected_with_the_known_ones_listed() {
+fn an_unregistered_field_name_is_stored_under_that_name() {
     let dir = tempfile::tempdir().unwrap();
     let backend = format!("file:{}", dir.path().display());
     let out = act()
@@ -182,20 +186,46 @@ fn an_unknown_kind_is_rejected_with_the_known_ones_listed() {
             "comp",
             "--key",
             "k",
-            "--kind",
-            "std:nonesuch",
+            "--field",
+            "acme:token",
             "--credentials-backend",
             &backend,
             "--fields-stdin",
         ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            use std::io::Write;
+            c.stdin
+                .as_mut()
+                .unwrap()
+                .write_all(br#"{"acme:token":"sekrit"}"#)?;
+            c.wait_with_output()
+        })
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "an unregistered field name is a perfectly good one: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("acme:token"),
+        "report what was stored: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    let list = act()
+        .args(["secret", "list", "comp", "--credentials-backend", &backend])
         .output()
         .unwrap();
-    assert!(!out.status.success());
-    let err = String::from_utf8_lossy(&out.stderr);
+    let listed = String::from_utf8_lossy(&list.stdout);
     assert!(
-        err.contains("std:basic"),
-        "names the kinds that do exist: {err}"
+        listed.contains("std:fields"),
+        "every credential this host writes is a plain field set: {listed}"
     );
+    assert!(!listed.contains("sekrit"), "never prints a value: {listed}");
 }
 
 /// `ComponentRef::Local(p).to_string()` is `p.display()` verbatim, so
@@ -448,14 +478,19 @@ fn rm_of_an_absent_key_says_so_instead_of_reporting_success() {
 // returns ~/Library/Application Support and ignores it, so this test would
 // read the developer's real config there.
 #[cfg(target_os = "linux")]
+/// An operator may extend the vocabulary of field *names* — a label and a
+/// secrecy flag for a name the spec does not register — and `act secret set`
+/// must read it from `$XDG_CONFIG_HOME/act/fields/`. The name would work
+/// without the file (see `an_unregistered_field_name_is_stored_under_that_name`);
+/// what the file adds is the operator's own wording for the prompt.
 #[test]
-fn act_secret_set_accepts_an_operator_defined_kind() {
+fn act_secret_set_reads_operator_defined_field_names() {
     let home = tempfile::tempdir().unwrap();
-    let kinds = home.path().join("act/kinds");
-    std::fs::create_dir_all(&kinds).unwrap();
+    let fields = home.path().join("act/fields");
+    std::fs::create_dir_all(&fields).unwrap();
     std::fs::write(
-        kinds.join("acme.toml"),
-        "id = \"acme:badge\"\n[[fields]]\nkey = \"acme:tenant\"\nlabel = \"Tenant\"\n",
+        fields.join("tenant.toml"),
+        "key = \"acme:tenant\"\nlabel = \"Tenant\"\nsecret = false\n",
     )
     .unwrap();
 
@@ -467,8 +502,8 @@ fn act_secret_set_accepts_an_operator_defined_kind() {
             "example.com/c:1",
             "--key",
             "k",
-            "--kind",
-            "acme:badge",
+            "--field",
+            "acme:tenant",
             "--fields-stdin",
         ])
         .env("XDG_CONFIG_HOME", home.path())
@@ -490,7 +525,7 @@ fn act_secret_set_accepts_an_operator_defined_kind() {
 
     assert!(
         out.status.success(),
-        "an operator-defined kind must be usable: {}",
+        "an operator-defined field name must be usable: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 }

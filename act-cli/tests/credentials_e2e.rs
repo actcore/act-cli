@@ -110,17 +110,16 @@ impl Sandbox {
 /// needs nothing from a config file — `cmd_secret` reads only the backend, and
 /// the load that does happen feeds the log filter and audit detail, neither of
 /// which this helper asserts on. The write path is hermetic already.
-/// `shape` is passed through verbatim, so a caller says either
-/// `["--kind", "std:oauth2"]` for a registered shape or `["--field", "acme:value"]`
-/// for fields it names itself. There is no default shape: a one-string
-/// credential is one *named* field and only its owner knows the name.
-fn provision(backend: &str, component: &Path, key: &str, shape: &[&str], fields_json: &str) {
+/// `fields` is passed through verbatim — `["--field", "acme:value"]`, or one
+/// `--field` per name for a credential with several. There is no default: a
+/// credential IS its set of named fields, and only its owner knows the names.
+fn provision(backend: &str, component: &Path, key: &str, fields: &[&str], fields_json: &str) {
     let mut child = std::process::Command::new(act_binary_path())
         .arg("secret")
         .arg("set")
         .arg(component)
         .args(["--key", key])
-        .args(shape)
+        .args(fields)
         .args(["--credentials-backend", backend])
         .arg("--fields-stdin")
         .stdin(Stdio::piped())
@@ -480,9 +479,9 @@ async fn a_declaring_component_with_no_grant_is_refused_by_default() {
 /// never the value — into a `shape` member, which is the oracle this test
 /// reads.
 ///
-/// Reuses `PROBE_KEY`, unlike the tests above that name it via `std:string`:
-/// the canary's `whoami` always asks for the fixed key `probe`, so this is
-/// the same credential slot provisioned under a different kind.
+/// Reuses `PROBE_KEY`, unlike the tests above that provision a `std:string`
+/// field: the canary's `whoami` always asks for the fixed key `probe`, so this
+/// is the same credential slot holding a differently-typed field.
 #[tokio::test]
 async fn an_oauth2_field_reaches_the_guest_as_a_map() {
     let sandbox = Sandbox::new();
@@ -493,7 +492,7 @@ async fn an_oauth2_field_reaches_the_guest_as_a_map() {
         &backend,
         &canary,
         PROBE_KEY,
-        &["--kind", "std:oauth2"],
+        &["--field", "std:token"],
         // A distinctive sentinel PER MEMBER. A rendered map renders every
         // member, so each is its own leak surface; a two-character token like
         // "at" would also match half the words in a log by accident.
@@ -518,8 +517,8 @@ async fn an_oauth2_field_reaches_the_guest_as_a_map() {
     let payload = out.payload();
     assert_eq!(
         payload.get("kind").and_then(|v| v.as_str()),
-        Some("std:oauth2"),
-        "the component saw the kind: {}",
+        Some("std:fields"),
+        "a credential is a plain field set whatever its fields are typed as: {}",
         out.transport
     );
     assert_eq!(
@@ -572,7 +571,7 @@ async fn listing_a_profile_returns_metadata_and_no_material() {
         &backend,
         &canary,
         "second",
-        &["--kind", "std:basic"],
+        &["--field", "std:username", "--field", "std:password"],
         r#"{"std:username":"alex","std:password":"other-sekrit"}"#,
     );
 
@@ -600,7 +599,7 @@ async fn listing_a_profile_returns_metadata_and_no_material() {
         out.transport
     );
     assert!(
-        keys.contains(&serde_json::json!({"key": "second", "kind": "std:basic"})),
+        keys.contains(&serde_json::json!({"key": "second", "kind": "std:fields"})),
         "for every credential in the profile, not just one: {}",
         out.transport
     );

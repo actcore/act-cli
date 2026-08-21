@@ -1,6 +1,6 @@
-//! Credential profiles, kinds and storage for the ACT host.
+//! Credential profiles, field definitions and storage for the ACT host.
 pub mod backend;
+pub mod field;
 pub mod index;
-pub mod kind;
 pub mod record;
 pub mod store;

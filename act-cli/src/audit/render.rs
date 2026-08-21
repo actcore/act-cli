@@ -770,8 +770,8 @@ mod tests {
         let line = render_credential_issue(&CredentialIssueRecord {
             component_ref: "comp".into(),
             session_id: "s1".into(),
-            key: "notion\naudit: \u{1f511} credential  innocent  kind=std:opaque".into(),
-            kind: "std:opaque".into(),
+            key: "notion\naudit: \u{1f511} credential  innocent  kind=std:fields".into(),
+            kind: "std:fields".into(),
         });
         assert_eq!(line.matches('\n').count(), 0, "got {line}");
         assert!(

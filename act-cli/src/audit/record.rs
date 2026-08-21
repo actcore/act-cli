@@ -43,9 +43,12 @@ pub mod attr {
     pub const POLICY_RULE: &str = "act.policy.rule";
     /// Whether the component declared this capability class in `act.toml`.
     pub const CAPABILITY_DECLARED: &str = "act.capability.declared";
-    /// The shape of a credential that was handed to a component
-    /// (`std:opaque`, `std:oauth2`, …). Non-secret by construction: the kind
-    /// fixes which field *names* a `secret` carries, never their values.
+    /// The `kind` string of a credential that was handed to a component —
+    /// `std:fields` for everything this host writes, since a credential is a
+    /// set of named fields and nothing else (design §3.2). Recorded because it
+    /// is a required member of the published WIT `secret` record and a store
+    /// may hold one written elsewhere. Non-secret by construction: it names a
+    /// shape, never a value.
     pub const CREDENTIAL_KIND: &str = "act.credential.kind";
     /// Whether this run has any channel that can answer an interactive `ask`
     /// prompt at all (a real TTY, or an MCP client offering elicitation) —
