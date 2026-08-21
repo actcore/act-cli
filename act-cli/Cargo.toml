@@ -2,6 +2,7 @@
 name = "act-cli"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "CLI host for ACT (Agent Component Tools) WebAssembly components"
 license.workspace = true
 repository.workspace = true

@@ -2,6 +2,7 @@
 name = "act-runtime"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Embeddable wasmtime host for ACT (Agent Component Tools) components"
 license.workspace = true
 repository.workspace = true

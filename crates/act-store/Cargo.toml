@@ -3,6 +3,7 @@ name = "act-store"
 description = "Local OCI-layout component store for ACT (act-cli, act-toolserver)"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

@@ -2,6 +2,7 @@
 name = "act-policy-wasm"
 version.workspace = true
 edition = "2024"
+rust-version.workspace = true
 license = "MIT OR Apache-2.0"
 description = "wasm-bindgen wrapper exposing the act-policy PDP to the browser runtime"
 repository = "https://github.com/actcore/act-cli"

@@ -2,6 +2,7 @@
 name = "act-build"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Build tool for ACT WASM components"
 license.workspace = true
 repository.workspace = true
