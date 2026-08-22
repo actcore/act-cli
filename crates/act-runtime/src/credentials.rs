@@ -32,6 +32,7 @@ use wasmtime::component::{HasSelf, Linker};
 
 use super::HostState;
 use super::bindings::act::credentials::{store, types};
+use crate::consent::sanitize_hint;
 
 /// Why the host refused, in the terms `CredentialHost` can decide in. Maps
 /// onto the WIT `secret-error` variants and nothing else, through this
@@ -316,9 +317,6 @@ impl GateContext {
     }
 }
 
-/// Longest guest-authored `hint` shown on a consent prompt.
-const HINT_LIMIT: usize = 120;
-
 /// Build the one line a human is asked to approve.
 ///
 /// Everything but the hint is host-derived (design §5.5: "a descriptor signals
@@ -331,10 +329,13 @@ const HINT_LIMIT: usize = 120;
 /// `CredentialHost::component`, never anything the guest chose.
 ///
 /// The hint is the component's own words, so it is attributed, stripped of
-/// control and bidi-override characters, and truncated. The prompters escape
-/// the finished line as well (`runtime::consent::consent_line`) — this is the
-/// inner of two layers, and it is the one that keeps the guest's text
-/// *readable* rather than exploded into `\u{...}` escapes.
+/// control and bidi-override characters, and truncated — by the shared
+/// [`crate::consent::sanitize_hint`], which `act:consent`'s
+/// [`crate::consent::prompt_line`] also calls, because a security helper with
+/// two copies is two helpers that drift. The prompters escape the finished
+/// line as well (`crate::consent::consent_line`) — this is the inner of two
+/// layers, and it is the one that keeps the guest's text *readable* rather
+/// than exploded into `\u{...}` escapes.
 ///
 /// The component **digest** is still missing, and cannot be added from here:
 /// `ConsentAsk` carries no digest for any capability class.
@@ -346,33 +347,6 @@ fn consent_summary(component: Option<&str>, action: &str, key: &str, hint: Optio
     match hint.map(sanitize_hint) {
         Some(h) if !h.is_empty() => format!("{base} — component says: \"{h}\""),
         _ => base,
-    }
-}
-
-/// Blank out anything that could forge or disguise prompt text, then truncate.
-///
-/// Uses the audit trail's own `needs_escape` rather than `char::is_control`:
-/// the latter is Unicode category `Cc` only and misses the bidi controls
-/// (U+202A-202E, U+2066-2069) and line separators (U+2028/2029). A
-/// right-to-left override makes a terminal *display* a different string than
-/// the one supplied — which is worth strictly more on a prompt a human is
-/// about to answer than on an audit line read afterwards, so the more
-/// sensitive surface must not carry the weaker predicate.
-fn sanitize_hint(hint: &str) -> String {
-    let cleaned: String = hint
-        .chars()
-        .map(|c| {
-            if crate::audit::render::needs_escape(c) {
-                ' '
-            } else {
-                c
-            }
-        })
-        .collect();
-    let cleaned = cleaned.trim();
-    match cleaned.char_indices().nth(HINT_LIMIT) {
-        Some((idx, _)) => format!("{}…", &cleaned[..idx]),
-        None => cleaned.to_string(),
     }
 }
 
