@@ -16,6 +16,10 @@ use crate::Decision;
 use crate::grant::{CapabilityGrant, PolicyError, PolicyMode};
 use crate::provider::{CapabilityProvider, CompiledCeiling, Explained, ResourceOp};
 
+/// The constraint dimension that always resolves from `ResourceOp::key`
+/// rather than from `attrs`. Host-derived, so a guest cannot shadow it.
+const KEY_DIMENSION: &str = "key";
+
 pub struct GenericProvider;
 
 #[async_trait::async_trait]
@@ -57,17 +61,18 @@ struct CompiledConstraint {
 }
 
 impl CompiledConstraint {
-    fn matches(&self, attrs: &serde_json::Value) -> bool {
-        self.key_globs.iter().all(|(key, glob_set)| {
-            let val = attrs.get(key);
-            if let Some(val) = val {
-                let s = match val {
-                    serde_json::Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
-                glob_set.is_match(&s)
-            } else {
-                false
+    fn matches(&self, op: &ResourceOp) -> bool {
+        self.key_globs.iter().all(|(dim, glob_set)| {
+            if dim == KEY_DIMENSION {
+                // Never read `attrs` for this one: a guest-supplied "key"
+                // inside args must not shadow the subject the human was
+                // shown and the audit recorded.
+                return glob_set.is_match(&op.key);
+            }
+            match op.attrs.get(dim) {
+                Some(serde_json::Value::String(s)) => glob_set.is_match(s),
+                Some(other) => glob_set.is_match(other.to_string().as_str()),
+                None => false,
             }
         })
     }
@@ -89,7 +94,7 @@ impl GenericCeiling {
     /// decision output cannot drift between them.
     fn matched(&self, op: &ResourceOp) -> (Decision, Option<String>) {
         // Deny wins first: any deny constraint matching → Deny.
-        if self.deny_sets.iter().any(|c| c.matches(&op.attrs)) {
+        if self.deny_sets.iter().any(|c| c.matches(op)) {
             return (Decision::Deny, None);
         }
 
@@ -98,7 +103,7 @@ impl GenericCeiling {
             PolicyMode::Open => (Decision::Allow, None),
             PolicyMode::Allowlist => {
                 // Allow iff some allow constraint matches.
-                match self.allow_sets.iter().find(|c| c.matches(&op.attrs)) {
+                match self.allow_sets.iter().find(|c| c.matches(op)) {
                     Some(c) => (Decision::Allow, Some(c.source.clone())),
                     None => (Decision::Deny, None),
                 }
@@ -110,7 +115,7 @@ impl GenericCeiling {
                 // gets a prompt rather than a hard deny.
                 if self.unbounded {
                     (Decision::Ask, None)
-                } else if let Some(c) = self.allow_sets.iter().find(|c| c.matches(&op.attrs)) {
+                } else if let Some(c) = self.allow_sets.iter().find(|c| c.matches(op)) {
                     (Decision::Ask, Some(c.source.clone()))
                 } else {
                     (Decision::Deny, None)
@@ -294,6 +299,53 @@ mod tests {
             key: "orders".into(),
             action: "".into(),
             attrs: serde_json::json!({"table": "orders"}),
+        };
+        assert_eq!(c.classify(&op), Decision::Deny);
+    }
+
+    #[tokio::test]
+    async fn key_is_a_matchable_dimension() {
+        let declared = vec![serde_json::json!({"key": "test_*"})];
+        let grant = CapabilityGrant {
+            mode: PolicyMode::Allowlist,
+            allow: vec![serde_json::json!({"key": "test_*"})],
+            deny: vec![],
+        };
+        let c = GenericProvider
+            .resolve("db:drop", Some(&declared), &grant)
+            .await
+            .unwrap();
+        let op = |key: &str| ResourceOp {
+            cap_id: "db:drop".into(),
+            key: key.into(),
+            action: "request".into(),
+            attrs: serde_json::Value::Null,
+        };
+        // Matched from op.key alone — no attrs at all.
+        assert_eq!(c.classify(&op("test_events")), Decision::Allow);
+        assert_eq!(c.classify(&op("production")), Decision::Deny);
+    }
+
+    #[tokio::test]
+    async fn host_key_beats_a_guest_supplied_key_in_attrs() {
+        let declared = vec![serde_json::json!({"key": "test_*"})];
+        let grant = CapabilityGrant {
+            mode: PolicyMode::Allowlist,
+            allow: vec![serde_json::json!({"key": "test_*"})],
+            deny: vec![],
+        };
+        let c = GenericProvider
+            .resolve("db:drop", Some(&declared), &grant)
+            .await
+            .unwrap();
+        // The guest puts a compliant-looking "key" in args while the real subject
+        // is production. The host-derived key must win, or the prompt a human
+        // approved would not be the operation policy authorized.
+        let op = ResourceOp {
+            cap_id: "db:drop".into(),
+            key: "production".into(),
+            action: "request".into(),
+            attrs: serde_json::json!({"key": "test_decoy"}),
         };
         assert_eq!(c.classify(&op), Decision::Deny);
     }
