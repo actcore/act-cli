@@ -1,0 +1,129 @@
+/// Semantic authorization — the interface a component calls before doing
+/// something the host cannot see it doing.
+///
+/// ACT's capability system enforces physical classes by interception: the host
+/// sits on the `wasi:filesystem`, `wasi:http` and `wasi:sockets` boundaries and
+/// decides every crossing. Semantic actions have no such boundary. A
+/// `DROP DATABASE` travels to Postgres over an already-granted socket; a script
+/// injection travels to a browser over an already-granted HTTP session. The
+/// host sees bytes on a permitted channel and nothing more.
+///
+/// So the initiative comes from the component. It names the class of action it
+/// is about to take, and the host applies that class's policy — the same
+/// policy surface, the same grants, the same audit trail as every physical
+/// class. What the host cannot verify is that the component asked at all: this
+/// interface defends against a mistaken or manipulated *agent* driving a
+/// trusted component, not against a component that lies about what it is doing.
+/// That second threat is what the physical capability ceiling is for, and the
+/// two mechanisms are meant to be used together.
+///
+/// The class MUST appear in the component's `act:component` capability
+/// declarations. An undeclared class is refused without consulting the operator
+/// and no grant can widen it, so the manifest of a signed artifact is a
+/// complete, inspectable list of the semantic actions it can ever ask for.
+///
+/// Like `act:credentials`, this package runs against the ecosystem's usual
+/// direction: the host implements it and the component imports it. It is
+/// opt-in in both directions — a component that never calls `request` need not
+/// import it, and a host that implements it refuses classes the component never
+/// declared.
+///
+/// The data model lives in its own `types` interface, function-free and
+/// async-free, so SDK helpers and sync-shim adapters can `use act:consent/types`
+/// without pulling in the async signature.
+package act:consent@0.1.0;
+
+/// Consent data model — function-free, async-free, safe to `use` anywhere.
+interface types {
+  use act:core/types@0.4.0.{cbor};
+
+  /// The host's answer.
+  ///
+  /// An enum rather than a `result` because refusal is an ordinary outcome, not
+  /// a failure: the component is expected to branch on `deny`, skip the action
+  /// and return a useful tool error. Every reason for refusal collapses to
+  /// `deny` on purpose — an undeclared class, a denied grant, a human answering
+  /// no, and a host with no way to ask all produce the same value, so a
+  /// component cannot probe the operator's policy by varying its requests.
+  enum decision {
+    allow,
+    deny,
+  }
+
+  /// One request for authorization.
+  record consent-request {
+    /// The capability class this action belongs to, as a namespaced
+    /// identifier — "db:drop", "browser:navigate". It MUST be declared in the
+    /// component's `act:component` capabilities; an undeclared class is denied
+    /// without a prompt.
+    ///
+    /// Classes are the unit an operator grants, denies and reads in an audit
+    /// trail, so they should name what a person would want to decide about.
+    /// Splitting an irreversible action into its own class ("db:drop" apart
+    /// from "db:ddl") is what lets that action be refused without refusing
+    /// the rest.
+    class: string,
+    /// The subject within the class — a database name, an origin, an account
+    /// identifier.
+    ///
+    /// It does three jobs at once, deliberately. It is what the host remembers
+    /// when a human approves ("allow this, don't ask again"), it is what the
+    /// audit trail records, and it is a dimension policy constraints match
+    /// against. Because the same value serves all three, the operation a human
+    /// approved cannot differ from the operation policy authorized, and a
+    /// second `key` hidden inside `args` cannot shadow it.
+    ///
+    /// An empty key means the decision is not subject-specific, so approving it
+    /// approves the class. Prefer a real subject: a remembered "yes" to a whole
+    /// class is exactly the blanket authorization this interface exists to
+    /// avoid.
+    ///
+    /// The component chooses this string, which makes it untrusted input. A
+    /// class SHOULD fix the shape of its key — an origin rather than a full
+    /// URL, a bare identifier rather than a path — so that operator patterns
+    /// written against it mean what they appear to mean.
+    key: string,
+    /// One line, in the component's own words, describing the action to the
+    /// human who may be asked to approve it.
+    ///
+    /// Untrusted, and treated as such: the host attributes it to the component,
+    /// strips control characters, truncates it, and never lets it stand alone
+    /// as the question. It supplies detail the host cannot know — which rows,
+    /// which account, why now — and it never determines the decision.
+    summary: string,
+    /// Further dimensions policy may constrain, as a CBOR map — for example
+    /// `{ "table": "events" }`. Usually empty: `key` alone carries most
+    /// classes.
+    ///
+    /// A value that is not a CBOR map carries no dimensions rather than being
+    /// an error; `key` still matches. Nothing here can widen what `key` and the
+    /// declared ceiling already permit.
+    args: cbor,
+  }
+}
+
+/// Host-provided semantic authorization.
+interface consent-authority {
+  use types.{consent-request, decision};
+  use act:core/types@0.4.0.{metadata};
+
+  /// Ask the host to authorize a semantic action.
+  ///
+  /// Returns a decision, never a trap. On `deny` the component skips the action
+  /// and degrades gracefully — typically returning a tool error carrying
+  /// `std:capability-denied`. A component MUST NOT perform the action it asked
+  /// about after receiving `deny`.
+  ///
+  /// `meta` carries the calling context, including `std:session-id` where the
+  /// component is session-scoped. It anchors the audit record; it does not
+  /// select policy, which is keyed on the class and the key alone.
+  ///
+  /// `async` by design. Today a host may answer from static policy and return
+  /// immediately, but the same call may need to reach a human — a terminal
+  /// prompt, an MCP elicitation, a GUI dialog — in the middle of an in-flight
+  /// tool call. The async signature is what lets that happen without a
+  /// breaking change to this interface.
+  ///
+  /// The host MUST record every request and its outcome in the audit trail.
+  request: async func(req: consent-request, meta: metadata) -> decision;
+}

@@ -413,6 +413,21 @@ mod tests {
         );
     }
 
+    // NOTE: this pins the caching *policy* (same gate, same `(class, key)`,
+    // one prompt) but not the *sharing* it depends on: `ConsentGate::for_test`
+    // hands every gate its own fresh `DecisionCache`, so this test cannot
+    // distinguish "the cache is the run's one cache" from "`from_accessor`
+    // builds a new cache per gate" — both would pass it identically, because
+    // it only ever calls `.decide()` on one already-constructed `gate`. That
+    // property — whether two *separately constructed* gates (as two real
+    // `request` calls produce) still share one cache — is proven end to end
+    // in `act-cli/tests/consent_e2e.rs`'s
+    // `a_repeated_question_is_asked_once_not_per_call` and
+    // `a_different_key_is_still_asked_about`, against a real MCP elicitation
+    // round-trip. Reproducing that here would mean rebuilding `create_store`'s
+    // full `HostState` (WASI, HTTP client, every ceiling) inside a unit test —
+    // a second copy of exactly the kind of construction this module's own
+    // docs warn drifts.
     #[tokio::test]
     async fn ask_reaches_the_prompter_once_per_key_and_is_remembered() {
         let prompter = Arc::new(CountingPrompter::allowing());

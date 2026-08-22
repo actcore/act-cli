@@ -103,9 +103,10 @@ cp target/wasm32-wasip2/release/sockets_canary.wasm \
 
 ## credentials-canary
 
-Credentials canary. The only fixture that **imports** a host interface —
-`act:credentials/store@0.1.0` — rather than only exporting ones, so it is the
-only one that can drive the host's credential path end to end. It also exports
+Credentials canary. The first fixture that **imports** a host interface —
+`act:credentials/store@0.1.0` — rather than only exporting ones (see also
+`consent-canary`, below), which is what lets it drive the host's credential
+path end to end. It also exports
 `act:tools/tool-provider` and `act:sessions/session-provider`; the session
 export is not optional, because `get-secret` requires a live session.
 
@@ -170,4 +171,50 @@ cp target/wasm32-wasip2/release/credentials_canary.wasm creds-declaring/
 $AB pack creds-declaring/credentials_canary.wasm
 mv creds-declaring/credentials_canary.wasm \
     ../../fixtures/creds-declaring-canary.wasm
+```
+
+## consent-canary
+
+Consent canary. The second fixture that **imports** a host interface —
+`act:consent/consent-authority@0.1.0` — rather than only exporting one, which
+is what lets it drive the host's semantic-authorization path (ACT-CONSENT.md)
+end to end, the same way `credentials-canary` drives `act:credentials`. It
+exports `act:tools/tool-provider` only — unlike `credentials-canary`,
+`request` takes no session, so there is nothing session-shaped to export.
+
+Its single tool, `drop_database`, calls `consent-authority.request` with
+class `db:drop`, `key` = the `database` argument, and a `summary` naming the
+action. On `allow` it returns `{"dropped": <name>}` **without touching
+anything** — it is a canary, not a database client, and it drops nothing
+whether or not it is authorized to. On `deny` it returns a tool error
+carrying `std:capability-denied`.
+
+### Two artifacts, one build
+
+`consent-canary.wasm` and `consent-canary-undeclared.wasm` are the same
+compiled bytes packed twice: against `act.toml`, which carries a bare
+`[std.capabilities."db:drop"]` table (ACT-CONSENT.md §3.1 — no `[[allow]]`
+constraints, so the class itself is the ceiling), and against
+`undeclared/act.toml`, which does not declare it at all. Same trick
+`credentials-canary` uses, for the same reason: there is deliberately no flag
+that un-declares a capability class, so proving "undeclared means denied"
+needs a second artifact.
+
+### Rebuild
+
+```bash
+cd tests/fixtures-src/consent-canary
+cargo build --target wasm32-wasip2 --release
+AB="cargo run --manifest-path ../../../../act-build/Cargo.toml --release --"
+
+# Declaring variant:
+cp target/wasm32-wasip2/release/consent_canary.wasm .
+$AB pack consent_canary.wasm
+mv consent_canary.wasm ../../fixtures/consent-canary.wasm
+
+# Undeclared twin — same bytes, packed against undeclared/act.toml:
+cp target/wasm32-wasip2/release/consent_canary.wasm undeclared/
+$AB pack undeclared/consent_canary.wasm
+mv undeclared/consent_canary.wasm \
+    ../../fixtures/consent-canary-undeclared.wasm
 ```

@@ -1,0 +1,11 @@
+[std]
+name = "consent-canary"
+version = "0.1.0"
+description = "Canary component for act:consent host integration tests. Its `drop_database` tool asks for db:drop and reports the decision; it never actually drops anything."
+default-language = "en"
+
+# Bare declaration, per ACT-CONSENT.md §3.1: no [[allow]] constraints, so the
+# class itself is the ceiling and an operator --grant is what actually
+# narrows it.
+[std.capabilities."db:drop"]
+description = "Destructive operations (DROP, TRUNCATE)."

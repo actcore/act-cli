@@ -1,9 +1,9 @@
 //! Canary component for `act:credentials/store` host integration.
 //!
-//! This is the only fixture that *imports* a host interface rather than
-//! exporting one, so it is the only one that can prove the end-to-end
-//! property the credentials work exists for: material crosses into the
-//! guest, and nothing an agent can read ever carries it.
+//! This is the first fixture that *imports* a host interface rather than
+//! exporting one (see also `consent-canary`), which is what lets it prove
+//! the end-to-end property the credentials work exists for: material
+//! crosses into the guest, and nothing an agent can read ever carries it.
 //!
 //! One tool, `whoami`, fetches the credential stored under the key `probe`
 //! and reports facts about it — its `kind`, whether the field map arrived

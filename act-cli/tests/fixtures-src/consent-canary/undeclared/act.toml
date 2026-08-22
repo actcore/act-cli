@@ -1,0 +1,15 @@
+# The consent-canary bytes packed without declaring db:drop, so every
+# `request` call must be refused before the operator is ever consulted
+# (ACT-CONSENT.md §4 step 1).
+#
+# `act-build pack` resolves metadata from the directory it finds walking up
+# from the wasm, so packing a copy of the compiled bytes placed *here*
+# produces an artifact identical in code and different only in what it
+# claims to need — the same trick `credentials-canary/undeclared/act.toml`
+# uses, and for the same reason: there is deliberately no flag that
+# un-declares a capability class.
+[std]
+name = "consent-canary-undeclared"
+version = "0.1.0"
+description = "The consent canary packed without declaring db:drop, so every request must be denied without a prompt."
+default-language = "en"
