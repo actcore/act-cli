@@ -32,7 +32,7 @@ use wasmtime::component::{HasSelf, Linker};
 
 use super::HostState;
 use super::bindings::act::credentials::{store, types};
-use crate::consent::sanitize_hint;
+use crate::consent::{sanitize_hint, truncate_field};
 
 /// Why the host refused, in the terms `CredentialHost` can decide in. Maps
 /// onto the WIT `secret-error` variants and nothing else, through this
@@ -299,6 +299,7 @@ impl GateContext {
             // Deliberately silent until the verdict exists; the record is
             // emitted below, mirroring `fs_policy::resolve_ask`.
             act_policy::Decision::Ask => {
+                let has_channel = self.prompter.has_channel();
                 let allowed = self
                     .cache
                     .decide_cached(
@@ -310,7 +311,12 @@ impl GateContext {
                         },
                     )
                     .await;
-                emit_cap_decision(&CapDecisionRecord::answered(CAP_CREDENTIALS, key, allowed));
+                emit_cap_decision(&CapDecisionRecord::answered(
+                    CAP_CREDENTIALS,
+                    key,
+                    allowed,
+                    has_channel,
+                ));
                 allowed
             }
         }
@@ -340,6 +346,10 @@ impl GateContext {
 /// The component **digest** is still missing, and cannot be added from here:
 /// `ConsentAsk` carries no digest for any capability class.
 fn consent_summary(component: Option<&str>, action: &str, key: &str, hint: Option<&str>) -> String {
+    // Same reasoning as `consent::prompt_line`: `key` is the guest's own
+    // store-lookup descriptor and unbounded, so it is truncated here too —
+    // escaping (later, whole-line) stops forgery; this stops a flood.
+    let key = truncate_field(key);
     let base = match component {
         Some(c) => format!("{c} requests credential {action}: {key}"),
         None => format!("credential {action}: {key}"),
@@ -1069,6 +1079,25 @@ mod tests {
     fn no_hint_leaves_the_prompt_host_authored_end_to_end() {
         let s = consent_summary(None, "get", "notion", None);
         assert_eq!(s, "credential get: notion");
+    }
+
+    #[test]
+    fn a_megabyte_long_key_is_truncated_rather_than_flooding_the_prompt() {
+        // M5: `key` is the store lookup key as the guest asked for it — the
+        // same unbounded, guest-authored shape as `consent::prompt_line`'s
+        // `key`, and fixed by the same shared `consent::truncate_field`.
+        let huge_key = "x".repeat(1_000_000);
+        let s = consent_summary(Some("comp"), "get", &huge_key, None);
+        assert!(
+            s.chars().count() < 200,
+            "expected the key to be truncated, got {} chars",
+            s.chars().count()
+        );
+        assert!(s.contains('…'), "got {s}");
+        assert!(
+            s.contains("comp requests credential get:"),
+            "the rest of the line must still render normally, got {s}"
+        );
     }
 
     #[test]

@@ -251,6 +251,17 @@ pub fn render_credential_issue(r: &CredentialIssueRecord) -> String {
 /// A denial or an ask — printed the moment it resolves, never batched. Also
 /// reused (from the layer) for an allow that has nowhere to fold, e.g. one
 /// fired at instantiation time, before any tool-call span exists.
+///
+/// M4: `--deny db:drop`, an allowlist miss, and a declaration miss (or an
+/// undeclared class) can all resolve to the identical `Decision::Deny` with
+/// the identical default `reason` ("outside ceiling") — `statik` overrides
+/// only ever carries that one generic string unless a call site opts into
+/// `statik_with_reason`. What actually distinguishes §4's steps is `r.mode`
+/// (which grant mode was in force) and `r.rule` (the specific constraint or
+/// declaration text a provider's `classify_explained` attributed) — both
+/// already captured on every record, but previously never rendered here.
+/// §8.4 requires that distinction to live in the audit trail; this is where
+/// an operator actually reads a denial, so it has to appear on this line.
 pub fn render_exception(r: &CapDecisionRecord) -> String {
     let marker = match r.decision {
         Decision4::Deny => "\u{2717}",
@@ -273,9 +284,18 @@ pub fn render_exception(r: &CapDecisionRecord) -> String {
             format!("   {escaped}")
         })
         .unwrap_or_default();
+    let mode_escaped = escape_audit_field(&r.mode);
+    // Same "under <rule>" phrasing `render_rollup` already uses for a
+    // matched allow rule, so an operator reading either line learns the
+    // convention once.
+    let rule_clause = r
+        .rule
+        .as_deref()
+        .map(|s| format!(" under {}", escape_audit_field(s)))
+        .unwrap_or_default();
     format!(
-        "{PREFIX}{marker} {}  {}  {}{}",
-        r.decision, cap_id_escaped, subject, reason
+        "{PREFIX}{marker} {}  {}  {}{}  mode:{}{}",
+        r.decision, cap_id_escaped, subject, reason, mode_escaped, rule_clause
     )
 }
 
@@ -385,6 +405,7 @@ mod tests {
             actor: Actor::Static,
             reason: Some("outside ceiling".into()),
             rule: None,
+            never_rollup: false,
         };
         let line = render_exception(&r);
         assert!(line.starts_with("audit: "), "got {line}");
@@ -392,6 +413,78 @@ mod tests {
         assert!(line.contains("wasi:http"));
         assert!(line.contains("GET api.telemetry.example.com:443"));
         assert!(line.contains("outside ceiling"));
+    }
+
+    #[test]
+    fn exception_line_carries_mode_and_rule_so_deny_causes_are_distinguishable() {
+        // M4: `statik`'s default reason is the identical "outside ceiling"
+        // string for a deny-constraint match, an allowlist miss, and a
+        // declaration miss — the record still carries a more specific `rule`
+        // (or none, for an allowlist miss) plus the grant `mode`, but before
+        // this fix `render_exception` never printed either, so the three
+        // causes were textually indistinguishable on the one line an
+        // operator actually reads.
+        let base = CapDecisionRecord {
+            cap_id: "db:drop".into(),
+            key: "production".into(),
+            action: "request".into(),
+            decision: Decision4::Deny,
+            mode: "open".into(),
+            actor: Actor::Static,
+            reason: Some("outside ceiling".into()),
+            rule: None,
+            never_rollup: false,
+        };
+
+        // A `deny` constraint match: `rule` carries the constraint JSON.
+        let deny_constraint = CapDecisionRecord {
+            rule: Some(r#"{"key":"production"}"#.into()),
+            ..base.clone()
+        };
+        let line = render_exception(&deny_constraint);
+        assert!(line.contains("mode:open"), "got {line}");
+        assert!(
+            line.contains(r#"under {"key":"production"}"#),
+            "the matched deny constraint must appear, got {line}"
+        );
+
+        // A declaration miss: `rule` carries the fixed declaration text.
+        let declaration_miss = CapDecisionRecord {
+            mode: "ask".into(),
+            rule: Some("outside the declared ceiling".into()),
+            ..base.clone()
+        };
+        let line = render_exception(&declaration_miss);
+        assert!(line.contains("mode:ask"), "got {line}");
+        assert!(
+            line.contains("under outside the declared ceiling"),
+            "got {line}"
+        );
+
+        // An allowlist miss: no rule attributed at all, only the mode — and
+        // this must render visibly differently from the two cases above,
+        // not just happen to omit a clause nobody checks for.
+        let allowlist_miss = CapDecisionRecord {
+            mode: "allowlist".into(),
+            rule: None,
+            ..base
+        };
+        let line = render_exception(&allowlist_miss);
+        assert!(line.contains("mode:allowlist"), "got {line}");
+        assert!(
+            !line.contains("under "),
+            "no rule was attributed, so no `under` clause should appear, got {line}"
+        );
+        assert_ne!(
+            line,
+            render_exception(&deny_constraint),
+            "an allowlist miss must not render identically to a deny-constraint match"
+        );
+        assert_ne!(
+            line,
+            render_exception(&declaration_miss),
+            "an allowlist miss must not render identically to a declaration miss"
+        );
     }
 
     #[test]
@@ -405,6 +498,7 @@ mod tests {
             actor: Actor::User,
             reason: Some("denied by user".into()),
             rule: None,
+            never_rollup: false,
         };
         let line = render_exception(&r);
         assert!(line.contains("ask-deny"));
@@ -616,6 +710,7 @@ mod tests {
             actor: Actor::Static,
             reason: Some("outside ceiling".into()),
             rule: None,
+            never_rollup: false,
         };
         let line = render_exception(&r);
         assert_eq!(line.matches('\n').count(), 0, "got {line}");
@@ -675,6 +770,7 @@ mod tests {
             actor: Actor::Static,
             reason: None,
             rule: None,
+            never_rollup: false,
         };
         // Clean ASCII strings should not allocate or escape
         let line = render_exception(&r);
@@ -753,6 +849,7 @@ mod tests {
             actor: Actor::Static,
             reason: None,
             rule: Some("/data/**".into()),
+            never_rollup: false,
         };
         let line = render_exception(&r);
         assert!(

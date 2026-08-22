@@ -19,12 +19,38 @@ use crate::provider::{CompiledCeiling, ProviderRegistry};
 /// An undeclared one resolves against `None` and hard-denies, but it still
 /// gets a row — the audit header reports a mode for every class an operator
 /// might have expected to see, including the ones this artifact does not use.
+///
+/// This is an **audit-header-completeness** concept: which classes always get
+/// a row, so the header is never missing one an operator expected. It is not
+/// the same question as [`PHYSICALLY_INTERCEPTED`] below, even though the two
+/// happen to name the same four classes today — see that constant's doc.
 pub const ALWAYS_RESOLVED: &[&str] = &[
     CAP_FILESYSTEM,
     CAP_HTTP,
     CAP_SOCKETS,
     crate::providers::credentials::CAP_CREDENTIALS,
 ];
+
+/// Classes the host enforces by interception at the wasmtime boundary — a
+/// filesystem open, an outgoing HTTP request, a socket connect, a credential
+/// read — rather than through `act:consent`. This is the **security**
+/// predicate `act:consent`'s gate needs: a class in this set already has a
+/// real boundary a component cannot talk its way around, so consent must
+/// never become a second door that can answer "allow" for it. `store.rs`'s
+/// `semantic_ceilings` map is built by excluding exactly this set, and
+/// `ConsentGate::decide` denies on a map miss — see both modules' docs.
+///
+/// Equal to [`ALWAYS_RESOLVED`] today, by construction: the four classes this
+/// host physically intercepts are the same four it always resolves a ceiling
+/// for. Nothing enforces that the two stay equal, though — they answer
+/// different questions, and a fifth class ever registered in
+/// `ProviderRegistry::with_builtins` with a wasmtime hook but no update *here*
+/// would silently leave consent reachable for it, with no test catching the
+/// gap until someone thought to write one. Callers that care about the
+/// security property (`store.rs`, `consent::gate`'s tests) depend on this
+/// constant, not on `ALWAYS_RESOLVED`, so that the day the two diverge, only
+/// one of them needs to change.
+pub const PHYSICALLY_INTERCEPTED: &[&str] = ALWAYS_RESOLVED;
 
 /// Resolve one ceiling per capability id: every [`ALWAYS_RESOLVED`] class,
 /// plus every class the component declared.

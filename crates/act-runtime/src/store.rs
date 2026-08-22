@@ -2,6 +2,7 @@
 //! ceilings resolved for one component run.
 
 use anyhow::Result;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use wasmtime::component::ResourceTable;
 use wasmtime::{Engine, Store, StoreLimits, StoreLimitsBuilder};
@@ -37,15 +38,15 @@ pub struct HostState {
     /// must report the class either way.
     pub(crate) credentials_ceiling: Arc<dyn act_policy::provider::CompiledCeiling>,
     /// Every declared capability class the host does not wire interception
-    /// for — i.e. every resolved ceiling minus `ALWAYS_RESOLVED`. A class
-    /// absent from this map has no ceiling and must be denied outright.
+    /// for — i.e. every resolved ceiling minus `PHYSICALLY_INTERCEPTED`. A
+    /// class absent from this map has no ceiling and must be denied outright.
     ///
     /// Behind an `Arc` because `act:consent`'s gate is assembled per request
     /// out of this state, and cloning the map on every semantic authorization
     /// would be a fresh allocation for something that never changes after
     /// instantiation.
     pub(crate) semantic_ceilings:
-        Arc<std::collections::BTreeMap<String, Arc<dyn act_policy::provider::CompiledCeiling>>>,
+        Arc<BTreeMap<String, Arc<dyn act_policy::provider::CompiledCeiling>>>,
     /// The reference the operator supplied for this component, as typed.
     ///
     /// Used to attribute a consent prompt to the artifact asking
@@ -256,7 +257,7 @@ pub async fn create_store(
     // resolves the classes it cares about itself, from the whole policy.
     warn_if_credentials_exfil_risk(info, grant_policy);
 
-    let declared: std::collections::BTreeMap<String, Vec<serde_json::Value>> = info
+    let declared: BTreeMap<String, Vec<serde_json::Value>> = info
         .std
         .capabilities
         .iter()
@@ -269,15 +270,22 @@ pub async fn create_store(
 
     // The four the host enforces by interception are taken by name; their
     // ceilings are needed individually to wire the wasmtime hooks below.
-    let take = |id: &str| -> Arc<dyn CompiledCeiling> {
+    //
+    // `ALWAYS_RESOLVED` guarantees a ceiling for every physical class, so this
+    // should never miss — but `act-runtime` is the embeddable crate that
+    // `acts-core` and a future gateway link against, and `create_store`
+    // already returns `Result`. An `act-policy` edit that ever broke that
+    // guarantee must surface as an error in the embedder's process, not as a
+    // panic reaching all the way up through it.
+    let take = |id: &str| -> Result<Arc<dyn CompiledCeiling>> {
         all.get(id)
             .cloned()
-            .expect("ALWAYS_RESOLVED guarantees a ceiling for every physical class")
+            .ok_or_else(|| anyhow::anyhow!("no resolved ceiling for always-resolved class {id}"))
     };
-    let fs_ceiling = take(act_types::constants::CAP_FILESYSTEM);
+    let fs_ceiling = take(act_types::constants::CAP_FILESYSTEM)?;
     let fs_effective_mode = fs_ceiling.effective_mode();
-    let http_ceiling = take(act_types::constants::CAP_HTTP);
-    let sockets_ceiling = take(act_types::constants::CAP_SOCKETS);
+    let http_ceiling = take(act_types::constants::CAP_HTTP)?;
+    let sockets_ceiling = take(act_types::constants::CAP_SOCKETS)?;
     let sockets_effective_mode = sockets_ceiling.effective_mode();
     // `act:credentials` is a semantic class with no resource constraints, so
     // its declaredness is carried by `Option` presence, not by the (always
@@ -285,7 +293,7 @@ pub async fn create_store(
     // resolved even when this run has no credential store: the ceiling is
     // what the audit header reports, and a component that declared the class
     // but got nothing must still show up as `declared but not granted`.
-    let credentials_ceiling = take(act_policy::providers::credentials::CAP_CREDENTIALS);
+    let credentials_ceiling = take(act_policy::providers::credentials::CAP_CREDENTIALS)?;
 
     // Captured for the instantiation audit header (Task 10), before any of
     // them get moved into `HostState` / the hooks / the sockets closure
@@ -301,12 +309,17 @@ pub async fn create_store(
     // declared semantic class with no host-side enforcement hook of its own;
     // Task 3 reads this to gate `act:consent` requests against it. Absence
     // from this map is what "undeclared" means at that gate.
-    let semantic_ceilings: Arc<std::collections::BTreeMap<String, Arc<dyn CompiledCeiling>>> =
-        Arc::new(
-            all.into_iter()
-                .filter(|(id, _)| !act_policy::ceilings::ALWAYS_RESOLVED.contains(&id.as_str()))
-                .collect(),
-        );
+    //
+    // Filtered against `PHYSICALLY_INTERCEPTED`, not `ALWAYS_RESOLVED`: this
+    // is the security boundary (a physically-enforced class must not become
+    // reachable through consent too), and `PHYSICALLY_INTERCEPTED`'s doc
+    // names that as its own predicate rather than one that happens to share
+    // `ALWAYS_RESOLVED`'s membership today.
+    let semantic_ceilings: Arc<BTreeMap<String, Arc<dyn CompiledCeiling>>> = Arc::new(
+        all.into_iter()
+            .filter(|(id, _)| !act_policy::ceilings::PHYSICALLY_INTERCEPTED.contains(&id.as_str()))
+            .collect(),
+    );
 
     let mut builder = WasiCtxBuilder::new();
     let mut preopen_pairs = Vec::with_capacity(preopens.len());
@@ -397,6 +410,11 @@ pub async fn create_store(
                                 key: key.clone(),
                                 summary: format!("socket {proto} {addr}"),
                             };
+                            // Read before `prompter` moves into the spawned
+                            // task below — `unwrap_or(false)` on a join
+                            // failure would otherwise leave no way to tell
+                            // "no channel" from "the task panicked".
+                            let has_channel = prompter.has_channel();
                             let allowed =
                                 tokio::spawn(
                                     async move { cache.decide_cached(&*prompter, ask).await },
@@ -407,6 +425,7 @@ pub async fn create_store(
                                 act_types::constants::CAP_SOCKETS,
                                 &key,
                                 allowed,
+                                has_channel,
                             ));
                             allowed
                         }

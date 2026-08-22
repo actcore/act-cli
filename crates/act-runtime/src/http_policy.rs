@@ -136,11 +136,13 @@ async fn resolve_http_ask(
     ask: ConsentAsk,
 ) -> bool {
     let key = ask.key.clone();
+    let has_channel = prompter.has_channel();
     let allowed = cache.decide_cached(&*prompter, ask).await;
     emit_cap_decision(&CapDecisionRecord::answered(
         act_types::constants::CAP_HTTP,
         &key,
         allowed,
+        has_channel,
     ));
     allowed
 }
@@ -597,6 +599,8 @@ mod tests {
             .find(|l| l.contains("ask-deny"))
             .unwrap_or_else(|| panic!("no ask-deny audit line reached the trail, got {lines:?}"));
         assert!(ask_line.contains("wasi:http"), "got {ask_line}");
-        assert!(ask_line.contains("denied by user"), "got {ask_line}");
+        // `hooks_from` wires up `DenyPrompter`, which has no channel at all —
+        // M1: this must not be recorded as if a human had actually answered.
+        assert!(ask_line.contains("no prompt channel"), "got {ask_line}");
     }
 }

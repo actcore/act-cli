@@ -19,6 +19,20 @@ pub struct ConsentAsk {
 #[async_trait::async_trait]
 pub trait ConsentPrompter: Send + Sync {
     async fn decide(&self, ask: &ConsentAsk) -> bool;
+
+    /// Whether this prompter can actually reach a human at all. `true` for
+    /// every interactive prompter (a real TTY, an MCP client offering
+    /// elicitation); `false` only for [`DenyPrompter`], which resolves every
+    /// `ask` to deny with nobody consulted.
+    ///
+    /// Read at the point an `ask` resolves, so the audit trail can tell "a
+    /// human answered no" apart from "there was no one to ask" — §5's
+    /// degrade-to-deny is not the same event as a real refusal, and callers
+    /// must not attribute the latter's `actor`/`reason` to the former. See
+    /// `CapDecisionRecord::answered`.
+    fn has_channel(&self) -> bool {
+        true
+    }
 }
 
 /// No prompt channel (headless / --mcp / non-TTY): every ask denies (fail-safe).
@@ -27,6 +41,10 @@ pub struct DenyPrompter;
 #[async_trait::async_trait]
 impl ConsentPrompter for DenyPrompter {
     async fn decide(&self, _ask: &ConsentAsk) -> bool {
+        false
+    }
+
+    fn has_channel(&self) -> bool {
         false
     }
 }

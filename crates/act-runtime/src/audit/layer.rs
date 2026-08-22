@@ -168,6 +168,7 @@ struct EventVisitor {
     reason: String,
     rule: String,
     declared: bool,
+    never_rollup: bool,
     has_prompt_channel: bool,
     /// Present on a credential-issue event and on nothing else — see
     /// `on_event`, which branches on it before anything else.
@@ -206,15 +207,16 @@ impl Visit for EventVisitor {
     }
 
     fn record_bool(&mut self, f: &Field, v: bool) {
-        // `act.capability.declared` and `act.consent.prompt_channel` are the
-        // only bool fields this crate emits. Without this override,
-        // tracing's default `Visit::record_bool` routes a bool to
-        // `record_debug`, whose output ("true"/"false") doesn't match any
-        // `record_str` arm above — the field would be silently dropped and
-        // neither instantiation warning could ever fire.
+        // `act.capability.declared`, `act.consent.prompt_channel` and
+        // `act.decision.never_rollup` are the only bool fields this crate
+        // emits. Without this override, tracing's default `Visit::record_bool`
+        // routes a bool to `record_debug`, whose output ("true"/"false")
+        // doesn't match any `record_str` arm above — the field would be
+        // silently dropped and neither instantiation warning could ever fire.
         match f.name() {
             n if n == attr::CAPABILITY_DECLARED => self.declared = v,
             n if n == attr::CONSENT_PROMPT_CHANNEL => self.has_prompt_channel = v,
+            n if n == attr::NEVER_ROLLUP => self.never_rollup = v,
             _ => {}
         }
     }
@@ -253,6 +255,7 @@ impl EventVisitor {
             actor,
             reason: (!self.reason.is_empty()).then_some(self.reason),
             rule: (!self.rule.is_empty()).then_some(self.rule),
+            never_rollup: self.never_rollup,
         })
     }
 }
@@ -376,10 +379,18 @@ where
             return;
         };
 
-        if record.decision.is_exception() || self.detail == Detail::Full {
+        // I2: a consent (semantic-class) decision must never fold into the
+        // rollup, even when it is an Allow — same reasoning
+        // `render_credential_issue`'s doc gives for a credential issue: there
+        // are few of these, each is a distinct consequential act, and *which
+        // subject* is the whole content of the decision. Treating
+        // `never_rollup` as an exception here, alongside a real Deny/Ask,
+        // both prints it immediately and (via the `is_exception()` guard
+        // below) keeps it out of the fold.
+        if record.decision.is_exception() || record.never_rollup || self.detail == Detail::Full {
             self.emit(|| render_exception(&record));
         }
-        if !record.decision.is_exception() {
+        if !record.decision.is_exception() && !record.never_rollup {
             // Fold into the nearest enclosing tool-call span, if there is
             // one. `SpanState` is installed only on TARGET_AUDIT spans, so a
             // plain (non-audit) span nested between the event and the tool
@@ -510,6 +521,7 @@ mod tests {
             actor: Actor::Static,
             reason: None,
             rule: Some(rule.into()),
+            never_rollup: false,
         }
     }
 
@@ -523,6 +535,25 @@ mod tests {
             actor: Actor::Static,
             reason: Some("outside ceiling".into()),
             rule: None,
+            never_rollup: false,
+        }
+    }
+
+    /// A consent (semantic-class) decision — `never_rollup: true`. Used by
+    /// the I2 rollup-exemption tests below to prove the layer treats it like
+    /// a credential issue: printed immediately, on an Allow too, and never
+    /// folded into the tool call's rollup line.
+    fn consent_allow(key: &str) -> CapDecisionRecord {
+        CapDecisionRecord {
+            cap_id: "db:drop".into(),
+            key: key.into(),
+            action: "request".into(),
+            decision: Decision4::Allow,
+            mode: "open".into(),
+            actor: Actor::Static,
+            reason: None,
+            rule: None,
+            never_rollup: true,
         }
     }
 
@@ -744,6 +775,51 @@ mod tests {
     }
 
     #[test]
+    fn a_consent_allow_never_folds_into_the_rollup_even_inside_a_tool_call() {
+        // I2: before this fix, `db:drop=allow` folded into the same rollup a
+        // filesystem read does, and a `DROP DATABASE analytics` authorized
+        // mid-call rendered as `db:drop: 1 request` — the one fact the line
+        // exists to carry (which database) thrown away. `never_rollup: true`
+        // must keep it out of the fold and print it the moment it resolves,
+        // the same way `render_credential_issue` never folds either.
+        let out = run(|| {
+            let span = tool_call_span(&start());
+            let _g = span.enter();
+            emit_cap_decision(&consent_allow("analytics"));
+            finish_tool_call(&span, Outcome::Ok, Duration::from_millis(5));
+        });
+        assert_eq!(
+            out.len(),
+            2,
+            "the consent line plus the rollup line, got {out:?}"
+        );
+        assert!(
+            out[0].contains("analytics"),
+            "the consent decision must print immediately and name the key, got {out:?}"
+        );
+        assert!(
+            out[0].contains("db:drop"),
+            "and name the class, got {out:?}"
+        );
+        assert!(
+            !out[1].contains("db:drop") && !out[1].contains("analytics"),
+            "and must not also be counted in the rollup, got {}",
+            out[1]
+        );
+    }
+
+    #[test]
+    fn a_consent_allow_with_nowhere_to_fold_still_prints_once() {
+        // Mirrors `an_allow_outside_any_tool_call_still_reaches_the_operator`
+        // for the semantic-class case: with no enclosing tool-call span the
+        // ordinary fold path is unreachable regardless, but this pins that
+        // `never_rollup` does not cause a double-print or a drop here either.
+        let out = run(|| emit_cap_decision(&consent_allow("analytics")));
+        assert_eq!(out.len(), 1, "got {out:?}");
+        assert!(out[0].contains("db:drop"), "got {out:?}");
+    }
+
+    #[test]
     fn a_denial_prints_immediately_and_before_the_rollup() {
         let out = run(|| {
             let span = tool_call_span(&start());
@@ -813,11 +889,13 @@ mod tests {
                 "wasi:filesystem",
                 "/data/x",
                 true,
+                true,
             ));
             emit_cap_decision(&CapDecisionRecord::answered(
                 "wasi:http",
                 "evil.example.com",
                 false,
+                true,
             ));
         });
         assert_eq!(out.len(), 2, "got {out:?}");
@@ -841,6 +919,7 @@ mod tests {
                 actor: Actor::Static,
                 reason: Some("outside ceiling".into()),
                 rule: None,
+                never_rollup: false,
             });
         });
         assert_eq!(out.len(), 1, "got {out:?}");

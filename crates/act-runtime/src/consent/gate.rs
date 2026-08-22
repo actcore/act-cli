@@ -50,6 +50,24 @@ pub(crate) use types::Decision;
 /// pre-existing shared behaviour, not something this class chose.
 const ACTION: &str = "request";
 
+/// Every consent decision is a semantic-class decision, and must never fold
+/// into the tool call's rollup — see `CapDecisionRecord::never_rollup`'s doc.
+/// A free function rather than inlining `never_rollup: true` at each of the
+/// five call sites in `decide`: it also documents, in one place, why this
+/// gate never leaves the field at its default.
+///
+/// `never_rollup` is a plain field, not a constructor parameter on `statik` /
+/// `statik_with_reason` / `answered` — those are shared with every physical
+/// provider, which must keep defaulting to `false`, so this crate sets it
+/// after construction instead of widening the shared constructors' surface
+/// for one caller.
+fn mark_never_rollup(
+    mut record: crate::audit::CapDecisionRecord,
+) -> crate::audit::CapDecisionRecord {
+    record.never_rollup = true;
+    record
+}
+
 /// One component run's semantic-authorization gate.
 ///
 /// Assembled per call from [`HostState`], which is why the shared pieces are
@@ -62,7 +80,7 @@ pub(crate) struct ConsentGate {
     /// here is what "undeclared" means** — see [`ConsentGate::decide`].
     ///
     /// `create_store` builds it as every resolved ceiling minus
-    /// `ALWAYS_RESOLVED`, so the four classes the host enforces by
+    /// `PHYSICALLY_INTERCEPTED`, so the four classes the host enforces by
     /// interception are absent and a consent request naming one of them is
     /// refused. That is deliberate: those already have a gate on the
     /// boundary, and a second door that could answer "allow" for them would
@@ -126,7 +144,7 @@ impl ConsentGate {
         // `resolve_ceilings` and would then run the ordinary grant path — up
         // to and including asking a human a question that names no class.
         if class.is_empty() {
-            emit_cap_decision(&CapDecisionRecord::statik_with_reason(
+            emit_cap_decision(&mark_never_rollup(CapDecisionRecord::statik_with_reason(
                 class,
                 key,
                 ACTION,
@@ -134,20 +152,34 @@ impl ConsentGate {
                 "deny",
                 None,
                 Some("empty capability class"),
-            ));
+            )));
             return Decision::Deny;
         }
 
         let Some(ceiling) = self.semantic_ceilings.get(class) else {
-            emit_cap_decision(&CapDecisionRecord::statik_with_reason(
+            // Two different reasons produce the identical map miss.
+            // `PHYSICALLY_INTERCEPTED` classes (wasi:http and friends) are
+            // never in `semantic_ceilings` at all, declared or not — see that
+            // constant's doc — so a request naming one lands here even when
+            // the manifest genuinely declares it. "class not declared" would
+            // be false in that case: the class is very much declared, it is
+            // just enforced somewhere else. §7.2 requires the audit reason to
+            // be true, so the two causes get two reasons; the decision itself
+            // (deny, without consulting anyone) is identical either way.
+            let reason = if act_policy::ceilings::PHYSICALLY_INTERCEPTED.contains(&class) {
+                "class is enforced on the boundary, not through consent"
+            } else {
+                "class not declared in act:component"
+            };
+            emit_cap_decision(&mark_never_rollup(CapDecisionRecord::statik_with_reason(
                 class,
                 key,
                 ACTION,
                 Decision4::Deny,
                 "deny",
                 None,
-                Some("class not declared in act:component"),
-            ));
+                Some(reason),
+            )));
             return Decision::Deny;
         };
 
@@ -162,30 +194,31 @@ impl ConsentGate {
 
         match explained.decision {
             act_policy::Decision::Allow => {
-                emit_cap_decision(&CapDecisionRecord::statik(
+                emit_cap_decision(&mark_never_rollup(CapDecisionRecord::statik(
                     class,
                     key,
                     ACTION,
                     Decision4::Allow,
                     &mode,
                     explained.rule,
-                ));
+                )));
                 Decision::Allow
             }
             act_policy::Decision::Deny => {
-                emit_cap_decision(&CapDecisionRecord::statik(
+                emit_cap_decision(&mark_never_rollup(CapDecisionRecord::statik(
                     class,
                     key,
                     ACTION,
                     Decision4::Deny,
                     &mode,
                     explained.rule,
-                ));
+                )));
                 Decision::Deny
             }
             // Deliberately silent until the verdict exists; the record is emitted
             // below, mirroring `fs_policy::resolve_ask`.
             act_policy::Decision::Ask => {
+                let has_channel = self.prompter.has_channel();
                 let allowed = self
                     .cache
                     .decide_cached(
@@ -202,7 +235,12 @@ impl ConsentGate {
                         },
                     )
                     .await;
-                emit_cap_decision(&CapDecisionRecord::answered(class, key, allowed));
+                emit_cap_decision(&mark_never_rollup(CapDecisionRecord::answered(
+                    class,
+                    key,
+                    allowed,
+                    has_channel,
+                )));
                 if allowed {
                     Decision::Allow
                 } else {
@@ -355,19 +393,25 @@ mod tests {
     /// these tests hold the ceiling the host would actually build rather
     /// than a stand-in.
     ///
-    /// The `ALWAYS_RESOLVED` filter below deliberately mirrors `create_store`,
-    /// which is the copy that actually enforces "a physically-enforced class
-    /// is not reachable through consent". This one only reproduces the shape
-    /// of the map the gate is handed.
+    /// The `PHYSICALLY_INTERCEPTED` filter below deliberately mirrors
+    /// `create_store`, which is the copy that actually enforces "a
+    /// physically-enforced class is not reachable through consent". This one
+    /// only reproduces the shape of the map the gate is handed.
     async fn ceilings_granted(
         class: &str,
         declared: &[serde_json::Value],
         grant: act_policy::grant::CapabilityGrant,
     ) -> BTreeMap<String, Arc<dyn act_policy::provider::CompiledCeiling>> {
-        use act_policy::grant::GrantPolicy;
+        use act_policy::grant::{GrantPolicy, PolicyMode};
 
         let policy = GrantPolicy {
-            default: grant.mode,
+            // Deliberately the tighter fixture: `PolicyMode::Deny`, not
+            // `grant.mode`. This helper's job is to hand back one class
+            // resolved under `grant` — the physical classes (fs/http/
+            // sockets/credentials) are filtered out below regardless, so
+            // resolving them under the test's own `grant.mode` too was
+            // configuring more than any test here describes or depends on.
+            default: PolicyMode::Deny,
             entries: BTreeMap::from([(class.to_string(), grant)]),
         };
         let declared = BTreeMap::from([(class.to_string(), declared.to_vec())]);
@@ -379,7 +423,7 @@ mod tests {
         .await
         .expect("resolve");
         all.into_iter()
-            .filter(|(id, _)| !act_policy::ceilings::ALWAYS_RESOLVED.contains(&id.as_str()))
+            .filter(|(id, _)| !act_policy::ceilings::PHYSICALLY_INTERCEPTED.contains(&id.as_str()))
             .collect()
     }
 
@@ -466,11 +510,12 @@ mod tests {
         // "allow" for it.
         //
         // Note what actually holds this in production: `create_store`'s own
-        // `ALWAYS_RESOLVED` filter, which `ceilings_declaring` deliberately
-        // mirrors so these tests see the map the host would build. Deleting
-        // the filter in `store.rs` would not turn this test red — the e2e
-        // tests are the layer that can see that. What this pins is that the
-        // gate adds no bypass of its own on top of the filtered map.
+        // `PHYSICALLY_INTERCEPTED` filter, which `ceilings_declaring`
+        // deliberately mirrors so these tests see the map the host would
+        // build. Deleting the filter in `store.rs` would not turn this test
+        // red — the e2e tests are the layer that can see that. What this
+        // pins is that the gate adds no bypass of its own on top of the
+        // filtered map.
         let gate = ConsentGate::for_test(
             ceilings_declaring("wasi:http", &[], PolicyMode::Open).await,
             Arc::new(PanickingPrompter),
@@ -479,6 +524,59 @@ mod tests {
             gate.decide("wasi:http", "api.example.com", "s", &json!({}))
                 .await,
             Decision::Deny
+        );
+    }
+
+    #[tokio::test]
+    async fn a_declared_physical_class_denies_with_the_true_reason_not_undeclared() {
+        // M2: the test above pins the decision (Deny); this pins the audit
+        // *reason*. `wasi:http` is declared here — same fixture as above —
+        // and still hits the map miss, because it is physically intercepted
+        // and therefore never in `semantic_ceilings`. Before this fix, that
+        // miss was unconditionally audited as "class not declared in
+        // act:component", which is false: the manifest genuinely declares
+        // this class, it's just enforced somewhere else.
+        use crate::audit::layer::AuditWriter;
+        use std::sync::{Arc as StdArc, Mutex};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        struct CapturingWriter(StdArc<Mutex<Vec<String>>>);
+        impl AuditWriter for CapturingWriter {
+            fn write_line(&self, line: &str) {
+                self.0.lock().unwrap().push(line.to_string());
+            }
+        }
+
+        let sink = StdArc::new(Mutex::new(Vec::new()));
+        let layer = crate::audit::AuditLayer::new(
+            CapturingWriter(sink.clone()),
+            crate::audit::Detail::Full,
+        );
+        let sub = tracing_subscriber::registry().with(layer);
+        let _guard = tracing::subscriber::set_default(sub);
+
+        let gate = ConsentGate::for_test(
+            ceilings_declaring("wasi:http", &[], PolicyMode::Open).await,
+            Arc::new(PanickingPrompter),
+        );
+        let decision = gate
+            .decide("wasi:http", "api.example.com", "s", &json!({}))
+            .await;
+        drop(_guard);
+
+        assert_eq!(decision, Decision::Deny);
+        let lines = sink.lock().unwrap().clone();
+        let line = lines
+            .iter()
+            .find(|l| l.contains("wasi:http"))
+            .unwrap_or_else(|| panic!("no audit line naming wasi:http, got {lines:?}"));
+        assert!(
+            line.contains("enforced on the boundary"),
+            "must carry the true reason, got: {line}"
+        );
+        assert!(
+            !line.contains("not declared"),
+            "must not claim undeclared when the manifest declares it, got: {line}"
         );
     }
 

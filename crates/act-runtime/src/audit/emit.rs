@@ -61,6 +61,7 @@ pub fn emit_cap_decision(r: &CapDecisionRecord) {
             { attr::POLICY_ACTOR } = %r.actor,
             { attr::POLICY_REASON } = r.reason.as_deref().unwrap_or(""),
             { attr::POLICY_RULE } = r.rule.as_deref().unwrap_or(""),
+            { attr::NEVER_ROLLUP } = r.never_rollup,
         },
         "act.cap_decision",
     );
@@ -173,6 +174,7 @@ mod tests {
             actor: Actor::Static,
             reason: Some("no-exception".into()),
             rule: Some("/data/**".into()),
+            never_rollup: false,
         }
     }
 
@@ -197,6 +199,7 @@ mod tests {
             attr::POLICY_ACTOR,
             attr::POLICY_REASON,
             attr::POLICY_RULE,
+            attr::NEVER_ROLLUP,
         ] {
             assert!(
                 names.contains(&expected),
@@ -235,6 +238,7 @@ mod tests {
         assert_eq!(by(attr::POLICY_ACTOR), "static");
         assert_eq!(by(attr::POLICY_REASON), "no-exception");
         assert_eq!(by(attr::POLICY_RULE), "/data/**");
+        assert_eq!(by(attr::NEVER_ROLLUP), "false");
         // The message field must be a stable event name, never a sentence.
         assert!(!by("message").contains("/data/app.db"));
     }

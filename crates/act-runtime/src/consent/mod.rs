@@ -27,6 +27,23 @@ pub use channel::*;
 /// Longest guest-authored free text shown on a consent prompt.
 pub(crate) const HINT_LIMIT: usize = 120;
 
+/// Truncate a guest-authored field to at most [`HINT_LIMIT`] characters,
+/// appending `…` when it was cut. Truncation only — no blanking of control
+/// or bidi-override characters, unlike [`sanitize_hint`]. That is
+/// deliberate: `class` and `key` (unlike a free-text `summary`/`hint`) are
+/// escaped whole-line by [`consent_line`] just before display, which is what
+/// makes them forgery-proof; this only guards against a pathologically long
+/// value flooding a terminal prompt or an MCP elicitation the way §5's
+/// "truncate" requirement asks. `sanitize_hint` calls this too, after its own
+/// blanking pass, so there is one truncation rule for every field on a
+/// prompt rather than two that can drift.
+pub(crate) fn truncate_field(s: &str) -> String {
+    match s.char_indices().nth(HINT_LIMIT) {
+        Some((idx, _)) => format!("{}…", &s[..idx]),
+        None => s.to_string(),
+    }
+}
+
 /// Build the one line a human is asked to approve for a semantic class.
 ///
 /// Per ACT-CONSENT.md §5 the component reference leads: the whole question is
@@ -43,6 +60,12 @@ pub(crate) const HINT_LIMIT: usize = 120;
 /// Deliberately the same shape as `credentials::consent_summary`: a human who
 /// has learned to read one ACT consent prompt has learned to read them all.
 pub fn prompt_line(component: Option<&str>, class: &str, key: &str, summary: &str) -> String {
+    // `key` is guest-authored (it comes straight off the consent request)
+    // and unbounded — nothing stops a component from naming a
+    // megabyte-long key. Escaping (in `consent_line`, applied to the whole
+    // finished line) is what stops it forging a second question; this stops
+    // it flooding the terminal or the MCP elicitation with one real one.
+    let key = truncate_field(key);
     let base = match component {
         Some(c) => format!("{c} requests {class}: {key}"),
         None => format!("{class}: {key}"),
@@ -73,11 +96,7 @@ pub(crate) fn sanitize_hint(hint: &str) -> String {
             }
         })
         .collect();
-    let cleaned = cleaned.trim();
-    match cleaned.char_indices().nth(HINT_LIMIT) {
-        Some((idx, _)) => format!("{}…", &cleaned[..idx]),
-        None => cleaned.to_string(),
-    }
+    truncate_field(cleaned.trim())
 }
 
 #[cfg(test)]
@@ -148,5 +167,31 @@ mod tests {
             prompt_line(None, "db:drop", "analytics", "   "),
             "db:drop: analytics"
         );
+    }
+
+    #[test]
+    fn a_megabyte_long_key_is_truncated_rather_than_flooding_the_prompt() {
+        // M5: `key` is guest-authored and unbounded — nothing at the WIT
+        // level stops a component from naming a huge one. §5 requires
+        // truncation, not just escaping (escaping alone still floods a
+        // terminal or an MCP elicitation with a real, if unforgeable, wall
+        // of text).
+        let huge_key = "x".repeat(1_000_000);
+        let line = prompt_line(Some("comp"), "db:drop", &huge_key, "");
+        assert!(
+            line.chars().count() < 200,
+            "expected the key to be truncated, got {} chars",
+            line.chars().count()
+        );
+        assert!(line.contains('…'), "got {line}");
+        assert!(
+            line.contains("comp requests db:drop:"),
+            "the rest of the line must still render normally, got {line}"
+        );
+    }
+
+    #[test]
+    fn truncate_field_leaves_a_short_value_unchanged() {
+        assert_eq!(truncate_field("analytics"), "analytics");
     }
 }

@@ -43,6 +43,10 @@ pub mod attr {
     pub const POLICY_RULE: &str = "act.policy.rule";
     /// Whether the component declared this capability class in `act.toml`.
     pub const CAPABILITY_DECLARED: &str = "act.capability.declared";
+    /// Whether this decision must never fold into the per-call rollup, even
+    /// when it resolves to `Allow`. Set for `act:consent` decisions — see
+    /// `CapDecisionRecord::never_rollup`.
+    pub const NEVER_ROLLUP: &str = "act.decision.never_rollup";
     /// The `kind` string of a credential that was handed to a component —
     /// `std:fields` for everything this host writes, since a credential is a
     /// set of named fields and nothing else (design §3.2). Recorded because it
@@ -196,6 +200,29 @@ pub struct CapDecisionRecord {
     /// The ceiling rule that matched, when the provider can attribute one.
     /// Drives rollup grouping (Task 2).
     pub rule: Option<String>,
+    /// True for a decision on a *semantic* class (`act:consent`), which must
+    /// never fold into the per-call rollup even when it resolves to `Allow`.
+    ///
+    /// A physical class's rollup is right for what it is: nobody wants a
+    /// line per filesystem `read`. A semantic class is the opposite — there
+    /// are few of them, each is a distinct, consequential act (`DROP
+    /// DATABASE analytics`), and *which subject* is the whole content of the
+    /// decision. Rolling one into `db:drop: 1 request` throws away the one
+    /// fact the line exists to carry, the same way folding a credential
+    /// issue into a count would (see `render_credential_issue`'s doc, which
+    /// states the identical rule for that record).
+    ///
+    /// An explicit flag, not `action == "request"`: `consent::gate::ACTION`
+    /// is a private constant, and string-matching it across the module
+    /// boundary between `consent::gate` and `audit::layer` is fragile —
+    /// renaming or repurposing the action string would silently start
+    /// folding consent decisions again with no test failing until someone
+    /// noticed the missing audit line.
+    ///
+    /// `false` for every physical-class decision (fs/http/sockets/
+    /// credentials); `true` only where `consent::gate::ConsentGate::decide`
+    /// sets it before emitting.
+    pub never_rollup: bool,
 }
 
 impl CapDecisionRecord {
@@ -248,11 +275,37 @@ impl CapDecisionRecord {
                     .unwrap_or_else(|| "outside ceiling".to_string())
             }),
             rule,
+            never_rollup: false,
         }
     }
 
-    /// An `ask` that a human has just answered.
-    pub fn answered(cap_id: &str, key: &str, allowed: bool) -> Self {
+    /// An `ask` that has resolved — either a human actually answered it, or
+    /// there was no channel to ask on at all and it degraded to deny (§5).
+    ///
+    /// `has_channel` is what tells the two apart, and it changes both `actor`
+    /// and `reason`: a real human refusal is `actor: User, reason: "denied
+    /// by user"`, but a no-channel degrade never consulted anyone, so
+    /// recording it identically would make the trail lie about who decided.
+    /// `DenyPrompter` (the only prompter with `has_channel() == false`)
+    /// always resolves `allowed = false`, so `has_channel: false` in
+    /// practice always pairs with `allowed: false` — but the reason is
+    /// driven by `has_channel` alone, not inferred from `allowed`, so the
+    /// record stays correct even if that pairing ever changes.
+    pub fn answered(cap_id: &str, key: &str, allowed: bool, has_channel: bool) -> Self {
+        let (actor, reason) = if has_channel {
+            (
+                Actor::User,
+                if allowed {
+                    "allowed by user"
+                } else {
+                    "denied by user"
+                },
+            )
+        } else {
+            // Nobody was consulted — resolved the same way a statically
+            // ceiling-denied request is, so it is attributed the same way.
+            (Actor::Static, "no prompt channel")
+        };
         Self {
             cap_id: cap_id.to_string(),
             key: key.to_string(),
@@ -263,16 +316,10 @@ impl CapDecisionRecord {
                 Decision4::AskDeny
             },
             mode: "ask".to_string(),
-            actor: Actor::User,
-            reason: Some(
-                if allowed {
-                    "allowed by user"
-                } else {
-                    "denied by user"
-                }
-                .to_string(),
-            ),
+            actor,
+            reason: Some(reason.to_string()),
             rule: None,
+            never_rollup: false,
         }
     }
 }
@@ -435,14 +482,31 @@ mod tests {
 
     #[test]
     fn answered_records_are_attributed_to_the_user() {
-        let r = CapDecisionRecord::answered("wasi:filesystem", "/k", false);
+        let r = CapDecisionRecord::answered("wasi:filesystem", "/k", false, true);
         assert_eq!(r.decision, Decision4::AskDeny);
         assert_eq!(r.actor, Actor::User);
         assert_eq!(r.reason.as_deref(), Some("denied by user"));
         assert_eq!(
-            CapDecisionRecord::answered("wasi:filesystem", "/k", true).decision,
+            CapDecisionRecord::answered("wasi:filesystem", "/k", true, true).decision,
             Decision4::AskAllow
         );
+    }
+
+    #[test]
+    fn a_no_channel_degrade_is_not_attributed_to_the_user() {
+        // M1: `DenyPrompter` resolves every `ask` to deny with nobody
+        // consulted. Before this fix `answered` always recorded `actor:
+        // User, reason: "denied by user"` regardless — indistinguishable
+        // from a human who was actually asked and said no. `has_channel:
+        // false` must produce a different actor and a reason that says so.
+        let r = CapDecisionRecord::answered("wasi:filesystem", "/k", false, false);
+        assert_eq!(r.decision, Decision4::AskDeny);
+        assert_ne!(
+            r.actor,
+            Actor::User,
+            "nobody was consulted, so this must not be attributed to a user"
+        );
+        assert_eq!(r.reason.as_deref(), Some("no prompt channel"));
     }
 
     #[test]

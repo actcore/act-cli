@@ -273,6 +273,7 @@ async fn resolve_ask(
     canonical: PathBuf,
 ) -> FsResult<PathBuf> {
     let path = canonical.display().to_string();
+    let has_channel = prompter.has_channel();
     let allowed = cache
         .decide_cached(
             &*prompter,
@@ -287,6 +288,7 @@ async fn resolve_ask(
         act_types::constants::CAP_FILESYSTEM,
         &path,
         allowed,
+        has_channel,
     ));
     if allowed {
         Ok(canonical)
@@ -944,6 +946,7 @@ mod tests {
             act_types::constants::CAP_FILESYSTEM,
             "/home/u/.ssh/id_ed25519",
             false,
+            true,
         );
         assert_eq!(r.decision, crate::audit::Decision4::AskDeny);
         assert_eq!(r.actor, crate::audit::record::Actor::User);
@@ -953,9 +956,28 @@ mod tests {
             act_types::constants::CAP_FILESYSTEM,
             "/home/u/notes.txt",
             true,
+            true,
         );
         assert_eq!(r.decision, crate::audit::Decision4::AskAllow);
         assert_eq!(r.actor, crate::audit::record::Actor::User);
+    }
+
+    #[test]
+    fn ask_resolution_with_no_channel_is_not_attributed_to_the_user() {
+        // M1: `resolve_ask` is called with a `DenyPrompter` in exactly this
+        // shape whenever a headless run has no interactive channel — see
+        // `fs_ask_resolution_reaches_the_audit_trail` in `audit_cli.rs` for
+        // the end-to-end version. Pinned here too, at the constructor, since
+        // this is the record `resolve_ask` actually builds.
+        let r = crate::audit::CapDecisionRecord::answered(
+            act_types::constants::CAP_FILESYSTEM,
+            "/home/u/.ssh/id_ed25519",
+            false,
+            false,
+        );
+        assert_eq!(r.decision, crate::audit::Decision4::AskDeny);
+        assert_ne!(r.actor, crate::audit::record::Actor::User);
+        assert_eq!(r.reason.as_deref(), Some("no prompt channel"));
     }
 }
 
