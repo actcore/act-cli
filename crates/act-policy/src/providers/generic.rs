@@ -4,11 +4,12 @@
 //! wasi:sockets. Uses `globset` to match constraint key→value pairs against
 //! `op.attrs`.
 //!
-//! **Undeclared-consent asymmetry:**
-//! Physical providers (fs/http/sockets): empty `declared` → deny (no ceiling).
-//! This provider: empty `declared` → **unbounded** ceiling.
-//! Under `Ask` mode, undeclared + ask → `Ask` (NOT deny), because there is no
-//! physical resource to misuse; the consent system governs access.
+//! **The manifest is the ceiling.** A class absent from the component's
+//! `act:component` manifest is denied under every mode, and no grant widens
+//! it. A class declared with constraints is denied for any operation those
+//! constraints do not match, *before* the grant mode is consulted — so `open`
+//! means "the grant imposes no further constraint", never "ignore what the
+//! artifact declared".
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
@@ -30,28 +31,24 @@ impl CapabilityProvider for GenericProvider {
         declared: Option<&[serde_json::Value]>,
         grant: &CapabilityGrant,
     ) -> Result<Box<dyn CompiledCeiling>, PolicyError> {
-        let declared = declared.unwrap_or(&[]);
-        // Unbounded ceiling when nothing is declared (no physical resource ceiling).
-        let unbounded = declared.is_empty();
-        let is_declared = !declared.is_empty();
-
-        // Compile allow constraints from the grant.
-        let allow_sets = compile_constraint_globs(&grant.allow)?;
-        let deny_sets = compile_constraint_globs(&grant.deny)?;
-
         Ok(Box::new(GenericCeiling {
             mode: grant.mode,
-            allow_sets,
-            deny_sets,
-            is_declared,
-            unbounded,
+            allow_sets: compile_constraint_globs(&grant.allow)?,
+            deny_sets: compile_constraint_globs(&grant.deny)?,
+            declared_sets: match declared {
+                Some(d) => Some(compile_constraint_globs(d)?),
+                None => None,
+            },
         }))
     }
 }
 
-/// A compiled constraint set: a list of (key → GlobSet) pairs.
-/// A constraint matches when **every** key in it has a glob matching the
-/// stringified `attrs[key]`.
+/// A compiled constraint set: a list of (dimension → GlobSet) pairs.
+/// A constraint matches when **every** dimension in it has a glob matching
+/// the stringified value. The dimension named `key` (`KEY_DIMENSION`) is the
+/// one exception: it never reads `attrs`, resolving from `ResourceOp::key`
+/// instead — every other dimension resolves from the stringified
+/// `attrs[dimension]`.
 struct CompiledConstraint {
     /// Each entry: (key, compiled glob set for that key's patterns).
     key_globs: Vec<(String, GlobSet)>,
@@ -82,9 +79,9 @@ struct GenericCeiling {
     mode: PolicyMode,
     allow_sets: Vec<CompiledConstraint>,
     deny_sets: Vec<CompiledConstraint>,
-    is_declared: bool,
-    /// True when declared slice was empty → treat ceiling as universal.
-    unbounded: bool,
+    /// `None` when the class is absent from the manifest. `Some(&[])` is a
+    /// bare declaration: declared, and constraining no dimension.
+    declared_sets: Option<Vec<CompiledConstraint>>,
 }
 
 impl GenericCeiling {
@@ -93,34 +90,35 @@ impl GenericCeiling {
     /// decision. Both trait methods are expressed in terms of this so the
     /// decision output cannot drift between them.
     fn matched(&self, op: &ResourceOp) -> (Decision, Option<String>) {
-        // Deny wins first: any deny constraint matching → Deny.
+        // 1. Deny wins, always and first.
         if self.deny_sets.iter().any(|c| c.matches(op)) {
             return (Decision::Deny, None);
         }
 
+        // 2. The declaration gates every mode. Absent → denied. Present with
+        //    constraints → the op must match one of them.
+        let declared_sets = match &self.declared_sets {
+            None => return (Decision::Deny, None),
+            Some(sets) => sets,
+        };
+        if !declared_sets.is_empty() && !declared_sets.iter().any(|c| c.matches(op)) {
+            return (Decision::Deny, None);
+        }
+
+        // 3. Only now the grant mode.
         match self.mode {
             PolicyMode::Deny => (Decision::Deny, None),
             PolicyMode::Open => (Decision::Allow, None),
-            PolicyMode::Allowlist => {
-                // Allow iff some allow constraint matches.
-                match self.allow_sets.iter().find(|c| c.matches(op)) {
-                    Some(c) => (Decision::Allow, Some(c.source.clone())),
-                    None => (Decision::Deny, None),
-                }
-            }
-            PolicyMode::Ask => {
-                // In-ceiling = unbounded OR some allow constraint matches.
-                // Unbounded means no declaration was present (generic class never
-                // declared), so the ceiling is treated as universal — any request
-                // gets a prompt rather than a hard deny.
-                if self.unbounded {
-                    (Decision::Ask, None)
-                } else if let Some(c) = self.allow_sets.iter().find(|c| c.matches(op)) {
-                    (Decision::Ask, Some(c.source.clone()))
-                } else {
-                    (Decision::Deny, None)
-                }
-            }
+            PolicyMode::Allowlist => match self.allow_sets.iter().find(|c| c.matches(op)) {
+                Some(c) => (Decision::Allow, Some(c.source.clone())),
+                None => (Decision::Deny, None),
+            },
+            PolicyMode::Ask => match self.allow_sets.iter().find(|c| c.matches(op)) {
+                Some(c) => (Decision::Ask, Some(c.source.clone())),
+                // In-ceiling and the grant names no narrower allowlist: ask.
+                None if self.allow_sets.is_empty() => (Decision::Ask, None),
+                None => (Decision::Deny, None),
+            },
         }
     }
 }
@@ -136,7 +134,15 @@ impl CompiledCeiling for GenericCeiling {
     }
 
     fn declared(&self) -> bool {
-        self.is_declared
+        self.declared_sets.is_some()
+    }
+
+    fn effective_mode(&self) -> PolicyMode {
+        if self.declared_sets.is_some() {
+            self.mode
+        } else {
+            PolicyMode::Deny
+        }
     }
 }
 
@@ -213,57 +219,84 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generic_provider_permits_undeclared() {
-        let p = GenericProvider;
+    async fn generic_provider_denies_undeclared() {
         let op = ResourceOp {
             cap_id: "db:truncate".into(),
             key: "orders".into(),
-            action: "".into(),
-            attrs: serde_json::json!({"table":"orders"}),
+            action: "request".into(),
+            attrs: serde_json::json!({"table": "orders"}),
         };
+        // The manifest is the ceiling: a class the component never declared is
+        // denied under every mode, and no grant can widen it.
+        for mode in [
+            PolicyMode::Open,
+            PolicyMode::Deny,
+            PolicyMode::Ask,
+            PolicyMode::Allowlist,
+        ] {
+            let grant = CapabilityGrant {
+                mode,
+                allow: vec![serde_json::json!({"table": "orders"})],
+                deny: vec![],
+            };
+            let c = GenericProvider
+                .resolve("db:truncate", None, &grant)
+                .await
+                .unwrap();
+            assert_eq!(
+                c.classify(&op),
+                Decision::Deny,
+                "undeclared class must deny under mode {mode}"
+            );
+            assert!(!c.declared());
+        }
+    }
 
-        // Undeclared + open grant → Allow (no declaration ceiling to bound it).
-        let open = CapabilityGrant {
+    #[tokio::test]
+    async fn open_grant_does_not_step_over_the_declaration() {
+        // `--allow db:drop` opens the class to its *declared* ceiling. It must not
+        // authorize a drop of production against a declaration of test_* only.
+        let declared = vec![serde_json::json!({"key": "test_*"})];
+        let grant = CapabilityGrant {
             mode: PolicyMode::Open,
             allow: vec![],
             deny: vec![],
         };
-        assert_eq!(
-            p.resolve("db:truncate", None, &open)
-                .await
-                .unwrap()
-                .classify(&op),
-            Decision::Allow
-        );
-
-        // Undeclared + deny grant → Deny.
-        let deny = CapabilityGrant {
-            mode: PolicyMode::Deny,
-            allow: vec![],
-            deny: vec![],
+        let c = GenericProvider
+            .resolve("db:drop", Some(&declared), &grant)
+            .await
+            .unwrap();
+        let op = |key: &str| ResourceOp {
+            cap_id: "db:drop".into(),
+            key: key.into(),
+            action: "request".into(),
+            attrs: serde_json::Value::Null,
         };
-        assert_eq!(
-            p.resolve("db:truncate", None, &deny)
-                .await
-                .unwrap()
-                .classify(&op),
-            Decision::Deny
-        );
+        assert_eq!(c.classify(&op("test_events")), Decision::Allow);
+        assert_eq!(c.classify(&op("production")), Decision::Deny);
+    }
 
-        // Undeclared + ask grant (the default) → Ask (prompt), NOT deny — there is
-        // no ceiling to be "out of".
-        let ask = CapabilityGrant {
+    #[tokio::test]
+    async fn bare_declaration_leaves_the_class_unconstrained() {
+        // `[std.capabilities."db:drop"]` with only a description declares the class
+        // and constrains no dimension: the class itself is the ceiling.
+        let grant = CapabilityGrant {
             mode: PolicyMode::Ask,
             allow: vec![],
             deny: vec![],
         };
-        assert_eq!(
-            p.resolve("db:truncate", None, &ask)
-                .await
-                .unwrap()
-                .classify(&op),
-            Decision::Ask
-        );
+        let c = GenericProvider
+            .resolve("db:drop", Some(&[]), &grant)
+            .await
+            .unwrap();
+        let op = ResourceOp {
+            cap_id: "db:drop".into(),
+            key: "anything".into(),
+            action: "request".into(),
+            attrs: serde_json::Value::Null,
+        };
+        assert_eq!(c.classify(&op), Decision::Ask);
+        assert!(c.declared());
     }
 
     #[tokio::test]
@@ -293,7 +326,8 @@ mod tests {
             allow: vec![serde_json::json!({"table": "orders"})],
             deny: vec![serde_json::json!({"table": "orders"})],
         };
-        let c = p.resolve("db:read", None, &grant).await.unwrap();
+        let declared = vec![serde_json::json!({"table": "orders"})];
+        let c = p.resolve("db:read", Some(&declared), &grant).await.unwrap();
         let op = ResourceOp {
             cap_id: "db:read".into(),
             key: "orders".into(),
@@ -348,5 +382,33 @@ mod tests {
             attrs: serde_json::json!({"key": "test_decoy"}),
         };
         assert_eq!(c.classify(&op), Decision::Deny);
+    }
+
+    #[tokio::test]
+    async fn a_constraint_can_require_both_key_and_an_attrs_dimension() {
+        // One constraint naming both `key` (host-derived) and `table` (attrs-backed)
+        // requires both to match — `.all()` over the dimensions, not just one.
+        let declared = vec![serde_json::json!({"key": "test_*", "table": "orders"})];
+        let grant = CapabilityGrant {
+            mode: PolicyMode::Allowlist,
+            allow: vec![serde_json::json!({"key": "test_*", "table": "orders"})],
+            deny: vec![],
+        };
+        let c = GenericProvider
+            .resolve("db:drop", Some(&declared), &grant)
+            .await
+            .unwrap();
+        let op = |key: &str, table: &str| ResourceOp {
+            cap_id: "db:drop".into(),
+            key: key.into(),
+            action: "request".into(),
+            attrs: serde_json::json!({"table": table}),
+        };
+        // Matches `key` only: table is wrong → denied.
+        assert_eq!(c.classify(&op("test_events", "users")), Decision::Deny);
+        // Matches `table` only: key is wrong → denied.
+        assert_eq!(c.classify(&op("production", "orders")), Decision::Deny);
+        // Matches both → allowed.
+        assert_eq!(c.classify(&op("test_events", "orders")), Decision::Allow);
     }
 }
