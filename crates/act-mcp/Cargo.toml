@@ -1,0 +1,18 @@
+[package]
+name = "act-mcp"
+version.workspace = true
+edition.workspace = true
+description = "MCP projection for ACT components — tools, content, errors and session tools as rmcp types"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords = ["act", "mcp", "wasm", "component-model", "adapter"]
+categories = ["wasm", "development-tools"]
+
+[dependencies]
+act-runtime = { version = "0.11.1", path = "../act-runtime" }
+act-types.workspace = true
+rmcp = { version = "3.1", features = ["server", "schemars"] }
+serde_json.workspace = true
+base64.workspace = true

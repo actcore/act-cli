@@ -61,6 +61,7 @@ globset.workspace = true
 path-clean = "1"
 owo-colors = { version = "4.3.0", features = ["supports-colors"] }
 act-store = { version = "0.11.1", path = "../crates/act-store" }
+act-mcp = { version = "0.11.1", path = "../crates/act-mcp" }
 act-policy = { version = "0.11.1", path = "../crates/act-policy" }
 act-runtime = { version = "0.11.1", path = "../crates/act-runtime" }
 act-credentials = { version = "0.11.1", path = "../crates/act-credentials" }
