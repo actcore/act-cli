@@ -82,5 +82,9 @@ pub fn create_linker(engine: &Engine) -> Result<Linker<HostState>> {
     // and the component imports. Both its instances are registered; see
     // `credentials::add_to_linker` for why `types` is not optional.
     credentials::add_to_linker(&mut linker)?;
+    // `act:consent` — the second host-provided, component-imported interface.
+    // Registered unconditionally: a component that never imports it is
+    // unaffected, and one that does must find it or fail instantiation.
+    crate::consent::gate::add_to_linker(&mut linker)?;
     Ok(linker)
 }

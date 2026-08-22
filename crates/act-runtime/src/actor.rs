@@ -449,6 +449,7 @@ pub async fn instantiate_component(
         prompter,
         cache,
         credentials,
+        &audit.component_ref,
     )
     .await?;
 

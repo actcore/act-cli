@@ -39,9 +39,20 @@ pub struct HostState {
     /// Every declared capability class the host does not wire interception
     /// for — i.e. every resolved ceiling minus `ALWAYS_RESOLVED`. A class
     /// absent from this map has no ceiling and must be denied outright.
-    #[allow(dead_code)] // read by Task 3's act:consent gate
+    ///
+    /// Behind an `Arc` because `act:consent`'s gate is assembled per request
+    /// out of this state, and cloning the map on every semantic authorization
+    /// would be a fresh allocation for something that never changes after
+    /// instantiation.
     pub(crate) semantic_ceilings:
-        std::collections::BTreeMap<String, Arc<dyn act_policy::provider::CompiledCeiling>>,
+        Arc<std::collections::BTreeMap<String, Arc<dyn act_policy::provider::CompiledCeiling>>>,
+    /// The reference the operator supplied for this component, as typed.
+    ///
+    /// Used to attribute a consent prompt to the artifact asking
+    /// (ACT-CONSENT.md §5), which is why it may not be derived from the
+    /// component's own manifest: a name the guest chose would let any
+    /// component borrow another's reputation on the one line a human answers.
+    pub(crate) component_ref: String,
     /// Caps the component's wasm linear memory growth (via `store.limiter`).
     /// Default `StoreLimits` is unlimited.
     pub(crate) limits: StoreLimits,
@@ -213,6 +224,12 @@ pub(crate) fn warn_if_credentials_exfil_risk(
 /// `grant_policy` is intersected with the component's declared capabilities via
 /// `ProviderRegistry::with_builtins()`. Undeclared capability classes are always
 /// denied regardless of the grant.
+///
+/// `component_ref` is the reference the operator supplied, carried into host
+/// state so a consent prompt can name the artifact that is asking. It is a
+/// parameter rather than a field of `info` on purpose: `info` is the guest's
+/// own manifest, and ACT-CONSENT.md §5 forbids attributing the question to a
+/// name the guest chose.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_store(
     engine: &Engine,
@@ -223,6 +240,7 @@ pub async fn create_store(
     prompter: Arc<dyn act_policy::consent::ConsentPrompter>,
     cache: Arc<act_policy::consent::DecisionCache>,
     credentials: Option<Arc<credentials::CredentialHost>>,
+    component_ref: &str,
 ) -> Result<(
     Store<HostState>,
     Vec<(String, Arc<dyn act_policy::provider::CompiledCeiling>)>,
@@ -283,10 +301,12 @@ pub async fn create_store(
     // declared semantic class with no host-side enforcement hook of its own;
     // Task 3 reads this to gate `act:consent` requests against it. Absence
     // from this map is what "undeclared" means at that gate.
-    let semantic_ceilings: std::collections::BTreeMap<String, Arc<dyn CompiledCeiling>> = all
-        .into_iter()
-        .filter(|(id, _)| !act_policy::ceilings::ALWAYS_RESOLVED.contains(&id.as_str()))
-        .collect();
+    let semantic_ceilings: Arc<std::collections::BTreeMap<String, Arc<dyn CompiledCeiling>>> =
+        Arc::new(
+            all.into_iter()
+                .filter(|(id, _)| !act_policy::ceilings::ALWAYS_RESOLVED.contains(&id.as_str()))
+                .collect(),
+        );
 
     let mut builder = WasiCtxBuilder::new();
     let mut preopen_pairs = Vec::with_capacity(preopens.len());
@@ -433,6 +453,7 @@ pub async fn create_store(
         credentials,
         credentials_ceiling,
         semantic_ceilings,
+        component_ref: component_ref.to_string(),
         limits: match max_memory {
             Some(bytes) => StoreLimitsBuilder::new().memory_size(bytes).build(),
             None => StoreLimits::default(),

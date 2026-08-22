@@ -17,6 +17,10 @@
 //! yes or no — and two copies of that helper are two helpers that drift.
 
 mod channel;
+// Crate-visible: the gate is reached through the linker, and `ConsentGate`
+// cannot be constructed without a wasmtime store, so publishing it would add
+// a type to act-runtime's API that no embedder can use.
+pub(crate) mod gate;
 
 pub use channel::*;
 

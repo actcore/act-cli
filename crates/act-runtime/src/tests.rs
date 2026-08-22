@@ -290,6 +290,7 @@ async fn ceilings_for(
         Arc::new(act_policy::consent::DenyPrompter),
         Arc::new(act_policy::consent::DecisionCache::new()),
         None,
+        "./test.wasm",
     )
     .await
     .expect("create_store");

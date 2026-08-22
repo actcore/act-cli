@@ -5,6 +5,11 @@ world act-world {
   // and the capability provider denies the class unless declared.
   import act:credentials/store@0.1.0;
 
+  // Host-provided. Opt-in: a component that never asks for semantic
+  // authorization does not import it, and the host denies any class the
+  // component did not declare.
+  import act:consent/consent-authority@0.1.0;
+
   export act:tools/tool-provider@0.2.0;
   // Opt-in: only stateful components export session-provider. The host
   // binds it via a per-interface `GuestIndices` lookup that is allowed to
