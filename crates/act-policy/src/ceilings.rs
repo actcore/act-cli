@@ -9,6 +9,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use act_types::constants::{CAP_FILESYSTEM, CAP_HTTP, CAP_SOCKETS};
+
 use crate::grant::{GrantPolicy, PolicyError};
 use crate::provider::{CompiledCeiling, ProviderRegistry};
 
@@ -17,10 +19,10 @@ use crate::provider::{CompiledCeiling, ProviderRegistry};
 /// An undeclared one resolves against `None` and hard-denies, but it still
 /// gets a row — the audit header reports a mode for every class an operator
 /// might have expected to see, including the ones this artifact does not use.
-pub const ALWAYS_RESOLVED: [&str; 4] = [
-    "wasi:filesystem",
-    "wasi:http",
-    "wasi:sockets",
+pub const ALWAYS_RESOLVED: &[&str] = &[
+    CAP_FILESYSTEM,
+    CAP_HTTP,
+    CAP_SOCKETS,
     crate::providers::credentials::CAP_CREDENTIALS,
 ];
 
@@ -59,6 +61,8 @@ pub async fn resolve_ceilings(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Decision;
+    use crate::provider::ResourceOp;
 
     #[tokio::test]
     async fn resolves_every_always_class_plus_every_declared_one() {
@@ -76,7 +80,7 @@ mod tests {
 
         // Every always-resolved class has a row even when undeclared, so the
         // audit header can report a mode for it.
-        for id in ALWAYS_RESOLVED {
+        for id in ALWAYS_RESOLVED.iter().copied() {
             assert!(ceilings.contains_key(id), "{id} must always resolve");
         }
         // Plus the declared semantic class.
@@ -89,6 +93,28 @@ mod tests {
         // their constraint list, so a bare `wasi:http` table still reads as
         // undeclared to them — pre-existing behaviour this plan preserves.)
         assert!(ceilings.contains_key("wasi:http"));
+
+        // The loop must hand each id *its own* declared constraints, not a
+        // shared empty list. `db:drop` was declared with `[{"key": "test_*"}]`
+        // and the default policy's mode is Ask, so a key matching that glob
+        // asks while one outside it is denied outright — if `resolve_ceilings`
+        // dropped the constraint list (e.g. passed `Some(&[])` for every id),
+        // both keys would come back `Ask` because a bare declaration leaves
+        // the class itself as the ceiling.
+        let op = |key: &str| ResourceOp {
+            cap_id: "db:drop".into(),
+            key: key.into(),
+            action: "request".into(),
+            attrs: serde_json::Value::Null,
+        };
+        assert_eq!(
+            ceilings["db:drop"].classify(&op("test_events")),
+            Decision::Ask
+        );
+        assert_eq!(
+            ceilings["db:drop"].classify(&op("production")),
+            Decision::Deny
+        );
     }
 
     #[tokio::test]

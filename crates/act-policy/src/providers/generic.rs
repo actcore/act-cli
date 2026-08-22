@@ -1,7 +1,8 @@
 //! Generic (semantic) capability provider — glob matching over attrs.
 //!
-//! Handles any capability class that is not wasi:filesystem, wasi:http, or
-//! wasi:sockets. Uses `globset` to match constraint dimension→value pairs
+//! Handles any capability class that is not wasi:filesystem, wasi:http,
+//! wasi:sockets, or act:credentials — those four have their own typed
+//! providers. Uses `globset` to match constraint dimension→value pairs
 //! against `op.attrs` — except the dimension named `key`, which resolves
 //! from `op.key` instead (see `KEY_DIMENSION`).
 //!
@@ -19,7 +20,11 @@ use crate::grant::{CapabilityGrant, PolicyError, PolicyMode};
 use crate::provider::{CapabilityProvider, CompiledCeiling, Explained, ResourceOp};
 
 /// The constraint dimension that always resolves from `ResourceOp::key`
-/// rather than from `attrs`. Host-derived, so a guest cannot shadow it.
+/// rather than from `attrs`. `op.key` is guest-authored (the host builds it
+/// from the guest's own request), so this is not a provenance guarantee —
+/// it guarantees there is exactly one `key`: the same value that is shown
+/// to the human, recorded in the audit, and matched here, so a second `key`
+/// hidden inside `attrs` cannot shadow it.
 const KEY_DIMENSION: &str = "key";
 
 pub struct GenericProvider;
@@ -92,18 +97,18 @@ impl GenericCeiling {
     /// decision output cannot drift between them.
     fn matched(&self, op: &ResourceOp) -> (Decision, Option<String>) {
         // 1. Deny wins, always and first.
-        if self.deny_sets.iter().any(|c| c.matches(op)) {
-            return (Decision::Deny, None);
+        if let Some(c) = self.deny_sets.iter().find(|c| c.matches(op)) {
+            return (Decision::Deny, Some(c.source.clone()));
         }
 
         // 2. The declaration gates every mode. Absent → denied. Present with
         //    constraints → the op must match one of them.
         let declared_sets = match &self.declared_sets {
-            None => return (Decision::Deny, None),
+            None => return (Decision::Deny, Some("not declared in act:component".into())),
             Some(sets) => sets,
         };
         if !declared_sets.is_empty() && !declared_sets.iter().any(|c| c.matches(op)) {
-            return (Decision::Deny, None);
+            return (Decision::Deny, Some("outside the declared ceiling".into()));
         }
 
         // 3. Only now the grant mode.
@@ -158,8 +163,14 @@ fn compile_constraint_globs(
             let obj = match c.as_object() {
                 Some(obj) => obj,
                 None => {
-                    // Non-object constraint: treat as empty (always-match or never-match?).
-                    // We treat it as a zero-key constraint that always matches (matches everything).
+                    // Non-object constraint: compiles to a zero-key constraint
+                    // that always matches. On the declared side this now gates
+                    // a capability class (a malformed entry degrades to the
+                    // bare-declaration ceiling), but it cannot widen anything
+                    // beyond what a bare declaration already grants, since the
+                    // declaration and its malformations both come from the
+                    // artifact author. On the grant side it already meant
+                    // "this rule matches everything" before this change.
                     return Ok(CompiledConstraint {
                         key_globs: vec![],
                         source,
@@ -459,5 +470,22 @@ mod tests {
         assert_eq!(c.classify(&op("production", "orders")), Decision::Deny);
         // Matches both → allowed.
         assert_eq!(c.classify(&op("test_events", "orders")), Decision::Allow);
+    }
+
+    #[tokio::test]
+    async fn a_declared_constraint_with_an_invalid_glob_fails_to_resolve() {
+        // globset rejects an unclosed character class (`allow_unclosed_class:
+        // false`). A bad declaration must fail at ceiling-resolution time
+        // rather than silently degrading to some other behavior.
+        let declared = vec![serde_json::json!({"key": "test_["})];
+        let grant = CapabilityGrant {
+            mode: PolicyMode::Ask,
+            allow: vec![],
+            deny: vec![],
+        };
+        let result = GenericProvider
+            .resolve("db:drop", Some(&declared), &grant)
+            .await;
+        assert!(result.is_err());
     }
 }

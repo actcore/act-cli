@@ -28,8 +28,13 @@ pub trait CapabilityProvider: Send + Sync {
     /// `declared` is `None` when the capability class is absent from the
     /// component's `act:component` manifest, and `Some` when it is present —
     /// `Some(&[])` for a bare declaration that carries no constraints. Providers
-    /// MUST NOT infer absence from an empty slice: the manifest is the ceiling,
-    /// so the two cases have opposite verdicts for semantic classes.
+    /// MUST NOT infer the *ceiling* from an empty slice: the manifest is the
+    /// ceiling, so the two cases have opposite verdicts for semantic classes.
+    /// (`fs`, `http` and `sockets` deliberately still report a constraint-free
+    /// declaration's `declared()` as `false` in their audit output, because
+    /// for those physical classes a bare declaration is equivalent to having
+    /// no ceiling at all — that reporting choice is fine; only the verdict
+    /// is a MUST.)
     async fn resolve(
         &self,
         cap_id: &str,
@@ -181,10 +186,19 @@ mod tests {
     async fn credentials_provider_is_registered_not_generic_fallback() {
         let r = ProviderRegistry::with_builtins();
         let provider = r.lookup(crate::providers::credentials::CAP_CREDENTIALS);
-        // If credentials provider is not registered, lookup would return the
-        // generic fallback instead. We verify by checking that resolving with
-        // no declared set (`None`) in Ask mode yields Deny — the credentials
-        // provider's own undeclared-denies-outright behavior.
+        // Both `CredentialsCeiling` and `GenericCeiling` now deny undeclared
+        // access in Ask mode, so the *decision* alone can't tell them apart —
+        // deleting the `with_builtins` registration would leave this green
+        // either way. Discriminate on the attributed rule instead:
+        // `CredentialsCeiling::classify_explained` names the specific class
+        // in its rule for exactly this case (`providers/credentials.rs:60-66`,
+        // "act:credentials not declared in act:component"). `GenericCeiling`'s
+        // undeclared-deny path also attributes a rule, but a capability-agnostic
+        // one — `_cap_id` never reaches the ceiling, so it cannot reproduce the
+        // credentials-specific text (`providers/generic.rs`'s first `matched`
+        // arm, "not declared in act:component"). The two strings are checked
+        // for equality below, so only the credentials provider's exact text
+        // proves the lookup resolved to it, not the generic fallback.
         let ask_grant = crate::grant::CapabilityGrant {
             mode: crate::grant::PolicyMode::Ask,
             allow: vec![],
@@ -204,10 +218,14 @@ mod tests {
             action: "get".into(),
             attrs: serde_json::Value::Null,
         };
+        let explained = ceiling.classify_explained(&cred_op);
+        assert_eq!(explained.decision, crate::Decision::Deny);
         assert_eq!(
-            ceiling.classify(&cred_op),
-            crate::Decision::Deny,
-            "act:credentials provider must deny undeclared access in Ask mode, not defer to generic fallback which would return Ask"
+            explained.rule,
+            Some("act:credentials not declared in act:component".to_string()),
+            "this exact, capability-named rule is only attributed by \
+             CredentialsCeiling; the generic fallback's undeclared-deny path \
+             attributes a different, capability-agnostic rule"
         );
     }
 }
