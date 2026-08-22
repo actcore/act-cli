@@ -25,7 +25,7 @@ pub(crate) mod gate;
 pub use channel::*;
 
 /// Longest guest-authored free text shown on a consent prompt.
-pub const HINT_LIMIT: usize = 120;
+pub(crate) const HINT_LIMIT: usize = 120;
 
 /// Build the one line a human is asked to approve for a semantic class.
 ///
@@ -62,7 +62,7 @@ pub fn prompt_line(component: Option<&str>, class: &str, key: &str, summary: &st
 /// the one supplied — which is worth strictly more on a prompt a human is
 /// about to answer than on an audit line read afterwards, so the more
 /// sensitive surface must not carry the weaker predicate.
-pub fn sanitize_hint(hint: &str) -> String {
+pub(crate) fn sanitize_hint(hint: &str) -> String {
     let cleaned: String = hint
         .chars()
         .map(|c| {

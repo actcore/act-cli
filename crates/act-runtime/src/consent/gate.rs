@@ -39,9 +39,15 @@ use crate::store::HostState;
 /// than of a conversion someone has to keep right.
 pub(crate) use types::Decision;
 
-/// The sub-operation recorded for every consent decision. Consent has no
+/// The sub-operation recorded for a consent decision. Consent has no
 /// sub-operations — the class *is* the action — so this is a constant, and it
-/// exists only so the audit's action column is never empty.
+/// exists only to fill the audit's action column with something.
+///
+/// It reaches the record on the two statically-decided paths. The `ask` path
+/// goes through `CapDecisionRecord::answered`, which hardcodes
+/// `action: String::new()` for every capability class, so a consent decision
+/// taken by a human is recorded with an empty action like any other. That is
+/// pre-existing shared behaviour, not something this class chose.
 const ACTION: &str = "request";
 
 /// One component run's semantic-authorization gate.
@@ -86,13 +92,17 @@ impl ConsentGate {
 
     /// The decision procedure of ACT-CONSENT.md §4, in order.
     ///
-    /// Step 1 — an undeclared class — runs before anything else and before the
-    /// prompter exists as a possibility, so a refusal depends on the manifest and
-    /// on nothing else. A class the component never declared has no ceiling in
-    /// `semantic_ceilings` at all: the deny is on the **map miss**, not on a
+    /// Step 1 has two clauses — the class is empty, **or** it is absent from
+    /// the component's declared capabilities — and both run before anything
+    /// else and before the prompter exists as a possibility, so a refusal
+    /// depends on the manifest and on nothing else.
+    ///
+    /// A class the component never declared has no ceiling in
+    /// `semantic_ceilings` at all: that deny is on the **map miss**, not on a
     /// fallback `resolve(class, None, ..)`. Resolving a ceiling for it would
     /// reach the same verdict and lose the reason, which §7.2 requires the audit
-    /// to carry.
+    /// to carry. The empty class gets its own check because the map miss does
+    /// not reliably cover it — see the comment on that check.
     ///
     /// Steps 2 to 4 are the compiled ceiling's own `classify_explained`: deny
     /// constraints first, then the declaration, then the grant mode. Consent
@@ -107,6 +117,26 @@ impl ConsentGate {
         args: &serde_json::Value,
     ) -> Decision {
         use crate::audit::{CapDecisionRecord, Decision4, emit_cap_decision};
+
+        // §4 step 1, first clause: an empty class. Checked rather than left to
+        // the map lookup below, which would catch it only for as long as `""`
+        // happens to be absent. It need not be: §3.3 forbids declaring a
+        // non-concrete class, but nothing enforces §3.3, so a manifest with
+        // `[std.capabilities.""]` gets a real ceiling row from
+        // `resolve_ceilings` and would then run the ordinary grant path — up
+        // to and including asking a human a question that names no class.
+        if class.is_empty() {
+            emit_cap_decision(&CapDecisionRecord::statik_with_reason(
+                class,
+                key,
+                ACTION,
+                Decision4::Deny,
+                "deny",
+                None,
+                Some("empty capability class"),
+            ));
+            return Decision::Deny;
+        }
 
         let Some(ceiling) = self.semantic_ceilings.get(class) else {
             emit_cap_decision(&CapDecisionRecord::statik_with_reason(
@@ -324,6 +354,11 @@ mod tests {
     /// registry against `grant` — the same call `create_store` makes, so
     /// these tests hold the ceiling the host would actually build rather
     /// than a stand-in.
+    ///
+    /// The `ALWAYS_RESOLVED` filter below deliberately mirrors `create_store`,
+    /// which is the copy that actually enforces "a physically-enforced class
+    /// is not reachable through consent". This one only reproduces the shape
+    /// of the map the gate is handed.
     async fn ceilings_granted(
         class: &str,
         declared: &[serde_json::Value],
@@ -414,6 +449,13 @@ mod tests {
         // wasi:http is declared here and still refused: it is enforced on the
         // boundary, and consent must not become a second door that can answer
         // "allow" for it.
+        //
+        // Note what actually holds this in production: `create_store`'s own
+        // `ALWAYS_RESOLVED` filter, which `ceilings_declaring` deliberately
+        // mirrors so these tests see the map the host would build. Deleting
+        // the filter in `store.rs` would not turn this test red — the e2e
+        // tests are the layer that can see that. What this pins is that the
+        // gate adds no bypass of its own on top of the filtered map.
         let gate = ConsentGate::for_test(
             ceilings_declaring("wasi:http", &[], PolicyMode::Open).await,
             Arc::new(PanickingPrompter),
@@ -426,25 +468,66 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_empty_class_denies() {
-        // ACT-CONSENT.md §4 step 1 names the empty class alongside the
-        // undeclared one. It cannot be declared -- §3.3 requires a concrete
-        // class -- so it reaches the same map miss, and this pins that the
-        // empty string is never accidentally made to mean "any class".
-        let gate = ConsentGate::for_test(
-            ceilings_declaring("db:drop", &[], PolicyMode::Open).await,
-            Arc::new(PanickingPrompter),
+    async fn an_empty_class_denies_even_when_the_manifest_declares_it() {
+        // ACT-CONSENT.md §4 step 1 has two clauses: absent from the declared
+        // capabilities, *or empty*. The map miss covers the first. This is the
+        // second, and it needs a check of its own: §3.3 forbids declaring such
+        // a class, but nothing enforces §3.3 -- `act-build validate` checks
+        // only `name` and `version` -- so a manifest carrying
+        // `[std.capabilities.""]` reaches `resolve_ceilings`, which hands the
+        // empty key a real ceiling row like any other.
+        //
+        // The ceilings below therefore *declare* `""`. Under a map-miss-only
+        // implementation the `ask` case would put the request to a human as
+        // `./test.wasm requests : analytics` -- a question naming no class at
+        // all -- and the `open` case would allow it outright.
+        for mode in [PolicyMode::Ask, PolicyMode::Open] {
+            let ceilings = ceilings_declaring("", &[], mode).await;
+            assert!(
+                ceilings.contains_key(""),
+                "the fixture must declare the empty class, or this test is \
+                 just the map-miss case again"
+            );
+            let gate = ConsentGate::for_test(ceilings, Arc::new(PanickingPrompter));
+            assert_eq!(
+                gate.decide("", "analytics", "s", &json!({})).await,
+                Decision::Deny,
+                "an empty class must be refused under {mode:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_deny_constraint_beats_an_otherwise_open_grant() {
+        // §4 step 2: a deny constraint in the effective grant wins, and it
+        // wins before the mode is reached -- so `open` does not rescue a key
+        // the operator named in `deny`.
+        let ceilings = ceilings_granted(
+            "db:drop",
+            &[],
+            act_policy::grant::CapabilityGrant {
+                mode: PolicyMode::Open,
+                allow: Vec::new(),
+                deny: vec![json!({"key": "production"})],
+            },
+        )
+        .await;
+        let gate = ConsentGate::for_test(ceilings, Arc::new(PanickingPrompter));
+        assert_eq!(
+            gate.decide("db:drop", "production", "s", &json!({})).await,
+            Decision::Deny
         );
         assert_eq!(
-            gate.decide("", "analytics", "s", &json!({})).await,
-            Decision::Deny
+            gate.decide("db:drop", "analytics", "s", &json!({})).await,
+            Decision::Allow,
+            "the deny constraint must bound the key it names and nothing else"
         );
     }
 
     #[tokio::test]
-    async fn a_deny_grant_refuses_a_declared_class_without_asking() {
-        // §4 step 2: a deny constraint in the effective grant wins, and it
-        // wins before anyone is consulted.
+    async fn a_deny_mode_grant_refuses_a_declared_class_without_asking() {
+        // §4 step 4, first bullet: mode `deny` refuses, and refuses without
+        // consulting anyone.
         let gate = ConsentGate::for_test(
             ceilings_declaring("db:drop", &[], PolicyMode::Deny).await,
             Arc::new(PanickingPrompter),
