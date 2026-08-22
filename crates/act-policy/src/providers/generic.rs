@@ -92,9 +92,11 @@ struct GenericCeiling {
 
 impl GenericCeiling {
     /// The same mode-dispatch `classify` used to run, but returning the
-    /// matching allow constraint (rendered as JSON text) alongside the
-    /// decision. Both trait methods are expressed in terms of this so the
-    /// decision output cannot drift between them.
+    /// attributed reason for whichever verdict was reached — the matching
+    /// allow constraint (rendered as JSON text) when one matched, otherwise
+    /// the reason the request was refused — alongside the decision. Both
+    /// trait methods are expressed in terms of this so the decision output
+    /// cannot drift between them.
     fn matched(&self, op: &ResourceOp) -> (Decision, Option<String>) {
         // 1. Deny wins, always and first.
         if let Some(c) = self.deny_sets.iter().find(|c| c.matches(op)) {

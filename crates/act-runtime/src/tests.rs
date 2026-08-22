@@ -324,6 +324,25 @@ async fn the_credentials_class_is_among_the_ceilings_the_audit_header_renders() 
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn a_declared_semantic_class_gets_a_ceiling() {
+    // The audit header is assembled from the resolved ceilings, so a class
+    // with no ceiling is a class no operator ever sees a mode for.
+    let info = info_from_act_toml(
+        r#"
+        [std]
+        name = "inventory"
+
+        [std.capabilities."db:drop"]
+        "#,
+    );
+    let ceilings = ceilings_for(&info, &grants(&[("db:drop", PolicyMode::Ask)])).await;
+    assert!(
+        ceilings.iter().any(|(id, _)| id == "db:drop"),
+        "a declared semantic class must appear among the resolved ceilings"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn an_undeclared_credentials_class_is_still_reported_and_resolves_to_deny() {
     // Reported, not omitted: the header's job is to state the mode of
     // every class, and "deny" is the answer an operator needs when a

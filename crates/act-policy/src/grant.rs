@@ -23,6 +23,12 @@ pub enum PolicyError {
         #[source]
         source: globset::Error,
     },
+    #[error("capability {cap}: {source}")]
+    Capability {
+        cap: String,
+        #[source]
+        source: Box<PolicyError>,
+    },
 }
 
 // ── Policy mode ───────────────────────────────────────────────────────────────

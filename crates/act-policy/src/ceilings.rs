@@ -52,7 +52,11 @@ pub async fn resolve_ceilings(
         let ceiling = registry
             .lookup(id)
             .resolve(id, declared.get(id).map(Vec::as_slice), &grant)
-            .await?;
+            .await
+            .map_err(|source| PolicyError::Capability {
+                cap: id.to_string(),
+                source: Box::new(source),
+            })?;
         out.insert(id.to_string(), Arc::from(ceiling));
     }
     Ok(out)
@@ -127,6 +131,29 @@ mod tests {
             !ceilings.contains_key("db:drop"),
             "a class the manifest never declared is not resolved; callers deny \
              an unresolved id outright"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_provider_names_the_capability_that_failed() {
+        // A declared constraint with an invalid glob makes the provider fail.
+        // The operator sees this as an instantiation failure, so it must say
+        // which class was at fault — there may be dozens.
+        let registry = ProviderRegistry::with_builtins();
+        let declared = BTreeMap::from([(
+            "db:drop".to_string(),
+            vec![serde_json::json!({"key": "test_["})],
+        )]);
+        // `expect_err` needs `Ok`'s type to impl `Debug`, which the trait
+        // object map does not — match by hand instead.
+        let err = match resolve_ceilings(&registry, &declared, &GrantPolicy::default()).await {
+            Ok(_) => panic!("an invalid glob must fail resolution"),
+            Err(e) => e,
+        };
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("db:drop"),
+            "the error must name the capability that failed: {rendered}"
         );
     }
 }

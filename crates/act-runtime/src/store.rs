@@ -36,6 +36,12 @@ pub struct HostState {
     /// is issued. Present even when `credentials` is `None`: the audit header
     /// must report the class either way.
     pub(crate) credentials_ceiling: Arc<dyn act_policy::provider::CompiledCeiling>,
+    /// Every declared capability class the host does not wire interception
+    /// for — i.e. every resolved ceiling minus `ALWAYS_RESOLVED`. A class
+    /// absent from this map has no ceiling and must be denied outright.
+    #[allow(dead_code)] // read by Task 3's act:consent gate
+    pub(crate) semantic_ceilings:
+        std::collections::BTreeMap<String, Arc<dyn act_policy::provider::CompiledCeiling>>,
     /// Caps the component's wasm linear memory growth (via `store.limiter`).
     /// Default `StoreLimits` is unlimited.
     pub(crate) limits: StoreLimits,
@@ -227,101 +233,60 @@ pub async fn create_store(
 
     let registry = ProviderRegistry::with_builtins();
 
-    // Helper: extract declared constraints for a capability id.
-    let get_declared =
-        |cap_id: &str| -> Option<Vec<serde_json::Value>> { declared_constraints(info, cap_id) };
-
-    let fs_grant = grant_policy.resolve(act_types::constants::CAP_FILESYSTEM);
-    let http_grant = grant_policy.resolve(act_types::constants::CAP_HTTP);
-    let sockets_grant = grant_policy.resolve(act_types::constants::CAP_SOCKETS);
-
     // act:credentials plus an unbounded grant on either network class is an
     // exfiltration channel — see `warn_if_credentials_exfil_risk` above. It
     // resolves the classes it cares about itself, from the whole policy.
     warn_if_credentials_exfil_risk(info, grant_policy);
 
-    let fs_ceiling: Arc<dyn CompiledCeiling> = Arc::from(
-        registry
-            .lookup(act_types::constants::CAP_FILESYSTEM)
-            .resolve(
-                act_types::constants::CAP_FILESYSTEM,
-                get_declared(act_types::constants::CAP_FILESYSTEM).as_deref(),
-                &fs_grant,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("fs policy: {e}"))?,
-    );
+    let declared: std::collections::BTreeMap<String, Vec<serde_json::Value>> = info
+        .std
+        .capabilities
+        .iter()
+        .map(|(id, req)| (id.clone(), req.constraints.clone()))
+        .collect();
+
+    let all = act_policy::ceilings::resolve_ceilings(&registry, &declared, grant_policy)
+        .await
+        .map_err(|e| anyhow::anyhow!("capability policy: {e}"))?;
+
+    // The four the host enforces by interception are taken by name; their
+    // ceilings are needed individually to wire the wasmtime hooks below.
+    let take = |id: &str| -> Arc<dyn CompiledCeiling> {
+        all.get(id)
+            .cloned()
+            .expect("ALWAYS_RESOLVED guarantees a ceiling for every physical class")
+    };
+    let fs_ceiling = take(act_types::constants::CAP_FILESYSTEM);
     let fs_effective_mode = fs_ceiling.effective_mode();
-
-    let http_ceiling: Arc<dyn CompiledCeiling> = Arc::from(
-        registry
-            .lookup(act_types::constants::CAP_HTTP)
-            .resolve(
-                act_types::constants::CAP_HTTP,
-                get_declared(act_types::constants::CAP_HTTP).as_deref(),
-                &http_grant,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("http policy: {e}"))?,
-    );
-
-    let sockets_ceiling: Arc<dyn CompiledCeiling> = Arc::from(
-        registry
-            .lookup(act_types::constants::CAP_SOCKETS)
-            .resolve(
-                act_types::constants::CAP_SOCKETS,
-                get_declared(act_types::constants::CAP_SOCKETS).as_deref(),
-                &sockets_grant,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("sockets policy: {e}"))?,
-    );
+    let http_ceiling = take(act_types::constants::CAP_HTTP);
+    let sockets_ceiling = take(act_types::constants::CAP_SOCKETS);
     let sockets_effective_mode = sockets_ceiling.effective_mode();
-
     // `act:credentials` is a semantic class with no resource constraints, so
     // its declaredness is carried by `Option` presence, not by the (always
     // empty) constraint list — see `CredentialsProvider`'s doc comment. It is
     // resolved even when this run has no credential store: the ceiling is
     // what the audit header reports, and a component that declared the class
     // but got nothing must still show up as `declared but not granted`.
-    let credentials_grant =
-        grant_policy.resolve(act_policy::providers::credentials::CAP_CREDENTIALS);
-    let credentials_ceiling: Arc<dyn CompiledCeiling> = Arc::from(
-        registry
-            .lookup(act_policy::providers::credentials::CAP_CREDENTIALS)
-            .resolve(
-                act_policy::providers::credentials::CAP_CREDENTIALS,
-                get_declared(act_policy::providers::credentials::CAP_CREDENTIALS).as_deref(),
-                &credentials_grant,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("credentials policy: {e}"))?,
-    );
+    let credentials_ceiling = take(act_policy::providers::credentials::CAP_CREDENTIALS);
 
     // Captured for the instantiation audit header (Task 10), before any of
     // them get moved into `HostState` / the hooks / the sockets closure
     // below — an `Arc` clone here is cheap and keeps this function's
-    // enforcement wiring below untouched. Every class the host resolves
-    // belongs here: the header is assembled from this vec alone, so a class
-    // left out of it is one no operator ever sees a mode for.
-    let ceilings: Vec<(String, Arc<dyn CompiledCeiling>)> = vec![
-        (
-            act_types::constants::CAP_FILESYSTEM.to_string(),
-            fs_ceiling.clone(),
-        ),
-        (
-            act_types::constants::CAP_HTTP.to_string(),
-            http_ceiling.clone(),
-        ),
-        (
-            act_types::constants::CAP_SOCKETS.to_string(),
-            sockets_ceiling.clone(),
-        ),
-        (
-            act_policy::providers::credentials::CAP_CREDENTIALS.to_string(),
-            credentials_ceiling.clone(),
-        ),
-    ];
+    // enforcement wiring below untouched. Every class the host resolved
+    // belongs here, not just the four it wires interception for: the header
+    // is assembled from this vec alone, so a class left out of it is one no
+    // operator ever sees a mode for.
+    let ceilings: Vec<(String, Arc<dyn CompiledCeiling>)> =
+        all.iter().map(|(id, c)| (id.clone(), c.clone())).collect();
+
+    // Everything not among the four the host wires interception for is a
+    // declared semantic class with no host-side enforcement hook of its own;
+    // Task 3 reads this to gate `act:consent` requests against it. Absence
+    // from this map is what "undeclared" means at that gate.
+    let semantic_ceilings: std::collections::BTreeMap<String, Arc<dyn CompiledCeiling>> = all
+        .into_iter()
+        .filter(|(id, _)| !act_policy::ceilings::ALWAYS_RESOLVED.contains(&id.as_str()))
+        .collect();
 
     let mut builder = WasiCtxBuilder::new();
     let mut preopen_pairs = Vec::with_capacity(preopens.len());
@@ -467,6 +432,7 @@ pub async fn create_store(
         consent_cache: cache,
         credentials,
         credentials_ceiling,
+        semantic_ceilings,
         limits: match max_memory {
             Some(bytes) => StoreLimitsBuilder::new().memory_size(bytes).build(),
             None => StoreLimits::default(),
