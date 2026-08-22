@@ -55,6 +55,28 @@ impl CapabilityProvider for GenericProvider {
 /// one exception: it never reads `attrs`, resolving from `ResourceOp::key`
 /// instead — every other dimension resolves from the stringified
 /// `attrs[dimension]`.
+///
+/// A dimension can be **absent** from `op.attrs` — `attrs` is wholly
+/// guest-authored (it comes straight from the request's `args`), so a
+/// component can always choose not to send one. What an absent dimension
+/// should count as depends on which side of the grant the constraint is on,
+/// which is why there are two matchers below instead of one:
+///
+/// * **allow / declared** constraints are *permissions*: they fail closed by
+///   requiring a match, so an absent dimension — nothing to match — makes
+///   the constraint **not match** (`matches`). A permission a component
+///   never earns by omission is the correct default.
+/// * **deny** constraints are *prohibitions*: they must fail closed in the
+///   opposite direction, so an absent dimension makes the constraint
+///   **match** (`matches_for_deny`). Otherwise a component evades any deny
+///   written over an `attrs`-backed dimension just by not sending it — an
+///   operator writing `deny: [{"table": "events"}]` expects that to hold
+///   even against a request that names no table at all, not to open a hole
+///   the guest controls the shape of.
+///
+/// `key` is unaffected by this split either way: it is host-resolved from
+/// `ResourceOp::key`, which is never optional, so there is nothing for either
+/// matcher to treat as absent.
 struct CompiledConstraint {
     /// Each entry: (key, compiled glob set for that key's patterns).
     key_globs: Vec<(String, GlobSet)>,
@@ -64,18 +86,32 @@ struct CompiledConstraint {
 }
 
 impl CompiledConstraint {
+    /// Permission-side match (allow / declared): an absent dimension does
+    /// not match. See the struct doc for why the two sides differ.
     fn matches(&self, op: &ResourceOp) -> bool {
+        self.dimensions_match(op, false)
+    }
+
+    /// Prohibition-side match (deny): an absent dimension counts as
+    /// matching, so a deny cannot be evaded by simply not sending the
+    /// dimension it is written over. See the struct doc.
+    fn matches_for_deny(&self, op: &ResourceOp) -> bool {
+        self.dimensions_match(op, true)
+    }
+
+    fn dimensions_match(&self, op: &ResourceOp, absent_matches: bool) -> bool {
         self.key_globs.iter().all(|(dim, glob_set)| {
             if dim == KEY_DIMENSION {
                 // Never read `attrs` for this one: a guest-supplied "key"
                 // inside args must not shadow the subject the human was
-                // shown and the audit recorded.
+                // shown and the audit recorded. Always present, so
+                // `absent_matches` never applies here.
                 return glob_set.is_match(&op.key);
             }
             match op.attrs.get(dim) {
                 Some(serde_json::Value::String(s)) => glob_set.is_match(s),
                 Some(other) => glob_set.is_match(other.to_string().as_str()),
-                None => false,
+                None => absent_matches,
             }
         })
     }
@@ -98,8 +134,12 @@ impl GenericCeiling {
     /// trait methods are expressed in terms of this so the decision output
     /// cannot drift between them.
     fn matched(&self, op: &ResourceOp) -> (Decision, Option<String>) {
-        // 1. Deny wins, always and first.
-        if let Some(c) = self.deny_sets.iter().find(|c| c.matches(op)) {
+        // 1. Deny wins, always and first. Fail-closed the other way from
+        //    allow/declared: a dimension the deny names but this op omits
+        //    counts as matching, so `deny: [{"table": "events"}]` still
+        //    refuses a request that sends no `table` at all — see
+        //    `CompiledConstraint::matches_for_deny`.
+        if let Some(c) = self.deny_sets.iter().find(|c| c.matches_for_deny(op)) {
             return (Decision::Deny, Some(c.source.clone()));
         }
 
@@ -472,6 +512,106 @@ mod tests {
         assert_eq!(c.classify(&op("production", "orders")), Decision::Deny);
         // Matches both → allowed.
         assert_eq!(c.classify(&op("test_events", "orders")), Decision::Allow);
+    }
+
+    #[tokio::test]
+    async fn a_deny_over_an_omitted_attrs_dimension_still_denies() {
+        // I1: `attrs` is wholly guest-authored, so a component can evade any
+        // deny written over an attrs-backed dimension by simply not sending
+        // it — unless the deny side fails closed on absence. Reproduces the
+        // reviewer's CLI repro (`--grant '{"db:drop":{"mode":"open","deny":
+        // [{"table":"events"}]}}'` against a request that never names a
+        // table) at the provider level: before the fix this returned Allow.
+        let grant = CapabilityGrant {
+            mode: PolicyMode::Open,
+            allow: vec![],
+            deny: vec![serde_json::json!({"table": "events"})],
+        };
+        let c = GenericProvider
+            .resolve("db:drop", Some(&[]), &grant)
+            .await
+            .unwrap();
+        let op_without_table = ResourceOp {
+            cap_id: "db:drop".into(),
+            key: "analytics".into(),
+            action: "request".into(),
+            attrs: serde_json::Value::Null,
+        };
+        assert_eq!(
+            c.classify(&op_without_table),
+            Decision::Deny,
+            "a deny over `table` must refuse a request that sends no table at all"
+        );
+        // The deny still bounds only what it names: a table it doesn't
+        // mention, present and non-matching, must not also trip it.
+        let op_other_table = ResourceOp {
+            cap_id: "db:drop".into(),
+            key: "analytics".into(),
+            action: "request".into(),
+            attrs: serde_json::json!({"table": "orders"}),
+        };
+        assert_eq!(c.classify(&op_other_table), Decision::Allow);
+        // And the table it does name is still denied when present.
+        let op_matching_table = ResourceOp {
+            cap_id: "db:drop".into(),
+            key: "analytics".into(),
+            action: "request".into(),
+            attrs: serde_json::json!({"table": "events"}),
+        };
+        assert_eq!(c.classify(&op_matching_table), Decision::Deny);
+    }
+
+    #[tokio::test]
+    async fn a_deny_over_key_is_unaffected_by_the_fail_closed_change() {
+        // `key` is host-resolved from `ResourceOp::key` and is never
+        // optional, so the deny-side "absent counts as matching" rule has
+        // nothing to change here: a deny over `key` must keep working
+        // exactly as before.
+        let grant = CapabilityGrant {
+            mode: PolicyMode::Open,
+            allow: vec![],
+            deny: vec![serde_json::json!({"key": "production"})],
+        };
+        let c = GenericProvider
+            .resolve("db:drop", Some(&[]), &grant)
+            .await
+            .unwrap();
+        let op = |key: &str| ResourceOp {
+            cap_id: "db:drop".into(),
+            key: key.into(),
+            action: "request".into(),
+            attrs: serde_json::Value::Null,
+        };
+        assert_eq!(c.classify(&op("production")), Decision::Deny);
+        assert_eq!(c.classify(&op("analytics")), Decision::Allow);
+    }
+
+    #[tokio::test]
+    async fn an_allow_over_an_omitted_dimension_still_fails_to_match() {
+        // The permission side is unchanged by I1's fix: an allowlist entry
+        // naming a dimension the request doesn't send must still fail to
+        // match, not be rescued by the same "absent counts as matching"
+        // rule that now applies to deny.
+        let grant = CapabilityGrant {
+            mode: PolicyMode::Allowlist,
+            allow: vec![serde_json::json!({"table": "orders"})],
+            deny: vec![],
+        };
+        let c = GenericProvider
+            .resolve("db:read", Some(&[]), &grant)
+            .await
+            .unwrap();
+        let op = ResourceOp {
+            cap_id: "db:read".into(),
+            key: "orders".into(),
+            action: "request".into(),
+            attrs: serde_json::Value::Null,
+        };
+        assert_eq!(
+            c.classify(&op),
+            Decision::Deny,
+            "an allow naming a dimension the request omits must not match"
+        );
     }
 
     #[tokio::test]
