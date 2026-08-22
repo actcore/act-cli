@@ -17,9 +17,10 @@ impl CapabilityProvider for SocketsProvider {
     async fn resolve(
         &self,
         cap_id: &str,
-        declared: &[serde_json::Value],
+        declared: Option<&[serde_json::Value]>,
         grant: &CapabilityGrant,
     ) -> Result<Box<dyn CompiledCeiling>, PolicyError> {
+        let declared = declared.unwrap_or(&[]);
         let user = sockets_config_from_grant(grant)?;
         // Build declaration rules for protocol ceiling enforcement.
         let decl_rules = parse_sockets_rules(declared)?;
@@ -272,7 +273,10 @@ mod tests {
             allow: vec![json!({"host": "198.51.100.7", "ports": [5900]})],
             deny: vec![],
         };
-        let c = p.resolve("wasi:sockets", &declared, &grant).await.unwrap();
+        let c = p
+            .resolve("wasi:sockets", Some(&declared), &grant)
+            .await
+            .unwrap();
         // Allowed: correct host, port, TCP protocol.
         let ok_op = ResourceOp {
             cap_id: "wasi:sockets".into(),
@@ -305,7 +309,10 @@ mod tests {
             allow: vec![json!({"host":"localhost","ports":[5900]})],
             deny: vec![],
         };
-        let c = p.resolve("wasi:sockets", &declared, &grant).await.unwrap();
+        let c = p
+            .resolve("wasi:sockets", Some(&declared), &grant)
+            .await
+            .unwrap();
         let op = ResourceOp {
             cap_id: "wasi:sockets".into(),
             key: "127.0.0.1:5900".into(),
@@ -323,7 +330,7 @@ mod tests {
             allow: vec![],
             deny: vec![],
         };
-        let c = p.resolve("wasi:sockets", &[], &grant).await.unwrap();
+        let c = p.resolve("wasi:sockets", None, &grant).await.unwrap();
         let op = ResourceOp {
             cap_id: "wasi:sockets".into(),
             key: "host.example.com:5900".into(),

@@ -23,9 +23,10 @@ impl CapabilityProvider for GenericProvider {
     async fn resolve(
         &self,
         _cap_id: &str,
-        declared: &[serde_json::Value],
+        declared: Option<&[serde_json::Value]>,
         grant: &CapabilityGrant,
     ) -> Result<Box<dyn CompiledCeiling>, PolicyError> {
+        let declared = declared.unwrap_or(&[]);
         // Unbounded ceiling when nothing is declared (no physical resource ceiling).
         let unbounded = declared.is_empty();
         let is_declared = !declared.is_empty();
@@ -192,7 +193,10 @@ mod tests {
             allow: vec![serde_json::json!({"database":"staging_*"})],
             deny: vec![],
         };
-        let c = p.resolve("db:truncate", &declared, &grant).await.unwrap();
+        let c = p
+            .resolve("db:truncate", Some(&declared), &grant)
+            .await
+            .unwrap();
         let op = |db: &str| ResourceOp {
             cap_id: "db:truncate".into(),
             key: db.into(),
@@ -220,7 +224,7 @@ mod tests {
             deny: vec![],
         };
         assert_eq!(
-            p.resolve("db:truncate", &[], &open)
+            p.resolve("db:truncate", None, &open)
                 .await
                 .unwrap()
                 .classify(&op),
@@ -234,7 +238,7 @@ mod tests {
             deny: vec![],
         };
         assert_eq!(
-            p.resolve("db:truncate", &[], &deny)
+            p.resolve("db:truncate", None, &deny)
                 .await
                 .unwrap()
                 .classify(&op),
@@ -249,7 +253,7 @@ mod tests {
             deny: vec![],
         };
         assert_eq!(
-            p.resolve("db:truncate", &[], &ask)
+            p.resolve("db:truncate", None, &ask)
                 .await
                 .unwrap()
                 .classify(&op),
@@ -264,13 +268,13 @@ mod tests {
         // db:* has no typed provider → generic; wasi:filesystem → fs provider.
         assert!(
             r.lookup("db:truncate")
-                .resolve("db:truncate", &[], &Default::default())
+                .resolve("db:truncate", None, &Default::default())
                 .await
                 .is_ok()
         );
         assert!(
             r.lookup("wasi:filesystem")
-                .resolve("wasi:filesystem", &[], &Default::default())
+                .resolve("wasi:filesystem", None, &Default::default())
                 .await
                 .is_ok()
         );
@@ -284,7 +288,7 @@ mod tests {
             allow: vec![serde_json::json!({"table": "orders"})],
             deny: vec![serde_json::json!({"table": "orders"})],
         };
-        let c = p.resolve("db:read", &[], &grant).await.unwrap();
+        let c = p.resolve("db:read", None, &grant).await.unwrap();
         let op = ResourceOp {
             cap_id: "db:read".into(),
             key: "orders".into(),

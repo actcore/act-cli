@@ -579,19 +579,16 @@ mod tests {
         declared: bool,
         mode: PolicyMode,
     ) -> Arc<dyn act_policy::provider::CompiledCeiling> {
-        // The sentinel `declared` slice is what `runtime::declared_constraints`
-        // synthesizes for a manifest that carries the class; an empty slice is
-        // what it returns for one that does not.
-        let declared: Vec<serde_json::Value> = if declared {
-            vec![serde_json::json!({})]
-        } else {
-            Vec::new()
-        };
+        // `Some(&[])` is what `runtime::declared_constraints` returns for a
+        // manifest that carries the class (even bare); `None` is what it
+        // returns for one that does not.
+        let declared: Option<Vec<serde_json::Value>> =
+            if declared { Some(Vec::new()) } else { None };
         Arc::from(
             CredentialsProvider
                 .resolve(
                     CAP_CREDENTIALS,
-                    &declared,
+                    declared.as_deref(),
                     &CapabilityGrant {
                         mode,
                         allow: vec![],

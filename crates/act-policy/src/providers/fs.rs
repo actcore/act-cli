@@ -17,9 +17,10 @@ impl CapabilityProvider for FsProvider {
     async fn resolve(
         &self,
         cap_id: &str,
-        declared: &[serde_json::Value],
+        declared: Option<&[serde_json::Value]>,
         grant: &CapabilityGrant,
     ) -> Result<Box<dyn CompiledCeiling>, PolicyError> {
+        let declared = declared.unwrap_or(&[]);
         // Build the user FsConfig from the grant.
         let user = fs_config_from_grant(grant)?;
         // Build a Capabilities with this cap_id's declared constraints.
@@ -161,7 +162,7 @@ mod tests {
             deny: vec![],
         };
         let c = p
-            .resolve("wasi:filesystem", &declared, &grant)
+            .resolve("wasi:filesystem", Some(&declared), &grant)
             .await
             .unwrap();
         let op = |action: &str| ResourceOp {
@@ -182,7 +183,7 @@ mod tests {
             allow: vec![],
             deny: vec![],
         };
-        let c = p.resolve("wasi:filesystem", &[], &grant).await.unwrap();
+        let c = p.resolve("wasi:filesystem", None, &grant).await.unwrap();
         let op = ResourceOp {
             cap_id: "wasi:filesystem".into(),
             key: "/data/x".into(),
@@ -204,7 +205,7 @@ mod tests {
             deny: vec![],
         };
         let c = p
-            .resolve("wasi:filesystem", &declared, &grant)
+            .resolve("wasi:filesystem", Some(&declared), &grant)
             .await
             .unwrap();
         let op = ResourceOp {
@@ -227,7 +228,7 @@ mod tests {
             allow: vec![json!({"path": glob, "mode": "rw"})],
             deny: vec![],
         };
-        p.resolve("wasi:filesystem", &declared, &grant)
+        p.resolve("wasi:filesystem", Some(&declared), &grant)
             .await
             .unwrap()
     }

@@ -102,38 +102,17 @@ pub(crate) fn is_local_implicit_bind(
         && addr.port() == 0
 }
 
-/// Declared constraints for one capability class, as `CapabilityProvider::resolve`
-/// expects them.
-///
-/// For `wasi:filesystem`/`wasi:http`/`wasi:sockets`, an empty result legitimately
-/// means "declared with an unbounded/absent ceiling": their providers parse every
-/// constraint value as a typed rule, so this stays exactly the manifest's
-/// constraint list, untouched — the bulk of this function's callers must never
-/// see it perturbed.
-///
-/// `act:credentials` is different: it is a *binary* capability class (see the
-/// `declared`-slice contract documented on `act_policy::providers::credentials`)
-/// whose bare-table declaration form (`[std.capabilities."act:credentials"]`)
-/// always parses to an empty constraint list. Left alone that collapses
-/// "declared, no constraints" into "never declared", and
-/// `CredentialsProvider::resolve` denies every access permanently while the
-/// audit trail reports the component as never having declared the class. So for
-/// this one id — and only this one, for now — presence in the manifest decides,
-/// not the constraint list, and a one-element sentinel is synthesized when
-/// present, matching the contract the provider's module docs require.
-pub(crate) fn declared_constraints(info: &ComponentInfo, cap_id: &str) -> Vec<serde_json::Value> {
-    if cap_id == act_policy::providers::credentials::CAP_CREDENTIALS {
-        return if info.std.capabilities.has(cap_id) {
-            vec![serde_json::json!({})]
-        } else {
-            Vec::new()
-        };
-    }
+/// The constraint list a capability class declares, or `None` when the class
+/// is absent from the manifest. A class declared as a bare table yields
+/// `Some(vec![])`, which is what tells a provider "declared, unconstrained".
+pub(crate) fn declared_constraints(
+    info: &ComponentInfo,
+    cap_id: &str,
+) -> Option<Vec<serde_json::Value>> {
     info.std
         .capabilities
         .get(cap_id)
         .map(|req| req.constraints.clone())
-        .unwrap_or_default()
 }
 /// The capability classes over which credentials can leave the machine.
 ///
@@ -205,7 +184,7 @@ pub(crate) fn warn_if_credentials_exfil_risk(
         .copied()
         .filter(|cap_id| {
             grant_policy.resolve(cap_id).mode == act_policy::grant::PolicyMode::Open
-                && !declared_constraints(info, cap_id).is_empty()
+                && declared_constraints(info, cap_id).is_some_and(|v| !v.is_empty())
         })
         .collect();
     if unbounded.is_empty() {
@@ -250,7 +229,7 @@ pub async fn create_store(
 
     // Helper: extract declared constraints for a capability id.
     let get_declared =
-        |cap_id: &str| -> Vec<serde_json::Value> { declared_constraints(info, cap_id) };
+        |cap_id: &str| -> Option<Vec<serde_json::Value>> { declared_constraints(info, cap_id) };
 
     let fs_grant = grant_policy.resolve(act_types::constants::CAP_FILESYSTEM);
     let http_grant = grant_policy.resolve(act_types::constants::CAP_HTTP);
@@ -266,7 +245,7 @@ pub async fn create_store(
             .lookup(act_types::constants::CAP_FILESYSTEM)
             .resolve(
                 act_types::constants::CAP_FILESYSTEM,
-                &get_declared(act_types::constants::CAP_FILESYSTEM),
+                get_declared(act_types::constants::CAP_FILESYSTEM).as_deref(),
                 &fs_grant,
             )
             .await
@@ -279,7 +258,7 @@ pub async fn create_store(
             .lookup(act_types::constants::CAP_HTTP)
             .resolve(
                 act_types::constants::CAP_HTTP,
-                &get_declared(act_types::constants::CAP_HTTP),
+                get_declared(act_types::constants::CAP_HTTP).as_deref(),
                 &http_grant,
             )
             .await
@@ -291,7 +270,7 @@ pub async fn create_store(
             .lookup(act_types::constants::CAP_SOCKETS)
             .resolve(
                 act_types::constants::CAP_SOCKETS,
-                &get_declared(act_types::constants::CAP_SOCKETS),
+                get_declared(act_types::constants::CAP_SOCKETS).as_deref(),
                 &sockets_grant,
             )
             .await
@@ -300,11 +279,11 @@ pub async fn create_store(
     let sockets_effective_mode = sockets_ceiling.effective_mode();
 
     // `act:credentials` is a semantic class with no resource constraints, so
-    // `declared_constraints` hands the provider a synthesized sentinel rather
-    // than a rule list — see its doc comment. It is resolved even when this
-    // run has no credential store: the ceiling is what the audit header
-    // reports, and a component that declared the class but got nothing must
-    // still show up as `declared but not granted`.
+    // its declaredness is carried by `Option` presence, not by the (always
+    // empty) constraint list — see `CredentialsProvider`'s doc comment. It is
+    // resolved even when this run has no credential store: the ceiling is
+    // what the audit header reports, and a component that declared the class
+    // but got nothing must still show up as `declared but not granted`.
     let credentials_grant =
         grant_policy.resolve(act_policy::providers::credentials::CAP_CREDENTIALS);
     let credentials_ceiling: Arc<dyn CompiledCeiling> = Arc::from(
@@ -312,7 +291,7 @@ pub async fn create_store(
             .lookup(act_policy::providers::credentials::CAP_CREDENTIALS)
             .resolve(
                 act_policy::providers::credentials::CAP_CREDENTIALS,
-                &get_declared(act_policy::providers::credentials::CAP_CREDENTIALS),
+                get_declared(act_policy::providers::credentials::CAP_CREDENTIALS).as_deref(),
                 &credentials_grant,
             )
             .await

@@ -25,10 +25,15 @@ pub struct ResourceOp {
 /// IPs once). `classify` stays sync — it runs on the hot path.
 #[async_trait::async_trait]
 pub trait CapabilityProvider: Send + Sync {
+    /// `declared` is `None` when the capability class is absent from the
+    /// component's `act:component` manifest, and `Some` when it is present —
+    /// `Some(&[])` for a bare declaration that carries no constraints. Providers
+    /// MUST NOT infer absence from an empty slice: the manifest is the ceiling,
+    /// so the two cases have opposite verdicts for semantic classes.
     async fn resolve(
         &self,
         cap_id: &str,
-        declared: &[serde_json::Value],
+        declared: Option<&[serde_json::Value]>,
         grant: &CapabilityGrant,
     ) -> Result<Box<dyn CompiledCeiling>, PolicyError>;
 }
@@ -133,7 +138,7 @@ mod tests {
         async fn resolve(
             &self,
             _id: &str,
-            _declared: &[serde_json::Value],
+            _declared: Option<&[serde_json::Value]>,
             _grant: &crate::grant::CapabilityGrant,
         ) -> Result<Box<dyn CompiledCeiling>, crate::grant::PolicyError> {
             Ok(Box::new(TagCeiling(self.0)))
@@ -160,7 +165,7 @@ mod tests {
         r.register("db:drop-*", Arc::new(Tagged("db-drop")));
         async fn tag(r: &ProviderRegistry, id: &str) -> String {
             r.lookup(id)
-                .resolve(id, &[], &Default::default())
+                .resolve(id, None, &Default::default())
                 .await
                 .unwrap()
                 .tag()
@@ -188,7 +193,7 @@ mod tests {
         let ceiling = provider
             .resolve(
                 crate::providers::credentials::CAP_CREDENTIALS,
-                &[],
+                None,
                 &ask_grant,
             )
             .await

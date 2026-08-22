@@ -1,42 +1,13 @@
 //! `act:credentials` decisions.
 //!
-//! Deliberately **not** the generic provider. That one treats an empty
-//! `declared` as an unbounded ceiling, reasoning that a semantic class has no
-//! physical resource to misuse. A credential is precisely such a resource: it
-//! carries reach into someone else's system. So undeclared means denied, as it
-//! does for filesystem, http and sockets.
+//! Deliberately **not** the generic provider — although since the
+//! manifest-is-the-ceiling rule the two now agree on undeclared access, this
+//! provider keeps its own typed ceiling and declaredness reporting.
 //!
-//! ## The `declared` contract
-//!
-//! [`CapabilityProvider::resolve`] only ever sees a capability's **constraint
-//! list** (`declared: &[serde_json::Value]`), never a separate presence flag.
-//! This provider derives declared-ness from that list with `!declared.is_empty()`
-//! — so the contract callers MUST honor is: **`declared` is non-empty if and
-//! only if `act:credentials` is present in the component's `act:component`
-//! manifest.**
-//!
-//! That is awkward because the manifest's prescribed way to declare this
-//! capability, per spec §4, is a bare table with no constraints at all:
-//!
-//! ```toml
-//! [std.capabilities."act:credentials"]
-//! ```
-//!
-//! which parses to `constraints: vec![]` — indistinguishable, from inside this
-//! module, from "the capability was never mentioned". This provider has no way
-//! to tell the two apart; it cannot see the manifest, only the slice it was
-//! handed. **The caller that reads the manifest and invokes `resolve` MUST
-//! pass a one-element sentinel (e.g. `vec![serde_json::json!({})]`) when the
-//! bare-table form is present**, so that "declared with no constraints" and
-//! "not declared" produce different slices. Fixing that call site is tracked
-//! as separate follow-up work and is **not** done in this module.
-//!
-//! Get this wrong — pass an empty slice for a component that *did* declare
-//! the capability — and every access silently downgrades to `Deny` regardless
-//! of grant mode, and the audit summary reports the component as not having
-//! declared a class it declared correctly. There is no error, no warning:
-//! just a capability that never works and an audit trail that mis-attributes
-//! why.
+//! A credential is a resource that carries reach into someone else's system,
+//! so undeclared means denied, as it does for filesystem, http and sockets.
+//! `declared.is_some()` is the whole test: the caller passes `Some(&[])` for
+//! the prescribed bare-table form and `None` when the class is absent.
 
 use crate::Decision;
 use crate::grant::{CapabilityGrant, PolicyError, PolicyMode};
@@ -63,11 +34,12 @@ impl CapabilityProvider for CredentialsProvider {
     async fn resolve(
         &self,
         _cap_id: &str,
-        declared: &[serde_json::Value],
+        declared: Option<&[serde_json::Value]>,
         grant: &CapabilityGrant,
     ) -> Result<Box<dyn CompiledCeiling>, PolicyError> {
+        let declared = declared.is_some();
         Ok(Box::new(CredentialsCeiling {
-            declared: !declared.is_empty(),
+            declared,
             mode: grant.mode,
         }))
     }
@@ -141,7 +113,7 @@ mod tests {
     #[tokio::test]
     async fn undeclared_is_denied_even_in_ask_mode() {
         let ceiling = CredentialsProvider
-            .resolve(CAP_CREDENTIALS, &[], &grant(PolicyMode::Ask))
+            .resolve(CAP_CREDENTIALS, None, &grant(PolicyMode::Ask))
             .await
             .unwrap();
         assert_eq!(
@@ -153,15 +125,13 @@ mod tests {
 
     #[tokio::test]
     async fn declared_and_asked_yields_ask() {
-        // `vec![json!({})]` here is the sentinel described in the module docs
-        // above, not a shape any real manifest produces: the bare-table form
-        // `[std.capabilities."act:credentials"]` parses to an empty
-        // constraint list, so a non-empty placeholder is what a caller must
-        // synthesize to signal "declared". This test does not exercise that
-        // caller-side wiring — see the module docs for why it can't yet.
+        // `act:credentials` has no constraint schema of its own, so
+        // `vec![json!({})]` is just a non-empty placeholder standing in for
+        // "declared" — the class's only real signal, per the module docs, is
+        // `declared.is_some()`, not anything inside the slice.
         let declared = vec![serde_json::json!({})];
         let ceiling = CredentialsProvider
-            .resolve(CAP_CREDENTIALS, &declared, &grant(PolicyMode::Ask))
+            .resolve(CAP_CREDENTIALS, Some(&declared), &grant(PolicyMode::Ask))
             .await
             .unwrap();
         assert_eq!(ceiling.classify(&op()), Decision::Ask);
@@ -169,10 +139,10 @@ mod tests {
 
     #[tokio::test]
     async fn declared_and_denied_yields_deny() {
-        // Sentinel, see comment above.
+        // Placeholder constraint, see comment above.
         let declared = vec![serde_json::json!({})];
         let ceiling = CredentialsProvider
-            .resolve(CAP_CREDENTIALS, &declared, &grant(PolicyMode::Deny))
+            .resolve(CAP_CREDENTIALS, Some(&declared), &grant(PolicyMode::Deny))
             .await
             .unwrap();
         assert_eq!(ceiling.classify(&op()), Decision::Deny);
@@ -180,10 +150,10 @@ mod tests {
 
     #[tokio::test]
     async fn effective_mode_reports_ask_when_declared() {
-        // Sentinel, see comment on `declared_and_asked_yields_ask` above.
+        // Placeholder constraint, see comment on `declared_and_asked_yields_ask` above.
         let declared = vec![serde_json::json!({})];
         let ceiling = CredentialsProvider
-            .resolve(CAP_CREDENTIALS, &declared, &grant(PolicyMode::Ask))
+            .resolve(CAP_CREDENTIALS, Some(&declared), &grant(PolicyMode::Ask))
             .await
             .unwrap();
         assert_eq!(ceiling.effective_mode(), PolicyMode::Ask);
@@ -196,9 +166,30 @@ mod tests {
         // the audit trail renders a mode the component was never actually
         // granted.
         let ceiling = CredentialsProvider
-            .resolve(CAP_CREDENTIALS, &[], &grant(PolicyMode::Ask))
+            .resolve(CAP_CREDENTIALS, None, &grant(PolicyMode::Ask))
             .await
             .unwrap();
         assert_eq!(ceiling.effective_mode(), PolicyMode::Deny);
+    }
+
+    #[tokio::test]
+    async fn bare_declaration_is_declared_and_absent_is_not() {
+        // The prescribed manifest form is a bare table with no constraints:
+        //   [std.capabilities."act:credentials"]
+        // which must be distinguishable from never mentioning the class at all.
+        let bare = CredentialsProvider
+            .resolve(CAP_CREDENTIALS, Some(&[]), &grant(PolicyMode::Ask))
+            .await
+            .unwrap();
+        assert!(
+            bare.declared(),
+            "a bare declaration is a declaration, not an absence"
+        );
+
+        let absent = CredentialsProvider
+            .resolve(CAP_CREDENTIALS, None, &grant(PolicyMode::Ask))
+            .await
+            .unwrap();
+        assert!(!absent.declared(), "an absent class is undeclared");
     }
 }

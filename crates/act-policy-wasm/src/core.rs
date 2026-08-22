@@ -108,7 +108,7 @@ impl Kernel {
             let grant = policy.resolve(&id);
             let ceiling = registry
                 .lookup(&id)
-                .resolve(&id, decl, &grant)
+                .resolve(&id, Some(decl), &grant)
                 // Under --no-default-features every provider's `resolve` is
                 // synchronous (no DNS); the future is Ready on first poll.
                 .now_or_never()

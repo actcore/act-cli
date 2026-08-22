@@ -17,9 +17,10 @@ impl CapabilityProvider for HttpProvider {
     async fn resolve(
         &self,
         cap_id: &str,
-        declared: &[serde_json::Value],
+        declared: Option<&[serde_json::Value]>,
         grant: &CapabilityGrant,
     ) -> Result<Box<dyn CompiledCeiling>, PolicyError> {
+        let declared = declared.unwrap_or(&[]);
         let user = http_config_from_grant(grant)?;
         // Build declaration rules for method/scheme ceiling enforcement.
         let decl_rules = parse_http_rules_from_httpallow(declared)?;
@@ -278,7 +279,10 @@ mod tests {
             allow: vec![json!({"host":"api.example.com"})],
             deny: vec![],
         };
-        let c = p.resolve("wasi:http", &declared, &grant).await.unwrap();
+        let c = p
+            .resolve("wasi:http", Some(&declared), &grant)
+            .await
+            .unwrap();
         let op = |m: &str| ResourceOp {
             cap_id: "wasi:http".into(),
             key: "api.example.com:443".into(),
@@ -297,7 +301,7 @@ mod tests {
             allow: vec![],
             deny: vec![],
         };
-        let c = p.resolve("wasi:http", &[], &grant).await.unwrap();
+        let c = p.resolve("wasi:http", None, &grant).await.unwrap();
         let op = ResourceOp {
             cap_id: "wasi:http".into(),
             key: "api.example.com:443".into(),
@@ -317,7 +321,10 @@ mod tests {
             allow: vec![],
             deny: vec![],
         };
-        let c = p.resolve("wasi:http", &declared, &grant).await.unwrap();
+        let c = p
+            .resolve("wasi:http", Some(&declared), &grant)
+            .await
+            .unwrap();
         // In-ceiling with Ask mode → Ask
         let in_op = ResourceOp {
             cap_id: "wasi:http".into(),

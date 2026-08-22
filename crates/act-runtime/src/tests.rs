@@ -156,7 +156,7 @@ fn info_from_act_toml(src: &str) -> ComponentInfo {
 }
 
 #[test]
-fn a_bare_credentials_table_is_handed_to_the_provider_as_a_non_empty_slice() {
+fn a_bare_credentials_table_is_handed_to_the_provider_as_declared() {
     let info = info_from_act_toml(
         r#"
         [std]
@@ -166,9 +166,10 @@ fn a_bare_credentials_table_is_handed_to_the_provider_as_a_non_empty_slice() {
         "#,
     );
 
-    // Precondition — this is the trap. The spec-prescribed declaration
-    // form really does parse to an empty constraint list, so the raw
-    // manifest cannot distinguish "declared" from "absent" on its own.
+    // Precondition — this is the trap the `Option` return type exists to
+    // defuse. The spec-prescribed declaration form really does parse to an
+    // empty constraint list, so the raw constraint list alone cannot
+    // distinguish "declared" from "absent".
     assert!(
         info.std
             .capabilities
@@ -177,22 +178,21 @@ fn a_bare_credentials_table_is_handed_to_the_provider_as_a_non_empty_slice() {
             .constraints
             .is_empty(),
         "the bare-table form is expected to carry zero constraints; if this \
-         ever changes, `declared_constraints`' credentials branch is moot"
+         ever changes, this test stops exercising the trap"
     );
 
     // `CredentialsProvider::resolve` derives declared-ness from
-    // `!declared.is_empty()` and sees nothing else, so a sentinel must be
-    // synthesized or every credential access is denied forever while the
-    // audit trail blames the component for not declaring the class.
+    // `declared.is_some()`, so a manifest that carries the class — even
+    // bare — must reach the provider as `Some(&[])`, not `None`.
     assert!(
-        !declared_constraints(&info, CAP_CREDENTIALS).is_empty(),
+        declared_constraints(&info, CAP_CREDENTIALS).is_some(),
         "a component that declared act:credentials must reach the provider \
-         as a non-empty declared slice"
+         as Some, even though its constraint list is empty"
     );
 }
 
 #[test]
-fn an_undeclared_credentials_capability_is_handed_over_as_an_empty_slice() {
+fn an_undeclared_credentials_capability_is_handed_over_as_none() {
     let info = info_from_act_toml(
         r#"
         [std]
@@ -207,18 +207,19 @@ fn an_undeclared_credentials_capability_is_handed_over_as_an_empty_slice() {
         !info.std.capabilities.has(CAP_CREDENTIALS),
         "sanity: this manifest must not declare act:credentials"
     );
-    assert!(
-        declared_constraints(&info, CAP_CREDENTIALS).is_empty(),
-        "an undeclared act:credentials must stay empty so the provider denies it"
+    assert_eq!(
+        declared_constraints(&info, CAP_CREDENTIALS),
+        None,
+        "an undeclared act:credentials must come back as None so the provider denies it"
     );
 }
 
 #[test]
-fn the_sentinel_is_scoped_to_credentials_and_never_perturbs_physical_classes() {
-    // For wasi:filesystem/http/sockets an empty `declared` legitimately
-    // means "no ceiling, deny" — and their providers parse every element
-    // of the slice as a typed constraint, so a `{}` sentinel would be fed
-    // to a parser expecting `{"host": ...}` / `{"path": ...}`.
+fn a_bare_declaration_reports_some_empty_for_any_class() {
+    // `declared_constraints` no longer special-cases any capability id — a
+    // bare table yields `Some(vec![])` uniformly, whether the class is
+    // semantic (act:credentials) or physical (fs/http/sockets). It is each
+    // provider's own job to decide what "declared, no constraints" means.
     let info = info_from_act_toml(
         r#"
         [std]
@@ -241,10 +242,10 @@ fn the_sentinel_is_scoped_to_credentials_and_never_perturbs_physical_classes() {
             info.std.capabilities.has(cap),
             "sanity: {cap} must be declared in this manifest"
         );
-        assert!(
-            declared_constraints(&info, cap).is_empty(),
-            "{cap} is declared bare, so its declared slice must stay empty — \
-             no sentinel, or its provider would try to parse `{{}}` as a rule"
+        assert_eq!(
+            declared_constraints(&info, cap),
+            Some(Vec::new()),
+            "{cap} is declared bare, so its declared slice must be Some(vec![])"
         );
     }
 }
@@ -263,10 +264,10 @@ fn declared_constraints_passes_physical_constraints_through_verbatim() {
 
     assert_eq!(
         declared_constraints(&info, act_types::constants::CAP_HTTP),
-        vec![
+        Some(vec![
             serde_json::json!({ "host": "api.notion.com" }),
             serde_json::json!({ "host": "*.example.com" }),
-        ],
+        ]),
         "physical classes must see their manifest constraints untouched"
     );
 }

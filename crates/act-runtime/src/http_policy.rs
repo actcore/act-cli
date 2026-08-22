@@ -252,7 +252,7 @@ mod tests {
         let ceiling_box = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap()
-            .block_on(HttpProvider.resolve("wasi:http", &declared, &grant))
+            .block_on(HttpProvider.resolve("wasi:http", Some(&declared), &grant))
             .expect("HttpProvider::resolve");
         let ceiling: Arc<dyn act_policy::provider::CompiledCeiling> = Arc::from(ceiling_box);
         let http_cfg = act_policy::grant::HttpConfig {
@@ -523,7 +523,11 @@ mod tests {
             ..Default::default()
         };
         let ceiling_box = act_policy::providers::http::HttpProvider
-            .resolve("wasi:http", &[json!({"host": "api.example.com"})], &grant)
+            .resolve(
+                "wasi:http",
+                Some(&[json!({"host": "api.example.com"})]),
+                &grant,
+            )
             .await
             .expect("HttpProvider::resolve");
         let ceiling: Arc<dyn CompiledCeiling> = Arc::from(ceiling_box);
