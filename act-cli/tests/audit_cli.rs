@@ -364,7 +364,7 @@ fn fs_ask_resolution_reaches_the_audit_trail() {
         "ask-deny line must name the capability, got: {ask_line}"
     );
     assert!(
-        ask_line.contains("denied by user"),
+        ask_line.contains("no prompt channel"),
         "ask-deny line must carry the reason, got: {ask_line}"
     );
 }
@@ -507,7 +507,7 @@ fn http_ask_resolution_reaches_the_audit_trail() {
         "ask-deny line must name the capability, got: {ask_line}"
     );
     assert!(
-        ask_line.contains("denied by user"),
+        ask_line.contains("no prompt channel"),
         "ask-deny line must carry the reason, got: {ask_line}"
     );
 }
@@ -668,13 +668,15 @@ fn instantiation_header_warns_when_declared_ask_has_no_prompt_channel() {
     let warning = lines
         .next()
         .unwrap_or_else(|| panic!("no second stderr line (warning) after header: {stderr}"));
-    // Deliberately specific: a per-access "? ask-deny ... denied by user"
+    // Deliberately positional, not just textual: a per-access "? ask-deny"
     // exception line (from the actual failed read) also starts with
-    // "audit: ", also names wasi:filesystem, and also contains "denied" —
-    // so a looser assertion here would pass even with the instantiation-time
-    // warning entirely disabled, as long as an unrelated per-access denial
-    // happened to land as line two. "no prompt channel" is wording only the
-    // new warning uses.
+    // "audit: ", also names wasi:filesystem, and — since M1 — also says "no
+    // prompt channel" (the same reason a no-channel `ask` degrade now
+    // carries at the per-access level too). A text-only assertion could pass
+    // even with the instantiation-time warning entirely disabled, as long as
+    // that unrelated per-access denial happened to land as line two — this
+    // relies on the header being line one and the warning always following
+    // it immediately, before any tool-call event, to pick out the right line.
     assert!(
         warning.starts_with("audit: ") && warning.contains("no prompt channel"),
         "expected the ask-but-no-prompt-channel warning right after the header, got: {warning}"
@@ -896,7 +898,7 @@ fn sockets_ask_resolution_reaches_the_audit_trail() {
         "ask-deny line must name the capability, got: {ask_line}"
     );
     assert!(
-        ask_line.contains("denied by user"),
+        ask_line.contains("no prompt channel"),
         "ask-deny line must carry the reason, got: {ask_line}"
     );
 }

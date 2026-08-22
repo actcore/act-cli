@@ -58,8 +58,8 @@ fn find_exception<'a>(stderr: &'a str, prefix: &str) -> &'a str {
 /// `call_drop`) — there is no channel to a human, so `ask` degrades to deny
 /// per ACT-CONSENT.md §5. Asserted deliberately as the deny case, not a
 /// surprise: this is what every headless invocation with no grant looks like.
-#[tokio::test]
-async fn ask_without_a_channel_denies() {
+#[test]
+fn ask_without_a_channel_denies() {
     let out = call_drop("consent-canary.wasm", "analytics", &[]);
     assert!(
         !out.status.success(),
@@ -71,6 +71,15 @@ async fn ask_without_a_channel_denies() {
         "the canary must report the refusal as std:capability-denied, got: {stderr}"
     );
 
+    // `find_exception`'s prefix match already pins the decision
+    // (ask-deny); these two pin the class and the key. Deliberately not
+    // asserting a specific reason string here — M1 changed it from "denied
+    // by user" (which lied: nobody was consulted) to "no prompt channel",
+    // and pinning either exact wording in this end-to-end test would only
+    // make it brittle against the next such correction. `record.rs`'s
+    // `a_no_channel_degrade_is_not_attributed_to_the_user` and
+    // `fs_policy.rs`'s `ask_resolution_with_no_channel_is_not_attributed_to_the_user`
+    // are where that reason string is actually pinned.
     let ask_line = find_exception(&stderr, "audit: ? ask-deny");
     assert!(
         ask_line.contains("db:drop"),
@@ -80,16 +89,12 @@ async fn ask_without_a_channel_denies() {
         ask_line.contains("analytics"),
         "ask-deny line must name the key, got: {ask_line}"
     );
-    assert!(
-        ask_line.contains("denied by user"),
-        "ask-deny line must carry the reason, got: {ask_line}"
-    );
 }
 
 /// `--deny db:drop` makes the refusal explicit, rather than it falling out
 /// of having no channel — the companion negative case to the default above.
-#[tokio::test]
-async fn an_explicit_deny_refuses() {
+#[test]
+fn an_explicit_deny_refuses() {
     let out = call_drop("consent-canary.wasm", "analytics", &["--deny", "db:drop"]);
     assert!(
         !out.status.success(),
@@ -119,8 +124,8 @@ async fn an_explicit_deny_refuses() {
 /// constraint, ACT-CONSENT.md §3.1), same call shape, only the key and the
 /// grant differ — so this is squarely the operator's `--grant` doing the
 /// bounding, not the manifest.
-#[tokio::test]
-async fn an_allowlist_grant_bounds_which_databases() {
+#[test]
+fn an_allowlist_grant_bounds_which_databases() {
     let grant = r#"{"db:drop":{"mode":"allowlist","allow":[{"key":"test_*"}]}}"#;
 
     let allowed = call_drop("consent-canary.wasm", "test_scratch", &["--grant", grant]);
@@ -136,14 +141,27 @@ async fn an_allowlist_grant_bounds_which_databases() {
         Some("test_scratch"),
         "the canary reports the allowed key, having touched nothing: {stdout}"
     );
+    // I2: a consent decision never folds into the rollup (it is a semantic
+    // class, not a physical one) — it must appear as its own immediate
+    // `✓ allow` line naming the key, not as a `db:drop:` clause folded into
+    // the tool call's rollup line the way a filesystem `read` would be.
     let allowed_stderr = String::from_utf8_lossy(&allowed.stderr);
+    let allow_line = find_exception(&allowed_stderr, "audit: \u{2713} allow");
+    assert!(
+        allow_line.contains("db:drop"),
+        "allow line must name the class, got: {allow_line}"
+    );
+    assert!(
+        allow_line.contains("test_scratch"),
+        "allow line must name the allowed key, got: {allow_line}"
+    );
     let rollup = allowed_stderr
         .lines()
         .find(|l| l.starts_with("audit: \u{25cf}"))
         .unwrap_or_else(|| panic!("no rollup line in stderr: {allowed_stderr}"));
     assert!(
-        rollup.contains("db:drop"),
-        "rollup must carry the db:drop clause, got: {rollup}"
+        !rollup.contains("db:drop"),
+        "the allow must not also be folded into the rollup line, got: {rollup}"
     );
 
     let denied = call_drop("consent-canary.wasm", "production", &["--grant", grant]);
@@ -164,8 +182,8 @@ async fn an_allowlist_grant_bounds_which_databases() {
 /// `consent-canary`'s declaration is bare (no `[[allow]]` constraints), so
 /// the class itself is the whole of the ceiling and `open` authorizes every
 /// key.
-#[tokio::test]
-async fn allow_opens_the_declared_class() {
+#[test]
+fn allow_opens_the_declared_class() {
     let out = call_drop("consent-canary.wasm", "anything", &["--allow", "db:drop"]);
     assert!(
         out.status.success(),
@@ -179,6 +197,27 @@ async fn allow_opens_the_declared_class() {
         Some("anything"),
         "got: {stdout}"
     );
+
+    // I2: before the fix, an authorized `db:drop` folded into the same
+    // per-call rollup a filesystem read does, and this line would have read
+    // `db:drop: 1 request` — the class, but not *which* key was authorized.
+    // A consent decision must print immediately and name the key, the same
+    // way a credential issue does, and must not also appear in a rollup
+    // count for this class.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let allow_line = find_exception(&stderr, "audit: \u{2713} allow");
+    assert!(
+        allow_line.contains("db:drop"),
+        "allow line must name the class, got: {allow_line}"
+    );
+    assert!(
+        allow_line.contains("anything"),
+        "allow line must name the key that was authorized, got: {allow_line}"
+    );
+    assert!(
+        !stderr.contains("db:drop: 1 request"),
+        "the allow must not also be folded into a rollup count, got: {stderr}"
+    );
 }
 
 /// The paired undeclared artifact: identical compiled bytes, packed against
@@ -190,8 +229,8 @@ async fn allow_opens_the_declared_class() {
 /// line must say the class was never declared, not that a grant refused it
 /// or that an ask went unanswered, and no ask/elicitation must have been
 /// attempted at all.
-#[tokio::test]
-async fn an_undeclared_class_is_refused_without_a_prompt() {
+#[test]
+fn an_undeclared_class_is_refused_without_a_prompt() {
     let out = call_drop(
         "consent-canary-undeclared.wasm",
         "analytics",
