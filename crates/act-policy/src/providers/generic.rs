@@ -1,8 +1,9 @@
 //! Generic (semantic) capability provider — glob matching over attrs.
 //!
 //! Handles any capability class that is not wasi:filesystem, wasi:http, or
-//! wasi:sockets. Uses `globset` to match constraint key→value pairs against
-//! `op.attrs`.
+//! wasi:sockets. Uses `globset` to match constraint dimension→value pairs
+//! against `op.attrs` — except the dimension named `key`, which resolves
+//! from `op.key` instead (see `KEY_DIMENSION`).
 //!
 //! **The manifest is the ceiling.** A class absent from the component's
 //! `act:component` manifest is denied under every mode, and no grant widens
@@ -273,6 +274,54 @@ mod tests {
             attrs: serde_json::Value::Null,
         };
         assert_eq!(c.classify(&op("test_events")), Decision::Allow);
+        assert_eq!(c.classify(&op("production")), Decision::Deny);
+    }
+
+    #[tokio::test]
+    async fn allowlist_grant_wider_than_the_declaration_does_not_widen_the_ceiling() {
+        // The grant's allowlist names `*` — deliberately wider than the
+        // declaration. The declaration still gates: only test_* is in ceiling.
+        let declared = vec![serde_json::json!({"key": "test_*"})];
+        let grant = CapabilityGrant {
+            mode: PolicyMode::Allowlist,
+            allow: vec![serde_json::json!({"key": "*"})],
+            deny: vec![],
+        };
+        let c = GenericProvider
+            .resolve("db:drop", Some(&declared), &grant)
+            .await
+            .unwrap();
+        let op = |key: &str| ResourceOp {
+            cap_id: "db:drop".into(),
+            key: key.into(),
+            action: "request".into(),
+            attrs: serde_json::Value::Null,
+        };
+        assert_eq!(c.classify(&op("test_events")), Decision::Allow);
+        assert_eq!(c.classify(&op("production")), Decision::Deny);
+    }
+
+    #[tokio::test]
+    async fn ask_grant_wider_than_the_declaration_does_not_widen_the_ceiling() {
+        // Same shape under Ask: the grant's allowlist names `*`, but the
+        // declaration still gates which ops are even in ceiling to be asked about.
+        let declared = vec![serde_json::json!({"key": "test_*"})];
+        let grant = CapabilityGrant {
+            mode: PolicyMode::Ask,
+            allow: vec![serde_json::json!({"key": "*"})],
+            deny: vec![],
+        };
+        let c = GenericProvider
+            .resolve("db:drop", Some(&declared), &grant)
+            .await
+            .unwrap();
+        let op = |key: &str| ResourceOp {
+            cap_id: "db:drop".into(),
+            key: key.into(),
+            action: "request".into(),
+            attrs: serde_json::Value::Null,
+        };
+        assert_eq!(c.classify(&op("test_events")), Decision::Ask);
         assert_eq!(c.classify(&op("production")), Decision::Deny);
     }
 

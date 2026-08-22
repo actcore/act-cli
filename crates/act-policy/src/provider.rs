@@ -182,9 +182,9 @@ mod tests {
         let r = ProviderRegistry::with_builtins();
         let provider = r.lookup(crate::providers::credentials::CAP_CREDENTIALS);
         // If credentials provider is not registered, lookup would return the
-        // generic fallback. We verify by checking that resolving with an empty
-        // declared set in Ask mode yields Deny (credentials provider behavior),
-        // not Ask (generic provider behavior which treats undeclared as unbounded).
+        // generic fallback instead. We verify by checking that resolving with
+        // no declared set (`None`) in Ask mode yields Deny — the credentials
+        // provider's own undeclared-denies-outright behavior.
         let ask_grant = crate::grant::CapabilityGrant {
             mode: crate::grant::PolicyMode::Ask,
             allow: vec![],
