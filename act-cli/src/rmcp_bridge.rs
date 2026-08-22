@@ -4,9 +4,6 @@ use crate::runtime;
 // What stays here is how it is served — transports, the `ServerHandler`, and
 // finding the component to talk to.
 use act_mcp::*;
-use act_types::cbor;
-use act_types::constants::ERR_INVALID_ARGS;
-use rmcp::model::ContentBlock;
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -276,19 +273,10 @@ impl ActRmcpBridge {
         metadata: runtime::Metadata,
         context: &rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
-        let args_obj = arguments.unwrap_or_default();
-        let mut wit_args: Vec<(String, Vec<u8>)> = Vec::with_capacity(args_obj.len());
-        for (key, value) in args_obj {
-            let cbor_bytes = cbor::json_to_cbor(&value).map_err(|_| {
-                rmcp::ErrorData::new(
-                    rmcp::model::ErrorCode::INVALID_PARAMS,
-                    format!("encoding `{key}` as CBOR failed"),
-                    None,
-                )
-            })?;
-            wit_args.push((key, cbor_bytes));
-        }
+        let wit_args = open_session_args(arguments)?;
 
+        // What is specific to this host: consent is asked through the MCP
+        // peer. The toolserver has no such channel and passes none.
         let capabilities = context.client_capabilities();
         let session = self
             .handle
@@ -298,20 +286,7 @@ impl ActRmcpBridge {
             .await
             .map_err(component_error_to_mcp)?;
 
-        let metadata_json: serde_json::Map<String, Value> = session
-            .metadata
-            .iter()
-            .filter_map(|(k, v)| Some((k.clone(), cbor::cbor_to_json(v).ok()?)))
-            .collect();
-        let payload = serde_json::json!({
-            "id": session.id,
-            "metadata": metadata_json,
-        });
-        let json_text = serde_json::to_string(&payload).unwrap_or_default();
-
-        Ok(rmcp::model::CallToolResult::success(vec![
-            ContentBlock::text(json_text),
-        ]))
+        Ok(open_session_result(&session))
     }
 
     async fn virtual_close_session(
@@ -319,19 +294,7 @@ impl ActRmcpBridge {
         arguments: Option<rmcp::model::JsonObject>,
         _metadata: runtime::Metadata,
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
-        let session_id = arguments
-            .as_ref()
-            .and_then(|obj| obj.get("session_id"))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                rmcp::ErrorData::new(
-                    rmcp::model::ErrorCode::INVALID_PARAMS,
-                    "close_session requires `session_id` (string)",
-                    Some(error_detail_json(ERR_INVALID_ARGS, &[])),
-                )
-            })?
-            .to_string();
-
+        let session_id = close_session_id(arguments)?;
         self.handle
             .close_session(session_id)
             .await

@@ -552,3 +552,64 @@ pub fn trace_metadata_from_meta(
     }
     out
 }
+
+// ── Session lifecycle, the parts that do not depend on how consent is asked ──
+//
+// A host still makes the call itself: the `act` CLI services consent through
+// the MCP peer, while the toolserver has no consent surface yet and passes
+// none. Everything either side of that call is the same translation, so it
+// lives here.
+
+/// Encode `open_session` arguments from MCP JSON into the WIT pairs the
+/// session-provider takes.
+pub fn open_session_args(
+    arguments: Option<rmcp::model::JsonObject>,
+) -> Result<Vec<(String, Vec<u8>)>, ErrorData> {
+    let args_obj = arguments.unwrap_or_default();
+    let mut wit_args: Vec<(String, Vec<u8>)> = Vec::with_capacity(args_obj.len());
+    for (key, value) in args_obj {
+        let cbor_bytes = cbor::json_to_cbor(&value).map_err(|_| {
+            ErrorData::new(
+                ErrorCode::INVALID_PARAMS,
+                format!("encoding `{key}` as CBOR failed"),
+                None,
+            )
+        })?;
+        wit_args.push((key, cbor_bytes));
+    }
+    Ok(wit_args)
+}
+
+/// Render an opened session as the result an agent sees: the id it must send
+/// back as `std:session-id`, plus whatever the component attached.
+pub fn open_session_result(
+    session: &act_runtime::act::sessions::types::Session,
+) -> rmcp::model::CallToolResult {
+    let metadata_json: serde_json::Map<String, Value> = session
+        .metadata
+        .iter()
+        .filter_map(|(k, v)| Some((k.clone(), cbor::cbor_to_json(v).ok()?)))
+        .collect();
+    let payload = serde_json::json!({
+        "id": session.id,
+        "metadata": metadata_json,
+    });
+    let json_text = serde_json::to_string(&payload).unwrap_or_default();
+    rmcp::model::CallToolResult::success(vec![ContentBlock::text(json_text)])
+}
+
+/// The session id `close_session` requires, or the error an agent can act on.
+pub fn close_session_id(arguments: Option<rmcp::model::JsonObject>) -> Result<String, ErrorData> {
+    arguments
+        .as_ref()
+        .and_then(|obj| obj.get("session_id"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            ErrorData::new(
+                ErrorCode::INVALID_PARAMS,
+                "close_session requires `session_id` (string)",
+                Some(error_detail_json(ERR_INVALID_ARGS, &[])),
+            )
+        })
+        .map(str::to_string)
+}
