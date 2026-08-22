@@ -4,6 +4,7 @@
 //! ceiling once per instantiation; the matchers classify each operation.
 //! Host-only async consent helpers live behind the `host` feature.
 
+pub mod ceilings;
 pub mod decision;
 pub mod effective;
 pub mod fs_matcher;

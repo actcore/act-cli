@@ -2,6 +2,7 @@
 //! Reuses the `act-policy` PDP; only the JSON marshalling lives here.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use futures::FutureExt;
 use serde::Deserialize;
@@ -11,13 +12,9 @@ use act_policy::Decision;
 use act_policy::grant::{CapabilityGrant, GrantPolicy, PolicyMode};
 use act_policy::provider::{CompiledCeiling, ProviderRegistry, ResourceOp};
 
-/// Physical classes we always resolve a ceiling for (native does the same: an
-/// undeclared physical cap resolves against an empty declaration → hard deny).
-const PHYSICAL: [&str; 3] = ["wasi:filesystem", "wasi:http", "wasi:sockets"];
-
 /// The compiled per-run policy: one ceiling per capability id.
 pub struct Kernel {
-    ceilings: BTreeMap<String, Box<dyn CompiledCeiling>>,
+    ceilings: BTreeMap<String, Arc<dyn CompiledCeiling>>,
 }
 
 // ---- JSON deserialization mirrors act-cli/src/config.rs (GrantPolicy has no serde) ----
@@ -91,31 +88,12 @@ impl Kernel {
         let declared = parse_declared(declared_caps_json)?;
         let policy = parse_policy(policy_json)?;
         let registry = ProviderRegistry::with_builtins();
-
-        // Resolve a ceiling for every physical class plus every declared cap id
-        // (so semantic/generic caps declared by the component are classifiable).
-        let mut ids: Vec<String> = PHYSICAL.iter().map(|s| s.to_string()).collect();
-        for id in declared.keys() {
-            if !ids.contains(id) {
-                ids.push(id.clone());
-            }
-        }
-
-        let mut ceilings: BTreeMap<String, Box<dyn CompiledCeiling>> = BTreeMap::new();
-        let empty: Vec<Value> = Vec::new();
-        for id in ids {
-            let decl = declared.get(&id).unwrap_or(&empty);
-            let grant = policy.resolve(&id);
-            let ceiling = registry
-                .lookup(&id)
-                .resolve(&id, Some(decl), &grant)
-                // Under --no-default-features every provider's `resolve` is
-                // synchronous (no DNS); the future is Ready on first poll.
-                .now_or_never()
-                .expect("resolve completes synchronously without the host feature")
-                .map_err(|e| format!("resolve {id}: {e}"))?;
-            ceilings.insert(id, ceiling);
-        }
+        let ceilings = act_policy::ceilings::resolve_ceilings(&registry, &declared, &policy)
+            // Under --no-default-features every provider's `resolve` is
+            // synchronous (no DNS); the future is Ready on first poll.
+            .now_or_never()
+            .expect("resolve completes synchronously without the host feature")
+            .map_err(|e| format!("resolve ceilings: {e}"))?;
         Ok(Kernel { ceilings })
     }
 
@@ -215,5 +193,15 @@ mod tests {
         let k = Kernel::build(declared, policy).unwrap();
         let op = r#"{"capId":"wasi:http","key":"api.example.com:443","action":"GET","attrs":{"scheme":"https"}}"#;
         assert_eq!(k.classify_json(op).unwrap(), "deny");
+    }
+
+    #[test]
+    fn summary_covers_act_credentials() {
+        let k = Kernel::build("{}", "{}").unwrap();
+        let summary = k.ceiling_summary_json();
+        assert!(
+            summary.contains("act:credentials"),
+            "the browser PDP reports a row for every always-resolved class: {summary}"
+        );
     }
 }
