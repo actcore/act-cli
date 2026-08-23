@@ -18,7 +18,9 @@ tracing.workspace = true
 shellexpand = "3"
 thiserror = "2"
 cidr = "0.3"
-tokio = { workspace = true, features = ["net"], optional = true }
+# `sync` + `time` back the out-of-band consent queue: a question parks on a
+# oneshot and expires on a deadline. Host-only, like the rest of consent.
+tokio = { workspace = true, features = ["net", "sync", "time"], optional = true }
 # Regular (not host-gated): the provider trait's `resolve` is async and the
 # providers live in the wasm-clean core, so async-trait must compile for wasm
 # too. The generated futures capture only `Send` data, so the default `Send`
