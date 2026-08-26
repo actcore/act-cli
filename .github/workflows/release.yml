@@ -142,6 +142,24 @@ jobs:
         # is index-resolvable for its dependents (the publish race). The vendored
         # wit/deps (no longer gitignored) keep the tree clean for `cargo publish`,
         # and --allow-branch '*' permits the detached HEAD of a tag checkout.
+        #
+        # A CRATE THIS WORKFLOW HAS NEVER PUBLISHED WILL FAIL HERE. crates.io
+        # refuses to create a crate from a Trusted Publishing token:
+        #
+        #   403 Forbidden: Trusted Publishing tokens do not support creating
+        #   new crates. Publish the crate manually, first
+        #
+        # So the first version of every new crate goes out by hand, with a
+        # personal token, BEFORE the release is tagged:
+        #
+        #   cargo publish -p <new-crate>      # in dependency order
+        #
+        # then configure Trusted Publishing for it on crates.io, and CI takes
+        # every version after. This is not a rare case — extracting a crate out
+        # of `act-cli` is ordinary here, and 0.12.0 hit it three times over
+        # (act-credentials, act-runtime, act-mcp) with the publish stopping
+        # halfway: act-policy and act-store went out, the rest did not, and the
+        # GitHub Release job was skipped because this one failed.
         run: cargo release publish --workspace --execute --no-confirm --allow-branch '*'
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
