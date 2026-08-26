@@ -34,6 +34,8 @@ pub mod discovery;
 pub mod issuer;
 pub mod listener;
 pub mod pkce;
+pub mod refresh;
+pub mod refresher;
 pub mod registration;
 pub mod run;
 pub mod state;

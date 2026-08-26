@@ -13,6 +13,8 @@ keywords = ["act", "wasm", "credentials"]
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 toml.workspace = true
+# Advisory file locking, as act-store already uses for the OCI store.
+fs4 = { version = "1", features = ["sync"] }
 thiserror.workspace = true
 
 [dev-dependencies]

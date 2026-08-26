@@ -28,6 +28,29 @@ pub trait CredentialStore: Send + Sync {
     /// sees which key a `set` actually landed under. Component names, like
     /// `SecretInfo`, cannot carry a value.
     fn components(&self) -> Result<Vec<String>, StoreError>;
+
+    /// Read, mutate and write one record **atomically against other processes**.
+    ///
+    /// `Ok(None)` when the key does not exist; the mutation is not run.
+    ///
+    /// This exists because `get` then `put` is not the same thing. Two `act`
+    /// processes sharing the default store — two MCP servers under one client
+    /// is the ordinary case — can interleave there, and the loser's write wins
+    /// with data read before the winner's. For an OAuth refresh that is not a
+    /// lost update but a dead credential: with refresh-token rotation the
+    /// overwritten token is the only one the server still honours, and the user
+    /// is sent back to `act login` with nothing to explain it.
+    ///
+    /// An implementation MUST hold an exclusive advisory lock across the whole
+    /// read-modify-write, and the caller MUST re-check inside the closure what
+    /// it decided outside it: by the time the lock is held, the work may already
+    /// have been done by whoever held it first.
+    fn update(
+        &self,
+        component: &str,
+        key: &str,
+        mutate: &mut dyn FnMut(&mut SecretRecord),
+    ) -> Result<Option<SecretRecord>, StoreError>;
 }
 
 // There is deliberately no `writable()`. It existed for the read-only reference

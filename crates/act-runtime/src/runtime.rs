@@ -69,6 +69,10 @@ pub struct CredentialsSource {
     /// Backend name, as `act secret --credentials-backend` spells it. Never
     /// inferred: there is no mode that picks one for you.
     pub backend: Option<String>,
+    /// How a credential too close to expiry is renewed before it is served.
+    /// `None` means no renewal: a near-expiry credential is served as it is,
+    /// which is what an embedder with no OAuth upstream wants.
+    pub refresher: Option<Arc<dyn crate::credentials::CredentialRefresher>>,
 }
 
 /// How an `ask`-mode capability gate reaches a human, and where its answers
@@ -163,7 +167,11 @@ impl ComponentRuntime {
         };
 
         let credentials = match &config.credentials {
-            Some(source) => credential_host(component, source.backend.as_deref())?,
+            Some(source) => credential_host(
+                component,
+                source.backend.as_deref(),
+                source.refresher.clone(),
+            )?,
             None => None,
         };
 
@@ -235,6 +243,7 @@ impl RunningComponent {
 fn credential_host(
     component: &ComponentRef,
     backend: Option<&str>,
+    refresher: Option<Arc<dyn crate::credentials::CredentialRefresher>>,
 ) -> Result<Option<Arc<crate::credentials::CredentialHost>>> {
     let component_ref = crate::resolve::profile_key(component);
     let Some(choice) = crate::credentials::resolve_backend(backend)? else {
@@ -243,10 +252,11 @@ fn credential_host(
     let root = crate::credentials::backend_root(&choice).to_path_buf();
     let store = act_credentials::backend::select(choice, &root)
         .with_context(|| format!("opening credential store at {}", root.display()))?;
-    Ok(Some(Arc::new(crate::credentials::CredentialHost::new(
-        Arc::from(store),
-        component_ref,
-    ))))
+    let host = crate::credentials::CredentialHost::new(Arc::from(store), component_ref);
+    Ok(Some(Arc::new(match refresher {
+        Some(r) => host.with_refresher(r),
+        None => host,
+    })))
 }
 
 #[cfg(test)]
@@ -270,7 +280,7 @@ mod tests {
 
         for spelling in ["./x.wasm", "x.wasm"] {
             let component: ComponentRef = spelling.parse().unwrap();
-            let host = credential_host(&component, Some(&backend))
+            let host = credential_host(&component, Some(&backend), None)
                 .unwrap()
                 .expect("an explicitly named backend always yields a host");
             assert_eq!(

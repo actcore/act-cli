@@ -100,4 +100,58 @@ impl CredentialStore for FileStore {
     fn components(&self) -> Result<Vec<String>, StoreError> {
         Ok(Index::load(&self.root)?.entries.into_keys().collect())
     }
+
+    fn update(
+        &self,
+        component: &str,
+        key: &str,
+        mutate: &mut dyn FnMut(&mut SecretRecord),
+    ) -> Result<Option<SecretRecord>, StoreError> {
+        // The lock is taken on a file beside the store rather than on the store
+        // itself: `save` replaces the store by rename, so a lock held on the
+        // old inode would protect a file nobody is writing to any more.
+        let _guard = ExclusiveLock::acquire(&self.root)?;
+
+        let mut s = self.load()?;
+        let Some(rec) = s.entries.get_mut(component).and_then(|m| m.get_mut(key)) else {
+            return Ok(None);
+        };
+        mutate(rec);
+        let updated = rec.clone();
+        self.save(&s)?;
+
+        let mut idx = Index::load(&self.root)?;
+        idx.upsert(component, updated.info(key));
+        idx.save(&self.root)?;
+        Ok(Some(updated))
+    }
+}
+
+/// An exclusive advisory lock over one credential store.
+///
+/// Released when dropped, including on panic — and by the OS if the process
+/// dies, which is what keeps a crashed `act` from wedging every other one.
+struct ExclusiveLock(std::fs::File);
+
+impl ExclusiveLock {
+    fn acquire(root: &Path) -> Result<Self, StoreError> {
+        let path = root.join("secrets.lock");
+        crate::index::create_dir_private(root)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)?;
+        // Blocking, not try-and-fail: the wait is bounded by one HTTP round
+        // trip against a token endpoint, and failing here would surface as a
+        // credential error on a call that had nothing wrong with it.
+        <std::fs::File as fs4::FileExt>::lock(&file)?;
+        Ok(Self(file))
+    }
+}
+
+impl Drop for ExclusiveLock {
+    fn drop(&mut self) {
+        let _ = <std::fs::File as fs4::FileExt>::unlock(&self.0);
+    }
 }

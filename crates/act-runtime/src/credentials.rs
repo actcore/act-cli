@@ -20,7 +20,7 @@
 //! (which may await a human), and then calls the synchronous host. Nothing
 //! about the credential logic itself has to be written twice, or written async.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -68,10 +68,134 @@ impl HostError {
     }
 }
 
+/// How a credential too close to expiry is renewed.
+///
+/// A seam, and deliberately a narrow one. Renewing means speaking OAuth to an
+/// authorization server — discovery, a client registration, a token endpoint —
+/// and this runtime holds no opinion about protocols: it knows only that a
+/// stored value carries an expiry and an issuer, and that something outside can
+/// turn those into a fresh value. `act-cli` implements it over
+/// `act:credentials`' OAuth flow; an embedder with a different upstream
+/// implements it differently, or passes none and gets no renewal.
+///
+/// Nothing here mentions OAuth for that reason. What crosses is what any
+/// renewal must produce.
+#[async_trait::async_trait]
+pub trait CredentialRefresher: Send + Sync {
+    /// Renew one credential. The error is a diagnostic for the host's log — it
+    /// reaches no component, and MUST NOT carry credential material.
+    async fn refresh(&self, req: RefreshRequest<'_>) -> Result<Refreshed, String>;
+}
+
+/// What the runtime knows and a refresher needs.
+pub struct RefreshRequest<'a> {
+    /// The authorization server the credential was acquired from, as recorded
+    /// in the host-only compartment when it was acquired.
+    pub issuer: &'a str,
+    /// The host-only refresh token. It never leaves the host by any other path.
+    pub refresh_token: &'a str,
+    /// Unix seconds, read once by the caller so a whole decision shares one
+    /// clock reading.
+    pub now: u64,
+}
+
+/// What a renewal produced.
+pub struct Refreshed {
+    pub access_token: String,
+    pub expires_at: Option<u64>,
+    pub scopes: Vec<String>,
+    /// `None` means the server rotated nothing and the stored one still works.
+    /// `Some` always replaces: a rotating server invalidates the old, and
+    /// keeping it is how a credential dies at the *next* refresh instead of
+    /// this one.
+    pub refresh_token: Option<String>,
+}
+
+/// Unix seconds, or 0 if the clock is before the epoch — which makes every
+/// credential look far from expiry rather than expired, so a broken clock
+/// cannot stampede every session into refreshing at once.
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// The fields of this record that are too close to expiry to serve.
+///
+/// Only ever the `std:oauth2`-shaped ones: `needs_refresh` reads
+/// `std:expires-at` out of an object, and a `std:string` field has no object to
+/// read it from. That is the whole of why refresh cannot touch a sibling.
+fn due_fields(rec: &act_credentials::record::SecretRecord, now: u64) -> Vec<String> {
+    rec.fields
+        .iter()
+        .filter(|(_, v)| act_credentials::expiry::needs_refresh(v.expose(), now))
+        .map(|(k, _)| k.clone())
+        .collect()
+}
+
+/// Write a renewal into a record: one field's value, and its host-only half.
+///
+/// Every sibling is untouched because none is named here. The design calls this
+/// the structural payoff of typing fields rather than credentials — "refresh
+/// dropped the tenant id" is a bug this shape cannot express.
+fn apply_refresh(rec: &mut act_credentials::record::SecretRecord, field: &str, r: &Refreshed) {
+    let mut value = serde_json::Map::new();
+    value.insert(
+        "std:access-token".into(),
+        serde_json::Value::String(r.access_token.clone()),
+    );
+    if let Some(exp) = r.expires_at {
+        value.insert("std:expires-at".into(), serde_json::Value::from(exp));
+    }
+    if !r.scopes.is_empty() {
+        value.insert(
+            "std:scopes".into(),
+            serde_json::Value::from(r.scopes.clone()),
+        );
+    }
+    rec.fields.insert(
+        field.to_string(),
+        act_credentials::record::SecretValue::new(serde_json::Value::Object(value)),
+    );
+
+    // A rotated token replaces; an absent one leaves what was there. Both the
+    // record's expiry and the field's move together, so `act secret list` does
+    // not go on showing the old one.
+    if let Some(new_refresh) = &r.refresh_token {
+        rec.host_only.insert(
+            refresh_token_slot(field),
+            act_credentials::record::SecretValue::new(new_refresh.clone()),
+        );
+    }
+    rec.expires_at = r.expires_at.map(|e| i64::try_from(e).unwrap_or(i64::MAX));
+}
+
+/// Where the issuer of a `std:oauth2` field is kept, alongside its refresh
+/// token: `<field key>:std:issuer` and `<field key>:std:refresh-token`.
+///
+/// Namespaced by field key because a credential may hold an OAuth token per
+/// upstream, and a compartment keyed by member name alone would have the second
+/// overwrite the first — a loss that surfaces only at the first refresh.
+pub fn issuer_slot(field: &str) -> String {
+    format!("{field}:std:issuer")
+}
+
+pub fn refresh_token_slot(field: &str) -> String {
+    format!("{field}:std:refresh-token")
+}
+
 pub struct CredentialHost {
     store: Arc<dyn CredentialStore>,
     component: String,
     live_sessions: Mutex<HashSet<String>>,
+    refresher: Option<Arc<dyn CredentialRefresher>>,
+    /// One lock per credential key, so two sessions renewing the same
+    /// credential inside this process take turns. The store's advisory lock
+    /// covers other processes; this covers the far more common case of two
+    /// live sessions against one upstream, where a rotation would otherwise
+    /// have each invalidate the other's token.
+    refresh_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl CredentialHost {
@@ -80,7 +204,18 @@ impl CredentialHost {
             store,
             component,
             live_sessions: Mutex::new(HashSet::new()),
+            refresher: None,
+            refresh_locks: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Give this host a way to renew credentials. Without one, a near-expiry
+    /// credential is served as it is: the alternative — refusing it — would
+    /// break every component whose upstream issues short-lived tokens, and the
+    /// host has nothing better to offer.
+    pub fn with_refresher(mut self, refresher: Arc<dyn CredentialRefresher>) -> Self {
+        self.refresher = Some(refresher);
+        self
     }
 
     /// The component reference this host serves — `resolve::profile_key` of
@@ -140,6 +275,103 @@ impl CredentialHost {
                 Err(HostError::Unavailable(STORE_UNREADABLE.into()))
             }
         }
+    }
+
+    /// Renew any field of this credential that is too close to expiry, before
+    /// it is served.
+    ///
+    /// Silent by design (design §5.4): the component asked for a credential and
+    /// gets one that works. It never sees a refresh token and never re-opens a
+    /// session because one expired.
+    ///
+    /// **Failure is not fatal.** A renewal that cannot happen — no refresher,
+    /// no issuer recorded, the server refusing — leaves the stored value alone
+    /// and lets it be served. It may still work: the skew is a margin, not an
+    /// expiry, and a token inside it is usually still valid. Refusing here
+    /// would turn a renewal problem into a failed tool call for a credential
+    /// that was very likely fine, and the component's own upstream is the thing
+    /// that actually knows. The attempt is logged; the reason never reaches the
+    /// guest.
+    pub async fn refresh_if_due(&self, key: &str, now: u64) {
+        let Some(refresher) = self.refresher.clone() else {
+            return;
+        };
+        // Cheap check first, outside the lock: the overwhelming majority of
+        // calls are nowhere near expiry and must not queue behind anything.
+        let Ok(Some(rec)) = self.store.get(&self.component, key) else {
+            return;
+        };
+        if due_fields(&rec, now).is_empty() {
+            return;
+        }
+
+        let lock = self.lock_for(key);
+        let _held = lock.lock().await;
+
+        // Re-read and re-decide **after** acquiring the lock. Whoever held it
+        // first may have already renewed this very credential, and renewing
+        // again would spend a rotation to replace a token that is fresh.
+        let Ok(Some(rec)) = self.store.get(&self.component, key) else {
+            return;
+        };
+        for field in due_fields(&rec, now) {
+            let (Some(issuer), Some(refresh_token)) = (
+                rec.host_only
+                    .get(&issuer_slot(&field))
+                    .and_then(|v| v.expose_str())
+                    .map(str::to_string),
+                rec.host_only
+                    .get(&refresh_token_slot(&field))
+                    .and_then(|v| v.expose_str())
+                    .map(str::to_string),
+            ) else {
+                // Acquired before the host recorded either, or provisioned by
+                // hand from a token someone else obtained. Nothing to renew
+                // with; the value stands.
+                tracing::debug!(
+                    field = %field,
+                    "credential is near expiry but carries no issuer and refresh token"
+                );
+                continue;
+            };
+
+            let refreshed = match refresher
+                .refresh(RefreshRequest {
+                    issuer: &issuer,
+                    refresh_token: &refresh_token,
+                    now,
+                })
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(field = %field, error = %e, "credential refresh failed");
+                    continue;
+                }
+            };
+
+            let applied = self.store.update(&self.component, key, &mut |rec| {
+                apply_refresh(rec, &field, &refreshed);
+            });
+            match applied {
+                Ok(_) => tracing::info!(
+                    component = %self.component,
+                    key = %key,
+                    field = %field,
+                    "credential refreshed"
+                ),
+                Err(e) => tracing::warn!(error = %e, "storing a refreshed credential failed"),
+            }
+        }
+    }
+
+    fn lock_for(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.refresh_locks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(key.to_string())
+            .or_default()
+            .clone()
     }
 
     /// Metadata only — no value can reach this path, because `SecretInfo` has
@@ -447,6 +679,11 @@ async fn serve_get(
     let Some(host) = &ctx.host else {
         return Err(store::SecretError::Unavailable(NO_STORE.into()));
     };
+    // Renew before serving, so what crosses is valid *now* (design §5.4). It
+    // happens after the gate: a component refused the class must not be able to
+    // make this host talk to an authorization server.
+    host.refresh_if_due(&want.key, now_unix()).await;
+
     // `want.kind` is not consulted, and there is nothing it could select
     // between: retrieval is never filtered by shape (ACT-AUTH §1.1.6). The
     // component reads the fields it knows by name.
@@ -544,6 +781,14 @@ mod tests {
         }
         fn components(&self) -> Result<Vec<String>, StoreError> {
             self.inner.components()
+        }
+        fn update(
+            &self,
+            component: &str,
+            key: &str,
+            mutate: &mut dyn FnMut(&mut act_credentials::record::SecretRecord),
+        ) -> Result<Option<act_credentials::record::SecretRecord>, StoreError> {
+            self.inner.update(component, key, mutate)
         }
     }
 
@@ -1217,5 +1462,281 @@ mod tests {
         });
         assert_eq!(ok.expires_at, Some(1_800_000_000));
         assert_eq!(ok.description.as_deref(), Some("note"));
+    }
+}
+
+/// Silent refresh, driven through `CredentialHost` with a refresher that
+/// answers from memory.
+///
+/// No network and no OAuth: what is under test is the runtime's half — when it
+/// decides to renew, what it writes, what it leaves alone, and what it does
+/// when renewal is impossible. The protocol half lives in `act-cli` and is
+/// tested there against a mock authorization server.
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+    use act_credentials::backend::file::FileStore;
+    use act_credentials::record::{SecretRecord, SecretValue};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const NOW: u64 = 1_700_000_000;
+
+    /// Hands back a fixed token and counts how often it was asked.
+    struct Canned {
+        calls: AtomicUsize,
+        rotates: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl CredentialRefresher for Canned {
+        async fn refresh(&self, req: RefreshRequest<'_>) -> Result<Refreshed, String> {
+            // Yield before counting, so a caller that is mid-refresh lets every
+            // other one run. Without this the first task finishes without ever
+            // suspending, the rest find a fresh credential at the cheap check
+            // outside the lock, and a test of the lock proves nothing about it.
+            tokio::task::yield_now().await;
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(req.issuer, "https://as.example.com");
+            assert_eq!(req.refresh_token, "old-refresh");
+            Ok(Refreshed {
+                access_token: "new-access".into(),
+                expires_at: Some(req.now + 3600),
+                scopes: vec!["read".into()],
+                refresh_token: self.rotates.then(|| "new-refresh".to_string()),
+            })
+        }
+    }
+
+    struct Refusing;
+
+    #[async_trait::async_trait]
+    impl CredentialRefresher for Refusing {
+        async fn refresh(&self, _: RefreshRequest<'_>) -> Result<Refreshed, String> {
+            Err("the authorization server refused".into())
+        }
+    }
+
+    fn record(expires_at: u64, with_host_only: bool) -> SecretRecord {
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert(
+            "acme:token".to_string(),
+            SecretValue::new(serde_json::json!({
+                "std:access-token": "old-access",
+                "std:expires-at": expires_at,
+                "std:scopes": ["read"],
+            })),
+        );
+        // A sibling, so "refresh touches one field" is a claim with something
+        // to be false about.
+        fields.insert("acme:tenant".to_string(), SecretValue::new("tenant-42"));
+        let mut host_only = std::collections::BTreeMap::new();
+        if with_host_only {
+            host_only.insert(
+                issuer_slot("acme:token"),
+                SecretValue::new("https://as.example.com"),
+            );
+            host_only.insert(
+                refresh_token_slot("acme:token"),
+                SecretValue::new("old-refresh"),
+            );
+        }
+        SecretRecord {
+            kind: "std:fields".into(),
+            fields,
+            host_only,
+            description: None,
+            expires_at: Some(expires_at as i64),
+        }
+    }
+
+    fn host_with(
+        dir: &std::path::Path,
+        rec: SecretRecord,
+        refresher: Arc<dyn CredentialRefresher>,
+    ) -> CredentialHost {
+        let store = FileStore::new(dir.to_path_buf());
+        store.put("comp", "default", &rec).unwrap();
+        CredentialHost::new(Arc::new(store), "comp".to_string()).with_refresher(refresher)
+    }
+
+    #[tokio::test]
+    async fn a_near_expiry_field_is_renewed_and_its_siblings_are_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let canned = Arc::new(Canned {
+            calls: AtomicUsize::new(0),
+            rotates: true,
+        });
+        let host = host_with(dir.path(), record(NOW + 10, true), canned.clone());
+
+        host.refresh_if_due("default", NOW).await;
+
+        host.note_session_opened("s1");
+        let served = host.get_secret("s1", "default").unwrap();
+        let token = served.fields["acme:token"].expose().clone();
+        assert_eq!(token["std:access-token"], "new-access");
+        assert_eq!(token["std:expires-at"], serde_json::json!(NOW + 3600));
+        assert_eq!(
+            served.fields["acme:tenant"].expose_str(),
+            Some("tenant-42"),
+            "a sibling was never in scope"
+        );
+        assert_eq!(canned.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_rotated_refresh_token_replaces_the_stored_one_and_never_leaves() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host_with(
+            dir.path(),
+            record(NOW + 10, true),
+            Arc::new(Canned {
+                calls: AtomicUsize::new(0),
+                rotates: true,
+            }),
+        );
+
+        host.refresh_if_due("default", NOW).await;
+
+        let stored = FileStore::new(dir.path().to_path_buf())
+            .get("comp", "default")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.host_only[&refresh_token_slot("acme:token")].expose_str(),
+            Some("new-refresh"),
+            "a rotating server invalidates the old; keeping it kills the next refresh"
+        );
+        // And the compartment still does not cross to a component.
+        let projected = serde_json::to_string(
+            &stored
+                .project()
+                .fields
+                .iter()
+                .map(|(k, v)| (k.clone(), v.expose().clone()))
+                .collect::<std::collections::BTreeMap<_, _>>(),
+        )
+        .unwrap();
+        assert!(!projected.contains("new-refresh"), "{projected}");
+        assert!(!projected.contains("old-refresh"), "{projected}");
+    }
+
+    #[tokio::test]
+    async fn a_server_that_rotates_nothing_leaves_the_stored_refresh_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host_with(
+            dir.path(),
+            record(NOW + 10, true),
+            Arc::new(Canned {
+                calls: AtomicUsize::new(0),
+                rotates: false,
+            }),
+        );
+        host.refresh_if_due("default", NOW).await;
+
+        let stored = FileStore::new(dir.path().to_path_buf())
+            .get("comp", "default")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.host_only[&refresh_token_slot("acme:token")].expose_str(),
+            Some("old-refresh"),
+            "absent means keep, not clear"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_credential_with_life_left_is_not_touched() {
+        let dir = tempfile::tempdir().unwrap();
+        let canned = Arc::new(Canned {
+            calls: AtomicUsize::new(0),
+            rotates: true,
+        });
+        let host = host_with(dir.path(), record(NOW + 86_400, true), canned.clone());
+
+        host.refresh_if_due("default", NOW).await;
+
+        assert_eq!(
+            canned.calls.load(Ordering::SeqCst),
+            0,
+            "renewing a healthy token spends a rotation for nothing"
+        );
+        host.note_session_opened("s1");
+        let served = host.get_secret("s1", "default").unwrap();
+        assert_eq!(
+            served.fields["acme:token"].expose()["std:access-token"],
+            "old-access"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refusal_leaves_the_credential_and_serves_it() {
+        // A renewal that cannot happen must not become a failed tool call: the
+        // skew is a margin, not an expiry, and the token is usually still good.
+        let dir = tempfile::tempdir().unwrap();
+        let host = host_with(dir.path(), record(NOW + 10, true), Arc::new(Refusing));
+
+        host.refresh_if_due("default", NOW).await;
+
+        host.note_session_opened("s1");
+        let served = host.get_secret("s1", "default").unwrap();
+        assert_eq!(
+            served.fields["acme:token"].expose()["std:access-token"],
+            "old-access",
+            "the stored value stands"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_credential_with_no_issuer_recorded_is_served_as_it_is() {
+        // Provisioned by hand from a token someone else obtained: there is
+        // nothing to renew with, and that is not an error.
+        let dir = tempfile::tempdir().unwrap();
+        let canned = Arc::new(Canned {
+            calls: AtomicUsize::new(0),
+            rotates: true,
+        });
+        let host = host_with(dir.path(), record(NOW + 10, false), canned.clone());
+
+        host.refresh_if_due("default", NOW).await;
+
+        assert_eq!(canned.calls.load(Ordering::SeqCst), 0);
+        host.note_session_opened("s1");
+        assert!(host.get_secret("s1", "default").is_ok());
+    }
+
+    #[tokio::test]
+    async fn concurrent_calls_renew_once() {
+        // Two live sessions against one upstream is routine. Without the
+        // per-key lock and the re-read after it, both refresh; with rotation
+        // the second invalidates the first and the user is sent back to
+        // `act login` with nothing to explain it.
+        let dir = tempfile::tempdir().unwrap();
+        let canned = Arc::new(Canned {
+            calls: AtomicUsize::new(0),
+            rotates: true,
+        });
+        let host = Arc::new(host_with(
+            dir.path(),
+            record(NOW + 10, true),
+            canned.clone(),
+        ));
+
+        let mut tasks = Vec::new();
+        for _ in 0..6 {
+            let host = host.clone();
+            tasks.push(tokio::spawn(async move {
+                host.refresh_if_due("default", NOW).await;
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
+
+        assert_eq!(
+            canned.calls.load(Ordering::SeqCst),
+            1,
+            "every task passed the cheap check before the first write landed, so \
+             it is the re-read after the lock that makes the rest no-ops"
+        );
     }
 }

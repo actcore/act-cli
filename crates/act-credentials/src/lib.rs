@@ -1,5 +1,6 @@
 //! Credential profiles, field definitions and storage for the ACT host.
 pub mod backend;
+pub mod expiry;
 pub mod field;
 // The file backend's own bookkeeping — the non-secret listing beside the store.
 // The `Index` type is not API: nothing outside reaches for it, and publishing it

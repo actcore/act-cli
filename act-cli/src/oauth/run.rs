@@ -50,8 +50,13 @@ pub struct Acquired {
     pub expires_at: Option<u64>,
     pub scopes: Vec<String>,
     /// Never projected to a component: it lives in the record's host-only
-    /// compartment and is what silent refresh will use.
+    /// compartment and is what silent refresh uses.
     pub refresh_token: Option<String>,
+    /// The authorization server this came from, recorded beside the refresh
+    /// token. Refresh re-derives the token endpoint from it rather than storing
+    /// one, so the endpoint cannot go stale and every discovery validation runs
+    /// again.
+    pub issuer: String,
 }
 
 #[derive(Deserialize)]
@@ -192,6 +197,7 @@ pub async fn acquire(req: Request<'_>, now: u64) -> Result<Acquired> {
     .await?;
 
     Ok(Acquired {
+        issuer: as_md.issuer.clone(),
         expires_at: token.expires_in.map(|s| now + s),
         scopes: token
             .scope

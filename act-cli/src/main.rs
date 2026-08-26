@@ -298,6 +298,16 @@ enum InspectCommand {
     },
 }
 
+/// Where this run's client registrations live: the same root as its credential
+/// store, because `act login` wrote the two together.
+///
+/// `None` when the backend cannot be resolved at all — the run then has no
+/// credential store either, so there is nothing to renew.
+fn credential_store_root(backend: Option<&str>) -> Option<std::path::PathBuf> {
+    let choice = act_runtime::credentials::resolve_backend(backend).ok()??;
+    Some(act_runtime::credentials::backend_root(&choice).to_path_buf())
+}
+
 /// The `fmt` layer's filter: the caller-configured `env_filter`, with the
 /// audit-only targets carved out.
 ///
@@ -675,6 +685,12 @@ async fn prepare_component_with_consent(
         },
         credentials: Some(runtime::CredentialsSource {
             backend: opts.credentials_backend.clone(),
+            // Renewal is this binary's to provide: the runtime knows a stored
+            // credential is near expiry, and `act-cli` is what knows how to
+            // talk to an authorization server about it.
+            refresher: credential_store_root(opts.credentials_backend.as_deref())
+                .map(oauth::refresher::OAuthRefresher::new)
+                .map(|r| r as std::sync::Arc<dyn act_runtime::credentials::CredentialRefresher>),
         }),
     };
     let consent = runtime::ConsentConfig {

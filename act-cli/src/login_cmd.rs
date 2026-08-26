@@ -423,10 +423,17 @@ fn split_acquired(key: &str, acquired: crate::oauth::run::Acquired) -> Split {
     let mut host_only = BTreeMap::new();
     if let Some(refresh) = acquired.refresh_token {
         // Namespaced by field key: a credential may hold more than one OAuth
-        // field, and their refresh tokens must not collide.
+        // field, and their refresh tokens must not collide. The issuer goes
+        // beside it because refresh needs both and neither may reach a
+        // component — the runtime reads them through the same slots
+        // (`act_runtime::credentials::{issuer_slot, refresh_token_slot}`).
         host_only.insert(
-            format!("{key}:std:refresh-token"),
+            act_runtime::credentials::refresh_token_slot(key),
             SecretValue::new(refresh),
+        );
+        host_only.insert(
+            act_runtime::credentials::issuer_slot(key),
+            SecretValue::new(acquired.issuer.clone()),
         );
     }
 
@@ -582,6 +589,7 @@ mod tests {
 
     fn acquired() -> crate::oauth::run::Acquired {
         crate::oauth::run::Acquired {
+            issuer: "https://as.example.com".into(),
             access_token: "access-sentinel".into(),
             expires_at: Some(1_700_003_600),
             scopes: vec!["read".into()],
@@ -666,6 +674,7 @@ mod tests {
         let split = split_acquired(
             "acme:token",
             crate::oauth::run::Acquired {
+                issuer: "https://as.example.com".into(),
                 access_token: "at".into(),
                 expires_at: None,
                 scopes: vec![],
@@ -685,12 +694,23 @@ mod tests {
     fn two_oauth_fields_do_not_collide_in_the_host_only_compartment() {
         // A credential may hold an OAuth token per upstream. Keying the
         // compartment by member name alone would have the second overwrite the
-        // first, and the loss would only surface at the first refresh.
+        // first, and the loss would only surface at the first refresh — of the
+        // token whose slot was taken.
         let a = split_acquired("acme:one", acquired());
         let b = split_acquired("acme:two", acquired());
         let mut merged = a.host_only;
         merged.extend(b.host_only);
-        assert_eq!(merged.len(), 2, "{merged:?}");
+        assert_eq!(
+            merged.len(),
+            4,
+            "two slots per field, both namespaced: {merged:?}"
+        );
+        for field in ["acme:one", "acme:two"] {
+            // The same slots the runtime reads them back through: a name agreed
+            // in two places is a name that drifts.
+            assert!(merged.contains_key(&act_runtime::credentials::refresh_token_slot(field)));
+            assert!(merged.contains_key(&act_runtime::credentials::issuer_slot(field)));
+        }
     }
 
     #[test]
