@@ -7,13 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-08-27
+
+Two breaking changes and a new subsystem. `act` gains credentials: a host-side
+store components read from, so a secret reaches a component without passing
+through the agent's context.
+
+### Removed
+
+- **ACT-HTTP, the REST binding.** `act run --http` and a bare `--listen` no
+  longer serve `/info`, `/tools` and `/sessions`. MCP is ACT's transport: use
+  `--mcp` for stdio, or `--mcp --http` for Streamable HTTP at `/mcp`. `--http`
+  alone now fails naming the replacement rather than serving a different
+  protocol on the same flag. All 22 components and both templates had already
+  migrated. The SSE streaming path and the `Transport::Http` audit variant went
+  with it.
+
+### Added
+
+- **The credential store (`act:credentials@0.1.0`).** A component declares the
+  capability, imports the store and asks for a key inside its own profile; the
+  agent learns which credentials exist and never their values. An undeclared
+  class is denied and no grant widens it.
+- **`act secret set/list/rm`** — out-of-band provisioning. A credential is a set
+  of named fields, named by whoever stores it. There is deliberately no
+  `act secret get`: nothing prints a stored value.
+- **`act login`** — provisions from a component's own `[[std.credentials]]`
+  declaration, so the user need not know what it wants. Prompts hide what they
+  read, mark a component's own wording as foreign, and skip optional fields on
+  an empty answer.
+- **OAuth 2.1, acquisition and refresh.** RFC 9728/8414 discovery from the
+  resource identifier, RFC 7591 dynamic client registration per issuer, PKCE
+  S256, RFC 8707 `resource`, and a loopback callback that validates `Host`.
+  `state` and the RFC 9207 `iss` check both run before the code reaches any
+  token endpoint. Expiring tokens are renewed silently, host-side, under a
+  per-key lock and an advisory file lock; a refresh token never reaches a
+  component.
+- **`act:consent/consent-authority`**, semantic capability classes gated on
+  declaration before mode, and an out-of-band consent queue.
+- **Three crates published for the first time:** `act-runtime` (the embeddable
+  wasmtime host), `act-mcp` (the ACT-to-MCP projection) and `act-credentials`.
+
+### Changed
+
+- **The wasmtime host and the MCP projection moved into their own crates.**
+  Anything that reached into `act`'s internals for them now depends on
+  `act-runtime` or `act-mcp`.
+- wasmtime 48; the workspace declares `rust-version = "1.98"`.
+
 ### Fixed
 
-- A component that never returns from `open-session` no longer hangs the host
-  silently. The wait is now bounded at 60 seconds and reports what happened.
-  This bit hardest with `act run --session-args`, which opens the session
-  *before* it binds the listener: a stuck guest meant the port never came up,
-  so the caller saw connection refused with nothing on stderr to explain it.
+- A component that never returns from `open-session` no longer hangs the host.
+- Transport metadata now reaches `list-tools`.
+- A store that fails to decode reports a host-authored string instead of one
+  quoting the stored value back to the component.
+- Provenance records a component's name and version.
 
 ## [0.11.1] - 2026-08-12
 
@@ -678,3 +726,4 @@ Initial release of the ACT CLI host — loads WebAssembly components and exposes
 [0.1.0]: https://github.com/actcore/act-cli/tree/0.1.0
 [0.11.0]: https://github.com/actcore/act-cli/compare/0.10.1..0.11.0
 [0.11.1]: https://github.com/actcore/act-cli/compare/0.11.0..0.11.1
+[0.12.0]: https://github.com/actcore/act-cli/compare/0.11.1..0.12.0

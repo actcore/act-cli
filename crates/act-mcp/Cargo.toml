@@ -11,7 +11,7 @@ keywords = ["act", "mcp", "wasm", "component-model", "adapter"]
 categories = ["wasm", "development-tools"]
 
 [dependencies]
-act-runtime = { version = "0.11.1", path = "../act-runtime" }
+act-runtime = { version = "0.12.0", path = "../act-runtime" }
 act-types.workspace = true
 rmcp = { version = "3.1", features = ["server", "schemars"] }
 serde_json.workspace = true

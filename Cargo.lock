@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "act-build"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "act-types",
  "anyhow",
@@ -37,7 +37,7 @@ dependencies = [
 
 [[package]]
 name = "act-cli"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "act-credentials",
  "act-mcp",
@@ -89,7 +89,7 @@ dependencies = [
 
 [[package]]
 name = "act-credentials"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "fs4",
  "serde",
@@ -101,7 +101,7 @@ dependencies = [
 
 [[package]]
 name = "act-mcp"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "act-runtime",
  "act-types",
@@ -112,7 +112,7 @@ dependencies = [
 
 [[package]]
 name = "act-policy"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "act-types",
  "async-trait",
@@ -128,7 +128,7 @@ dependencies = [
 
 [[package]]
 name = "act-policy-wasm"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "act-policy",
  "futures",
@@ -139,7 +139,7 @@ dependencies = [
 
 [[package]]
 name = "act-runtime"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "act-credentials",
  "act-policy",
@@ -172,7 +172,7 @@ dependencies = [
 
 [[package]]
 name = "act-store"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "chrono",
  "dirs",
