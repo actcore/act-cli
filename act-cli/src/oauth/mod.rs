@@ -53,9 +53,8 @@ pub mod state;
 /// image with an empty system store cannot make a login fail here and nowhere
 /// else.
 pub(crate) fn http_client() -> anyhow::Result<hclient::Client> {
-    // One home for this choice, in the lowest crate that needs it. See its
-    // doc comment: while `reqwest` is still in the graph, two rustls providers
-    // are, and rustls refuses to guess between them.
+    // One home for this choice, in the lowest crate that needs it — see its
+    // doc comment for why two rustls providers are in this graph at all.
     act_store::fetch::install_crypto_provider();
 
     let transport = hclient_native::Native::new(

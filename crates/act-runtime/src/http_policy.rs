@@ -11,14 +11,14 @@
 //! - Scheme / methods / ports matching.
 //! - IP literals in URI: matched against `cidr` entries at HTTP-layer.
 //! - **DNS-resolved IPs against both allow and deny CIDRs**: enforced in
-//!   the reqwest `PolicyDnsResolver` hook (`runtime::http_client`). The
+//!   the `PolicyDnsResolver` (`runtime::http_client`). The
 //!   resolver runs once per request, filters denied IPs, and in
 //!   `Allowlist` mode additionally requires allow-CIDR coverage when the
 //!   hostname doesn't match any host-anchored allow rule. Named-host URIs
 //!   with only allow-CIDR rules defer their verdict from the HTTP layer
 //!   to the resolver. The single resolve pins the addresses for the
 //!   subsequent connect, closing the DNS-rebinding window.
-//! - Redirect re-decision: each hop re-evaluated via `reqwest::redirect`
+//! - Redirect re-decision: each hop re-evaluated via the redirect predicate
 //!   hook (see `http_client::build_redirect_policy`).
 
 use std::future::Future;

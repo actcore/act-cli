@@ -7,7 +7,7 @@
 //!
 //! `http_client`, `http_policy`, and `network`, plus the `HttpConfig` /
 //! `HttpRule` / `NetworkRule` / `PolicyMode` types in `config`, form a
-//! self-contained "policy-aware reqwest backend for `wasi:http`" unit with
+//! self-contained "policy-aware HTTP backend for `wasi:http`" unit with
 //! zero act-cli-specific dependencies (no CLI, no component metadata, no
 //! ACT protocol). The boundary is maintained intentionally so this layer
 //! can be lifted into its own crate (e.g. `act-wasi-http-policy`) when a
@@ -15,39 +15,52 @@
 //! `wasmtime-wasi-http`. Do not reach outside those modules from here; if
 //! you need something else, pass it in via config.
 
-use std::error::Error;
 use std::future::Future;
-use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use http_body_util::BodyExt;
-use reqwest::dns::{Addrs, Name, Resolve, Resolving};
-use reqwest::redirect;
 use wasmtime_wasi_http::{Error as HttpError, RequestOptions, WasiBody};
 
 use crate::audit::{CapDecisionRecord, Decision4, emit_cap_decision};
 use act_policy::grant::{HttpConfig, PolicyMode};
 use act_policy::net::{self as network, NetworkRule};
 
-/// reqwest DNS resolver that filters resolved addresses against both deny
-/// and allow CIDR rules.
+/// A resolver that filters what a name resolves to, against the component's
+/// CIDR rules.
 ///
-/// Logic per resolved `SocketAddr`:
+/// Per resolved address:
 /// 1. Drop if any deny-CIDR matches (respecting `except_ports`).
-/// 2. In `Allowlist` mode, if any allow rule carries a `cidr`, the IP must
-///    be covered by either a host-anchored allow (meaning the hostname
-///    itself was allowed, so every resolved IP is OK) or an allow-CIDR.
-///    This closes the prior asymmetry where `allow = [{ cidr = "..." }]`
-///    required an IP-literal URI.
-/// 3. `Open` / `Deny` modes: no allow-side filter here (`Deny` never
-///    reaches the resolver; `Open` still honors deny-CIDR as a safety
-///    net).
+/// 2. In `Allowlist` mode, if any allow rule carries a `cidr`, the address must
+///    be covered by either a host-anchored allow (the hostname itself was
+///    allowed, so every address it resolves to is) or an allow-CIDR. This
+///    closes the asymmetry where `allow = [{ cidr = "..." }]` would otherwise
+///    require an IP-literal URI.
+/// 3. `Open` / `Deny` modes: no allow-side filter (`Deny` never reaches a
+///    resolver; `Open` still honours deny-CIDR as a safety net).
 ///
-/// If no addresses survive, returns an empty iterator — reqwest surfaces
-/// this as a DNS error, which our `reqwest_to_p2_error` /
-/// `reqwest_to_error` maps to `ErrorCode::DnsError`.
+/// ## Two streams, one decision
+///
+/// `hclient`'s `Resolve` returns A and AAAA as **separate streams**, because
+/// RFC 8305 requires starting IPv6 attempts without waiting for the IPv4
+/// answer. That is right for connecting and awkward for auditing: "everything
+/// was filtered" is only knowable once both have ended, and a record emitted
+/// per stream would report one blocked lookup twice.
+///
+/// So this layer no longer emits it. The record moves to where the failure
+/// becomes one event — the request, in [`ActHttpClient::send`], which sees a
+/// resolve error and knows the host it was for. That is also where the old
+/// comment said the decision belonged ("to the guest this is a single
+/// failure"); the two-stream shape merely forced the issue.
+#[derive(Clone)]
 struct PolicyDnsResolver {
+    inner: Arc<hclient_dns_system::SystemDns<hclient_rt_tokio::Tokio>>,
+    /// Per name: how many addresses the upstream offered, and how many
+    /// survived. Read once, by `send`, to tell "policy dropped everything"
+    /// from "the name does not resolve" — a distinction the two streams
+    /// cannot make on their own, and one that must survive: reporting a DNS
+    /// outage as a capability denial sends an operator to the wrong file.
+    seen: Arc<std::sync::Mutex<std::collections::HashMap<String, (usize, usize)>>>,
     allow_nets: Arc<Vec<NetworkRule>>,
     deny_nets: Arc<Vec<NetworkRule>>,
     mode: PolicyMode,
@@ -55,189 +68,231 @@ struct PolicyDnsResolver {
 
 impl PolicyDnsResolver {
     fn new(cfg: &HttpConfig) -> Self {
-        let allow_nets = cfg.allow.iter().map(|r| r.net.clone()).collect();
-        let deny_nets = cfg.deny.iter().map(|r| r.net.clone()).collect();
         Self {
-            allow_nets: Arc::new(allow_nets),
-            deny_nets: Arc::new(deny_nets),
+            inner: Arc::new(hclient_dns_system::SystemDns::new(hclient_rt_tokio::Tokio)),
+            seen: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            allow_nets: Arc::new(cfg.allow.iter().map(|r| r.net.clone()).collect()),
+            deny_nets: Arc::new(cfg.deny.iter().map(|r| r.net.clone()).collect()),
             mode: cfg.mode,
         }
     }
-}
 
-impl Resolve for PolicyDnsResolver {
-    fn resolve(&self, name: Name) -> Resolving {
-        let allow = self.allow_nets.clone();
-        let deny = self.deny_nets.clone();
-        let mode = self.mode;
-        Box::pin(async move {
-            let host = name.as_str().to_string();
-            let addrs = tokio::net::lookup_host(format!("{host}:0"))
-                .await
-                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-            let all: Vec<SocketAddr> = addrs.collect();
-            let total = all.len();
+    /// Whether this address may be connected to at all.
+    ///
+    /// Port zero: a name resolves independently of the port a caller will
+    /// later connect to, so a deny rule scoped to ports cannot be decided
+    /// here. Port-scoped rules are enforced where the port is known — the
+    /// request check in `send`, and the redirect predicate.
+    /// Whether policy — not DNS — is why nothing came back for `host`.
+    ///
+    /// `true` only when the upstream offered addresses and every one was
+    /// dropped. A name that resolves to nothing is a DNS failure and gets no
+    /// capability record: it is not a decision this host made.
+    fn filtered_everything(&self, host: &str) -> bool {
+        self.seen
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(host)
+            .is_some_and(|(offered, kept)| *offered > 0 && *kept == 0)
+    }
 
-            // If the hostname itself matches any host-anchored allow rule,
-            // we don't need to require per-IP CIDR matches — the guest is
-            // already allowed to talk to this host. Compute once.
-            let host_allowed = allow.iter().any(|r| {
-                r.host
+    fn permits(&self, host: &str, addr: std::net::IpAddr) -> bool {
+        if network::any_deny_cidr_matches(&self.deny_nets, addr, 0) {
+            return false;
+        }
+        let host_allowed = self.allow_nets.iter().any(|r| {
+            r.host
+                .as_deref()
+                .is_some_and(|pat| network::host_matches(pat, host))
+        });
+        let require_allow_cidr = self.mode == PolicyMode::Allowlist
+            && !host_allowed
+            && self.allow_nets.iter().any(|r| r.cidr.is_some());
+        if require_allow_cidr {
+            return self.allow_nets.iter().any(|r| {
+                r.cidr
                     .as_deref()
-                    .is_some_and(|pat| network::host_matches(pat, &host))
+                    .is_some_and(|c| network::cidr_contains(c, addr))
             });
-            let require_allow_cidr = mode == PolicyMode::Allowlist
-                && !host_allowed
-                && allow.iter().any(|r| r.cidr.is_some());
-
-            let filtered: Vec<SocketAddr> = all
-                .into_iter()
-                .filter(|addr| {
-                    if network::any_deny_cidr_matches(&deny, addr.ip(), addr.port()) {
-                        return false;
-                    }
-                    if require_allow_cidr {
-                        return allow.iter().any(|r| {
-                            r.cidr
-                                .as_deref()
-                                .is_some_and(|c| network::cidr_contains(c, addr.ip()))
-                        });
-                    }
-                    true
-                })
-                .collect();
-            tracing::debug!(
-                %host,
-                resolved = total,
-                kept = filtered.len(),
-                require_allow_cidr,
-                host_allowed,
-                "http policy dns resolve",
-            );
-            if filtered.is_empty() {
-                // One record per failed resolution, not one per dropped
-                // address: to the guest this is a single failure (the name
-                // didn't resolve to anything usable), and `ResourceOp`/
-                // `CapDecisionRecord` model one decision — emitting `total`
-                // records for what reads as one blocked lookup would flood
-                // the rollup without giving the operator anything a single
-                // line doesn't already say. `key` is the bare hostname: no
-                // port exists yet at DNS-resolution time (a name resolves
-                // independently of which port the caller will connect to).
-                if total > 0 {
-                    // Only a genuine "policy dropped everything" case gets a
-                    // deny record here — `total == 0` (the name itself
-                    // didn't resolve) is a DNS failure, not a policy
-                    // decision, and must not be misreported as one.
-                    emit_cap_decision(&CapDecisionRecord::statik_with_reason(
-                        act_types::constants::CAP_HTTP,
-                        &host,
-                        "",
-                        Decision4::Deny,
-                        &mode.to_string(),
-                        None,
-                        Some("all resolved addresses filtered by CIDR rule"),
-                    ));
-                }
-                return Err("all resolved addresses filtered by policy CIDR rules".into());
-            }
-            let iter: Addrs = Box::new(filtered.into_iter());
-            Ok(iter)
-        })
+        }
+        true
     }
 }
 
-/// Build a `reqwest::redirect::Policy` that consults `network::decide` on
-/// each hop. Denies the chain if the target URL violates the configured
-/// allow/deny network rules.
-fn build_redirect_policy(cfg: Arc<HttpConfig>) -> redirect::Policy {
-    const MAX_HOPS: usize = 10;
-    redirect::Policy::custom(move |attempt| {
-        if attempt.previous().len() >= MAX_HOPS {
-            return attempt.error("too many redirects");
-        }
-        let url = attempt.url();
-        let host = url.host_str().unwrap_or("");
-        let scheme = url.scheme();
-        let port = url
-            .port_or_known_default()
-            .unwrap_or(if scheme == "https" { 443 } else { 80 });
-        // Build a NetworkCheck and apply the non-HTTP bits of the policy.
-        // We don't know the redirect request's method (reqwest decides per
-        // status) so we skip HTTP-layer method filtering here — rely on
-        // network::decide which ignores method-only fields when they live
-        // in HttpRule above this layer. If a rule requires scheme="https"
-        // and the redirect downgrades to "http", that rule won't match —
-        // which is the right behaviour.
-        let allow_nets: Vec<act_policy::net::NetworkRule> =
-            cfg.allow.iter().map(|r| r.net.clone()).collect();
-        let deny_nets: Vec<act_policy::net::NetworkRule> =
-            cfg.deny.iter().map(|r| r.net.clone()).collect();
-        let decision = act_policy::net::decide(
-            cfg.mode,
-            &allow_nets,
-            &deny_nets,
-            &act_policy::net::NetworkCheck::new(host, port),
-        );
-        match decision {
-            act_policy::Decision::Allow => attempt.follow(),
-            // `Ask` mode gates each request interactively at `send_request`;
-            // the redirect callback is sync and can't prompt, so redirects
-            // within an already-consented request are followed (the top-level
-            // send was approved). Per-hop ask-prompting is a later phase.
-            act_policy::Decision::Ask => attempt.follow(),
-            act_policy::Decision::Deny => {
-                tracing::warn!(%url, "http policy: redirect hop blocked");
-                let key = format!("{host}:{port}");
-                emit_cap_decision(&CapDecisionRecord::statik_with_reason(
-                    act_types::constants::CAP_HTTP,
-                    &key,
-                    "",
-                    Decision4::Deny,
-                    &cfg.mode.to_string(),
-                    None,
-                    Some("redirect target outside ceiling"),
-                ));
-                attempt.error("redirect target blocked by ACT policy")
-            }
-        }
-    })
+impl hclient_dns::Resolve for PolicyDnsResolver {
+    type Ipv4<'a> =
+        futures_util::stream::BoxStream<'a, Result<hclient_dns::ResolvedAddr, hclient::Error>>;
+    type Ipv6<'a> =
+        futures_util::stream::BoxStream<'a, Result<hclient_dns::ResolvedAddr, hclient::Error>>;
+    type Svcb<'a> =
+        futures_util::stream::BoxStream<'a, Result<hclient_dns::SvcbEndpoint, hclient::Error>>;
+
+    fn lookup_ipv4<'a>(&'a self, name: &str) -> Self::Ipv4<'a> {
+        self.filtered(name, true)
+    }
+
+    fn lookup_ipv6<'a>(&'a self, name: &str) -> Self::Ipv6<'a> {
+        self.filtered(name, false)
+    }
+
+    fn supports_svcb(&self) -> bool {
+        false
+    }
+
+    fn lookup_svcb<'a>(&'a self, _name: &str) -> Self::Svcb<'a> {
+        Box::pin(futures_util::stream::empty())
+    }
 }
 
-/// Reqwest client instantiated with this component's HTTP policy. Cheap to
-/// clone (reqwest::Client is internally `Arc`'d); share freely across
-/// async tasks.
+impl PolicyDnsResolver {
+    fn filtered<'a>(
+        &'a self,
+        name: &str,
+        v4: bool,
+    ) -> futures_util::stream::BoxStream<'a, Result<hclient_dns::ResolvedAddr, hclient::Error>>
+    {
+        use futures_util::StreamExt;
+        let host = name.to_string();
+        let upstream: futures_util::stream::BoxStream<'a, _> = if v4 {
+            Box::pin(hclient_dns::Resolve::lookup_ipv4(&*self.inner, name))
+        } else {
+            Box::pin(hclient_dns::Resolve::lookup_ipv6(&*self.inner, name))
+        };
+        Box::pin(upstream.filter(move |item| {
+            let keep = match item {
+                Ok(resolved) => self.permits(&host, resolved.addr),
+                // A resolver error is not a policy decision and is passed
+                // through: swallowing it would turn "DNS is down" into
+                // "policy refused", and an operator would go looking in the
+                // wrong place.
+                Err(_) => true,
+            };
+            if item.is_ok() {
+                let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+                let counts = seen.entry(host.clone()).or_insert((0, 0));
+                counts.0 += 1;
+                if keep {
+                    counts.1 += 1;
+                }
+            }
+            if !keep {
+                tracing::debug!(%host, "http policy dropped a resolved address");
+            }
+            std::future::ready(keep)
+        }))
+    }
+}
+
+/// The per-hop capability check.
+///
+/// Without it a granted host is an open proxy: a component allowed to reach
+/// `api.github.com` asks that server for a redirect and follows it anywhere.
+/// The ceiling is the whole claim, so this runs on **every** hop, and a refusal
+/// stops the chain rather than being reported after the fact.
+///
+/// `hclient` consults it after its own hop count, only about hops that would
+/// have been followed — so switching it on cannot make a chain longer — and
+/// hands it the hop as it would go out: the resolved target, the possibly
+/// downgraded method, whether credentials are about to be stripped.
+fn redirect_verdict(
+    cfg: &HttpConfig,
+    hop: &hclient::redirect::ProposedRedirect<'_>,
+) -> hclient::redirect::RedirectVerdict {
+    use hclient::redirect::RedirectVerdict;
+
+    let to = hop.to();
+    let host = to.host().unwrap_or("");
+    let scheme = to.scheme_str().unwrap_or("http");
+    let port = to
+        .port_u16()
+        .unwrap_or(if scheme == "https" { 443 } else { 80 });
+
+    let allow_nets: Vec<NetworkRule> = cfg.allow.iter().map(|r| r.net.clone()).collect();
+    let deny_nets: Vec<NetworkRule> = cfg.deny.iter().map(|r| r.net.clone()).collect();
+    let decision = network::decide(
+        cfg.mode,
+        &allow_nets,
+        &deny_nets,
+        &network::NetworkCheck::new(host, port),
+    );
+    match decision {
+        act_policy::Decision::Allow => RedirectVerdict::Follow,
+        // `Ask` gates the request itself, at `send`. This callback is sync and
+        // cannot prompt, so a hop inside an already-approved request is
+        // followed. Per-hop asking is a later phase, and would need the
+        // predicate to be async.
+        act_policy::Decision::Ask => RedirectVerdict::Follow,
+        act_policy::Decision::Deny => {
+            tracing::warn!(%to, "http policy: redirect hop blocked");
+            emit_cap_decision(&CapDecisionRecord::statik_with_reason(
+                act_types::constants::CAP_HTTP,
+                &format!("{host}:{port}"),
+                "",
+                Decision4::Deny,
+                &cfg.mode.to_string(),
+                None,
+                Some("redirect target outside ceiling"),
+            ));
+            // `Refuse`, not `Stop`: stopping would hand the 3xx back as an
+            // ordinary answer, and a guest that never checks the status would
+            // read a blocked redirect as a successful request.
+            RedirectVerdict::Refuse
+        }
+    }
+}
+
+/// An HTTP client carrying this component's capability ceiling.
+///
+/// Two enforcement points, and both are inside the client rather than around
+/// it: the resolver refuses addresses a CIDR rule excludes, and the redirect
+/// predicate refuses a hop outside the ceiling. A check placed around a client
+/// is a check a redirect walks past.
+///
+/// Cheap to clone; share freely across tasks.
 #[derive(Clone)]
 pub struct ActHttpClient {
-    client: Arc<reqwest::Client>,
+    client: Arc<hclient::Client>,
+    resolver: PolicyDnsResolver,
+    mode: PolicyMode,
 }
 
 impl ActHttpClient {
     pub fn new(cfg: HttpConfig) -> anyhow::Result<Self> {
-        let cfg_arc = Arc::new(cfg.clone());
-        let resolver = Arc::new(PolicyDnsResolver::new(&cfg));
-        let client = reqwest::Client::builder()
-            .dns_resolver(resolver)
-            .redirect(build_redirect_policy(cfg_arc))
-            // Keep HTTP/2 multiplexed connections alive through idle
-            // periods — important for SSE and long-poll streams that
-            // may go 30+ seconds between events. Without this, NAT /
-            // LB flow timers can silently drop idle connections.
-            .http2_keep_alive_interval(Some(std::time::Duration::from_secs(30)))
-            .http2_keep_alive_while_idle(true)
-            .http2_keep_alive_timeout(std::time::Duration::from_secs(10))
-            // TCP-level keep-alive catches dead peers on HTTP/1.1 too
-            // (and the underlying TCP of HTTP/2 before ALPN).
-            .tcp_keepalive(Some(std::time::Duration::from_secs(30)))
-            // Long-lived streams shouldn't trigger pool eviction while
-            // in use — reqwest's default 90s idle-timeout is fine for
-            // one-shot requests but too aggressive for SSE reconnects.
-            // 10 minutes strikes a balance.
-            .pool_idle_timeout(Some(std::time::Duration::from_secs(600)))
+        let cfg_for_hops = cfg.clone();
+
+        act_store::fetch::install_crypto_provider();
+        let resolver = PolicyDnsResolver::new(&cfg);
+        let mode = cfg.mode;
+        let transport = hclient_native::Native::new(
+            hclient_rt_tokio::Tokio,
+            hclient_tls_rustls::Rustls::with_webpki_roots(),
+            resolver.clone(),
+        )
+        // Keep HTTP/2 multiplexed connections alive through idle periods —
+        // SSE and long-poll streams can go 30+ seconds between events, and
+        // without this a NAT or load-balancer flow timer drops them silently.
+        // `every` and `within`, because neither is useful alone. There is no
+        // `while_idle` knob to set: `hclient` pings on a timer rather than on
+        // silence, which its own docs say is the only thing h2 can offer.
+        .h2_keep_alive(hclient_native::H2KeepAlive::new(
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(10),
+        ))
+        // Long-lived streams must not be evicted while in use. Ten minutes,
+        // where a one-shot request would be happy with far less.
+        .pool(hclient_native::PoolConfig {
+            idle_timeout: std::time::Duration::from_secs(600),
+            ..Default::default()
+        });
+
+        let client = hclient::Client::builder(transport)
+            .redirect_predicate(move |hop| redirect_verdict(&cfg_for_hops, hop))
             .build()
-            .map_err(|e| anyhow::anyhow!("failed to build reqwest client: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("the HTTP backend cannot serve this policy: {e}"))?;
         Ok(Self {
             client: Arc::new(client),
+            resolver,
+            mode,
         })
     }
 
@@ -267,39 +322,51 @@ impl ActHttpClient {
                 .and_then(|o| o.first_byte_timeout)
                 .unwrap_or(DEFAULT_TIMEOUT);
 
-        let reqwest_req = to_reqwest(request)?;
-        let resp = tokio::time::timeout(deadline, self.client.execute(reqwest_req))
-            .await
-            .map_err(|_| HttpError::ConnectionTimeout)?
-            .map_err(reqwest_to_error)?;
-        reqwest_response_to_wasi(resp).await
-    }
-}
-
-/// Walk the whole `source()` chain of a reqwest error, returning the first
-/// chain entry whose display string matches `needle`. reqwest wraps DNS
-/// resolver errors through multiple layers (reqwest → hyper-util → our
-/// `PolicyDnsResolver` error) so a single `.source()` hop isn't enough.
-fn error_chain_contains(err: &dyn Error, needles: &[&str]) -> bool {
-    let mut current: Option<&dyn Error> = Some(err);
-    while let Some(e) = current {
-        let msg = e.to_string().to_ascii_lowercase();
-        if needles.iter().any(|n| msg.contains(n)) {
-            return true;
+        let (method, url, headers, body) = to_request_parts(request)?;
+        // Kept for the audit record below: the URL is consumed by the builder.
+        let host = url
+            .parse::<http::Uri>()
+            .ok()
+            .and_then(|u| u.host().map(str::to_string))
+            .unwrap_or_default();
+        let mut req = self.client.request(method, &url);
+        for (name, value) in headers.iter() {
+            req = req.header(name.as_str(), value.to_str().unwrap_or_default());
         }
-        current = e.source();
+        let resp = match tokio::time::timeout(deadline, req.body(body).send()).await {
+            Err(_) => return Err(HttpError::ConnectionTimeout),
+            Ok(Err(e)) => {
+                // One record per blocked request, emitted here because this is
+                // where the failure becomes a single event: the resolver sees
+                // two independent streams and cannot tell, from either one,
+                // that the other also came back empty.
+                if matches!(e.kind(), hclient::ErrorKind::Resolve)
+                    && self.resolver.filtered_everything(&host)
+                {
+                    emit_cap_decision(&CapDecisionRecord::statik_with_reason(
+                        act_types::constants::CAP_HTTP,
+                        &host,
+                        "",
+                        Decision4::Deny,
+                        &self.mode.to_string(),
+                        None,
+                        Some("all resolved addresses filtered by CIDR rule"),
+                    ));
+                }
+                return Err(client_error_to_wasi(e));
+            }
+            Ok(Ok(resp)) => resp,
+        };
+        let (parts, body) = resp.into_parts();
+        response_to_wasi(parts, body)
     }
-    false
 }
 
-/// Convert an outgoing request into a reqwest::Request. Streaming body,
-/// we wrap the UnsyncBoxBody as a Stream
-/// and feed it through reqwest::Body::wrap_stream, because UnsyncBoxBody
-/// is !Sync and wrap() requires Sync.
-fn to_reqwest(request: http::Request<WasiBody>) -> Result<reqwest::Request, HttpError> {
-    use futures_util::StreamExt;
-    use http_body_util::BodyStream;
-
+/// Split an outgoing request into the pieces the client takes.
+#[allow(clippy::type_complexity)]
+fn to_request_parts(
+    request: http::Request<WasiBody>,
+) -> Result<(http::Method, String, http::HeaderMap, hclient::RequestBody), HttpError> {
     let (parts, body) = request.into_parts();
     let scheme = parts
         .uri
@@ -316,86 +383,102 @@ fn to_reqwest(request: http::Request<WasiBody>) -> Result<reqwest::Request, Http
         .path_and_query()
         .map(|p| p.as_str())
         .unwrap_or("/");
-    let url_str = format!("{scheme}://{authority}{path_and_query}");
-    let url = reqwest::Url::parse(&url_str).map_err(|_| HttpError::HttpRequestUriInvalid)?;
-    let method = reqwest::Method::from_bytes(parts.method.as_str().as_bytes())
-        .map_err(|_| HttpError::HttpProtocolError)?;
+    let url = format!("{scheme}://{authority}{path_and_query}");
 
-    let data_stream = BodyStream::new(body).filter_map(|frame_res| async move {
-        match frame_res {
-            Ok(frame) => frame.into_data().ok().map(Ok::<_, std::io::Error>),
-            Err(_) => Some(Err(std::io::Error::other("wasi:http body stream error"))),
-        }
-    });
-    let body = reqwest::Body::wrap_stream(data_stream);
-
-    let mut builder = reqwest::Client::new().request(method, url).body(body);
-    for (name, value) in parts.headers.iter() {
-        builder = builder.header(name, value);
-    }
-    builder.build().map_err(|_| HttpError::HttpProtocolError)
+    // The guest's body goes across as a stream, not a buffer: a component
+    // uploading is not required to have the whole thing in memory, and neither
+    // is this host. `RequestBody::Streaming` takes an `http_body::Body`
+    // directly, so there is no adapter between the two — where the previous
+    // backend
+    // needed the frames rewrapped as a byte stream first.
+    let body = hclient::RequestBody::Streaming(Box::new(WasiRequestBody(body)));
+    Ok((parts.method, url, parts.headers, body))
 }
 
-/// Translate a reqwest error to the closest `wasi:http` error.
+/// The guest's body, with its error type mapped to `hclient`'s.
 ///
-/// One mapper since wasmtime 48: `Error` is a superset of what the p2 and p3
-/// bindings each used to have, and the two mappers this replaced were
-/// line-for-line identical but for the enum they named.
-fn reqwest_to_error(err: reqwest::Error) -> HttpError {
-    if err.is_timeout() {
-        return HttpError::ConnectionTimeout;
+/// A newtype rather than a combinator because the only thing that changes is
+/// the error, and `http_body::Body`'s associated types make that a two-line
+/// impl instead of a chain of adapters.
+struct WasiRequestBody(WasiBody);
+
+impl http_body::Body for WasiRequestBody {
+    type Data = bytes::Bytes;
+    type Error = hclient::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        let inner = unsafe { self.map_unchecked_mut(|s| &mut s.0) };
+        inner.poll_frame(cx).map(|opt| {
+            opt.map(|res| {
+                res.map_err(|_| {
+                    hclient::Error::new(
+                        hclient::ErrorKind::Body,
+                        std::io::Error::other("wasi:http body stream error"),
+                    )
+                })
+            })
+        })
     }
-    if error_chain_contains(&err, &["deny cidr", "failed to lookup", "dns"]) {
-        return HttpError::DnsError {
+}
+
+/// Translate a client error to the closest `wasi:http` error.
+///
+/// Matching on `ErrorKind` rather than reading the `source()` chain for
+/// substrings, which is what this did against `reqwest`: "dns", "connect",
+/// "deny cidr" sniffed out of whatever text three layers happened to produce.
+/// A typed kind cannot drift when a dependency rewords an error.
+fn client_error_to_wasi(err: hclient::Error) -> HttpError {
+    use hclient::ErrorKind;
+    match err.kind() {
+        ErrorKind::Timeout(_) => HttpError::ConnectionTimeout,
+        ErrorKind::Resolve => HttpError::DnsError {
             rcode: Some(err.to_string()),
             info_code: None,
-        };
+        },
+        ErrorKind::Connect => HttpError::ConnectionRefused,
+        // A refused hop and an exhausted hop count arrive the same way. Both
+        // are the host declining to go somewhere, which is what
+        // `HttpRequestDenied` says.
+        ErrorKind::Redirect => HttpError::HttpRequestDenied,
+        ErrorKind::Body => HttpError::HttpRequestBodySize(None),
+        ErrorKind::Decode => HttpError::HttpProtocolError,
+        _ => HttpError::HttpProtocolError,
     }
-    if err.is_connect() {
-        return HttpError::ConnectionRefused;
-    }
-    if err.is_redirect() {
-        return HttpError::HttpRequestDenied;
-    }
-    if err.is_decode() {
-        return HttpError::HttpProtocolError;
-    }
-    if err.is_request() {
-        return HttpError::HttpRequestUriInvalid;
-    }
-    if err.is_body() {
-        return HttpError::HttpRequestBodySize(None);
-    }
-    HttpError::HttpProtocolError
 }
 
-/// Convert a reqwest response to the shape the hook expects:
-/// http::Response<WasiBody> plus a
-/// Future<Output = Result<(), HttpError>> representing the body
-/// completion (reqwest handles this transparently; we return Ok(())
-/// immediately since body errors surface through the stream).
-async fn reqwest_response_to_wasi(
-    resp: reqwest::Response,
-) -> Result<
-    (
-        http::Response<WasiBody>,
-        Pin<Box<dyn Future<Output = Result<(), HttpError>> + Send>>,
-    ),
-    HttpError,
-> {
-    let status = resp.status();
-    let mut headers = resp.headers().clone();
+/// Convert a client response to the shape the hook expects: an
+/// `http::Response<WasiBody>` plus a future standing for body completion.
+///
+/// Takes the response **already split into parts and body** rather than the
+/// client's wrapper. Two reasons, and the second is the one that matters: the
+/// wrapper carries nothing this needs, and a consumer cannot construct one —
+/// `Response::new` is crate-private — so a test could not reach this at all if
+/// it took the wrapper. Split, it is a plain function over `http` types with
+/// no network anywhere near it.
+/// What the `wasi:http` hook expects back: the response, and a future standing
+/// for the body's completion.
+type HookResponse = (
+    http::Response<WasiBody>,
+    Pin<Box<dyn Future<Output = Result<(), HttpError>> + Send>>,
+);
+
+fn response_to_wasi<B>(parts: http::response::Parts, body: B) -> Result<HookResponse, HttpError>
+where
+    B: http_body::Body<Data = bytes::Bytes, Error = hclient::Error> + Send + 'static,
+{
+    let mut headers = parts.headers.clone();
+    // Hop-by-hop framing the guest must not see: the body it receives is
+    // already de-chunked and decompressed, so a `transfer-encoding` or a
+    // `content-length` describing the wire form would describe something else.
     headers.remove(http::header::TRANSFER_ENCODING);
     headers.remove(http::header::CONTENT_LENGTH);
 
-    // Use reqwest::Body as the streaming source rather than bytes_stream +
-    // StreamBody. reqwest::Body implements http_body::Body with a correct
-    // `is_end_stream()` override (StreamBody always returns `false`, which
-    // confuses wasi-fetch guests into trapping mid-read on HTTP/2 responses).
-    let reqwest_body = reqwest::Body::from(resp);
-    let body: WasiBody = BodyExt::boxed_unsync(BodyExt::map_err(reqwest_body, reqwest_to_error));
+    let body: WasiBody = BodyExt::boxed_unsync(BodyExt::map_err(body, client_error_to_wasi));
 
-    let mut builder = http::Response::builder().status(status);
+    let mut builder = http::Response::builder().status(parts.status);
     if let Some(hdrs) = builder.headers_mut() {
         hdrs.extend(headers);
     }
@@ -417,17 +500,26 @@ mod tests {
     use std::sync::Mutex;
 
     #[tokio::test(flavor = "current_thread")]
-    async fn converts_reqwest_response_status_headers_body() {
-        // Build a reqwest::Response without going through the network, using
-        // http::Response::from_parts + reqwest::Response::from.
+    async fn converts_response_status_headers_body() {
+        // No network and no client: the conversion takes `http` parts and a
+        // body, so a test can hand it either. It could not take the client's
+        // `Response` — `Response::new` is crate-private there, which is why
+        // this function was reshaped rather than wrapped.
         let http_resp = http::Response::builder()
             .status(200)
             .header("x-echo", "hi")
-            .body("hello".to_string())
+            .body(
+                http_body_util::Full::new(bytes::Bytes::from_static(b"hello"))
+                    .map_err(|_: std::convert::Infallible| unreachable!())
+                    .boxed_unsync(),
+            )
             .unwrap();
-        let resp = reqwest::Response::from(http_resp);
+        let (parts, body) = http_resp.into_parts();
+        let body = BodyExt::map_err(body, |_| {
+            hclient::Error::new(hclient::ErrorKind::Body, std::io::Error::other("unused"))
+        });
 
-        let (incoming, _io) = reqwest_response_to_wasi(resp).await.expect("conversion ok");
+        let (incoming, _io) = response_to_wasi(parts, body).expect("conversion ok");
 
         assert_eq!(incoming.status(), hyper::StatusCode::OK);
         assert_eq!(
@@ -474,18 +566,13 @@ mod tests {
             .body(body)
             .expect("hyper request builds");
 
-        let reqwest_req = to_reqwest(hyper_req).expect("conversion succeeds");
+        let (method, url, headers, _body) =
+            to_request_parts(hyper_req).expect("conversion succeeds");
 
-        assert_eq!(reqwest_req.method(), &reqwest::Method::GET);
+        assert_eq!(method, Method::GET);
+        assert_eq!(url, "https://example.com/foo?bar=baz");
         assert_eq!(
-            reqwest_req.url().as_str(),
-            "https://example.com/foo?bar=baz"
-        );
-        assert_eq!(
-            reqwest_req
-                .headers()
-                .get("x-custom")
-                .and_then(|v| v.to_str().ok()),
+            headers.get("x-custom").and_then(|v| v.to_str().ok()),
             Some("hello")
         );
     }
@@ -503,18 +590,13 @@ mod tests {
             .body(body)
             .expect("hyper request builds");
 
-        let reqwest_req = to_reqwest(hyper_req).expect("conversion succeeds");
+        let (method, url, headers, _body) =
+            to_request_parts(hyper_req).expect("conversion succeeds");
 
-        assert_eq!(reqwest_req.method(), &reqwest::Method::POST);
+        assert_eq!(method, Method::POST);
+        assert_eq!(url, "http://api.example.com:8080/v1/create");
         assert_eq!(
-            reqwest_req.url().as_str(),
-            "http://api.example.com:8080/v1/create"
-        );
-        assert_eq!(
-            reqwest_req
-                .headers()
-                .get("content-type")
-                .and_then(|v| v.to_str().ok()),
+            headers.get("content-type").and_then(|v| v.to_str().ok()),
             Some("application/json")
         );
     }
@@ -552,37 +634,45 @@ mod tests {
         );
     }
 
+    /// The error mapping, without a network round trip.
+    ///
+    /// It used to make a real request to an unroutable address, because a
+    /// `reqwest::Error` could not be constructed — which made a unit test of a
+    /// pure mapping depend on how the machine's network refuses things, and it
+    /// was one of the tests that failed behind an intercepting proxy. A typed
+    /// `ErrorKind` can simply be built.
     #[test]
-    fn maps_timeout_to_connection_timeout() {
-        // Can't directly build a reqwest::Error, so verify the logic by
-        // making a real request to an unreachable address with a tight
-        // timeout and mapping its error.
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let err = rt.block_on(async {
-            let client = reqwest::Client::builder()
-                .connect_timeout(std::time::Duration::from_millis(1))
-                .build()
-                .unwrap();
-            client
-                .get("http://192.0.2.1:81/") // TEST-NET-1, unroutable
-                .send()
-                .await
-                .expect_err("must fail")
-        });
+    fn maps_each_error_kind_to_its_wasi_error() {
+        use hclient::ErrorKind;
+        let io = || std::io::Error::other("under test");
 
-        let mapped = reqwest_to_error(err);
+        for (kind, expected) in [
+            (ErrorKind::Connect, HttpError::ConnectionRefused),
+            (ErrorKind::Redirect, HttpError::HttpRequestDenied),
+        ] {
+            let named = format!("{kind:?}");
+            let mapped = client_error_to_wasi(hclient::Error::new(kind, io()));
+            assert_eq!(
+                std::mem::discriminant(&mapped),
+                std::mem::discriminant(&expected),
+                "{named} mapped to {mapped:?}"
+            );
+        }
+
+        // Resolve carries the message through, so it is checked by shape
+        // rather than by discriminant alone.
+        let mapped = client_error_to_wasi(hclient::Error::new(ErrorKind::Resolve, io()));
         assert!(
-            matches!(
-                mapped,
-                HttpError::ConnectionTimeout
-                    | HttpError::ConnectionRefused
-                    | HttpError::HttpResponseTimeout
-            ),
-            "expected a connection-class error, got {mapped:?}"
+            matches!(mapped, HttpError::DnsError { rcode: Some(_), .. }),
+            "a resolve failure must reach the guest as a DNS error naming it, got {mapped:?}"
         );
+
+        // A refused hop and an exhausted hop count arrive as the same kind;
+        // both are the host declining to go somewhere.
+        assert!(matches!(
+            client_error_to_wasi(hclient::Error::new(ErrorKind::Redirect, io())),
+            HttpError::HttpRequestDenied
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -815,7 +905,7 @@ mod tests {
         // Allows the origin (127.0.0.1, where the 302 comes from) but not
         // the redirect target (blocked.example) — the redirect hop itself
         // must be what gets denied, not the initial request.
-        let cfg = Arc::new(HttpConfig {
+        let cfg = HttpConfig {
             mode: PolicyMode::Allowlist,
             allow: vec![act_policy::grant::HttpRule {
                 net: NetworkRule {
@@ -825,9 +915,17 @@ mod tests {
                 ..Default::default()
             }],
             deny: vec![],
-        });
-        let client = reqwest::Client::builder()
-            .redirect(build_redirect_policy(cfg))
+        };
+        act_store::fetch::install_crypto_provider();
+        let resolver = PolicyDnsResolver::new(&cfg);
+        let mode = cfg.mode;
+        let transport = hclient_native::Native::new(
+            hclient_rt_tokio::Tokio,
+            hclient_tls_rustls::Rustls::with_webpki_roots(),
+            resolver.clone(),
+        );
+        let client = hclient::Client::builder(transport)
+            .redirect_predicate(move |hop| redirect_verdict(&cfg, hop))
             .build()
             .expect("client builds");
 
@@ -839,14 +937,14 @@ mod tests {
         ));
         let _guard = tracing::subscriber::set_default(sub);
 
-        let result = client.get(format!("http://{addr}/")).send().await;
+        let result = client.get(&format!("http://{addr}/")).send().await;
 
         drop(_guard);
         server.await.expect("server task");
 
         let err = result.expect_err("redirect target denied, the request must fail");
         assert!(
-            err.is_redirect(),
+            matches!(err.kind(), hclient::ErrorKind::Redirect),
             "expected a redirect-class error, got {err:?}"
         );
 

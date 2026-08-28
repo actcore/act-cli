@@ -45,17 +45,20 @@ pub(crate) fn compression_client() -> Result<hclient::Client, StoreError> {
 /// Choose the process-level rustls crypto provider, once.
 ///
 /// rustls picks one by looking at which is compiled in and **refuses to guess
-/// when several are** — correctly. While `act-runtime` still speaks HTTP
-/// through `reqwest`, this workspace carries two: `reqwest`'s and
-/// `hclient-tls-rustls`'s `ring`. Choosing here rather than leaving it to
-/// whichever registers first is the difference between a deliberate crypto
-/// stack and one decided by link order.
+/// when several are** — correctly. Two are, and not because anything here
+/// asks for both: `oci-client` brings `reqwest`, which brings `hyper-rustls`
+/// with `aws-lc-rs`, while `hclient-tls-rustls` uses `ring`. Nothing in this
+/// workspace calls `reqwest` any more; it arrives underneath the OCI client.
 ///
-/// Public because `act-cli`'s OAuth flow builds its own client and needs the
-/// same choice; one home for it beats the same `Once` block written twice.
+/// Choosing here rather than leaving it to whichever registers first is the
+/// difference between a deliberate crypto stack and one decided by link order.
+/// It can go when `oci-client` stops bringing its own TLS stack, which is a
+/// bigger question than this function.
+///
+/// Public because `act-cli`'s OAuth flow and `act-runtime`'s `wasi:http` client
+/// need the same choice; one home beats the same `Once` written three times.
 /// `install_default` returning `Err` means one is already installed, which is
-/// the ordinary case after the first call. The whole function goes away with
-/// the last `reqwest`.
+/// the ordinary case after the first call.
 pub fn install_crypto_provider() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {

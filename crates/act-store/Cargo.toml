@@ -25,8 +25,8 @@ hclient-native.workspace = true
 hclient-rt-tokio.workspace = true
 hclient-tls-rustls.workspace = true
 hclient-dns-system.workspace = true
-# Named directly only to install the process-level crypto provider — see
-# `fetch::install_crypto_provider`. Goes away with the last `reqwest`.
+# Named directly only to choose the process-level crypto provider — see
+# `fetch::install_crypto_provider`.
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 chrono = { version = "0.4.44", default-features = false, features = ["clock"] }
 url.workspace = true
