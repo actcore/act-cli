@@ -18,6 +18,17 @@ readme = "README.md"
 act-types = "0.14"
 wasmparser = "0.252.0"
 reqwest = { version = "0.13.3", default-features = false, features = ["rustls", "stream", "http2", "gzip", "brotli", "zstd"] }
+# The host's own outbound HTTP. `default-features = false` drops `idn` and
+# `public-suffix`: every URL here comes from a metadata document this host
+# already validated, or from a registry reference.
+hclient = { version = "0.1.0-alpha.2", default-features = false, features = ["json", "gzip", "brotli", "zstd", "http2"] }
+hclient-native = { version = "0.1.0-alpha.2", features = ["http2"] }
+# A native transport is assembled from three seams `hclient` deliberately does
+# not pick for you. This is the host's pick: tokio, rustls over the webpki
+# roots, the system resolver.
+hclient-rt-tokio = "0.1.0-alpha.2"
+hclient-tls-rustls = { version = "0.1.0-alpha.2", features = ["webpki-roots"] }
+hclient-dns-system = "0.1.0-alpha.2"
 # Shared across two or more workspace members.
 anyhow = "1.0.102"
 base64 = "0.22.1"

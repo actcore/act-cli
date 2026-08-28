@@ -37,7 +37,11 @@ serde_json.workspace = true
 sha2.workspace = true
 tar.workspace = true
 flate2 = "1"
-reqwest.workspace = true
+hclient.workspace = true
+hclient-native.workspace = true
+hclient-rt-tokio.workspace = true
+hclient-tls-rustls.workspace = true
+hclient-dns-system.workspace = true
 tokio = { workspace = true, features = ["rt", "macros", "fs", "io-util"] }
 toml.workspace = true
 tracing.workspace = true

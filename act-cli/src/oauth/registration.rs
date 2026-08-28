@@ -96,7 +96,7 @@ struct RegistrationResponse {
 
 /// Register this installation with an authorization server.
 pub async fn register(
-    client: &reqwest::Client,
+    client: &hclient::Client,
     endpoint: &str,
     redirect_uri: &str,
 ) -> Result<Registration> {
@@ -118,7 +118,11 @@ pub async fn register(
         .await
         .with_context(|| format!("registering a client at {endpoint}"))?;
     let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
+    let text = resp
+        .collect()
+        .await
+        .map(|c| c.text().unwrap_or_default())
+        .unwrap_or_default();
     ensure!(
         status.is_success(),
         "{endpoint} refused the client registration with {status}"

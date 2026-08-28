@@ -49,10 +49,7 @@ impl CredentialRefresher for OAuthRefresher {
                 )
             })?;
 
-        let client = reqwest::Client::builder()
-            .user_agent(concat!("act/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|e| e.to_string())?;
+        let client = super::http_client().map_err(|e| e.to_string())?;
 
         let acquired =
             super::refresh::refresh(&client, req.issuer, &reg, req.refresh_token, req.now)

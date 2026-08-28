@@ -80,10 +80,7 @@ pub async fn acquire(req: Request<'_>, now: u64) -> Result<Acquired> {
             req.resource
         )
     })?;
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("act/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .context("building the HTTP client for the OAuth flow")?;
+    let client = super::http_client().context("building the HTTP client for the OAuth flow")?;
 
     // 1-2. Everything downstream is derived from here.
     let resource_md = discovery::fetch_resource_metadata(&client, &resource).await?;
@@ -256,7 +253,7 @@ fn authorization_url(
 }
 
 async fn exchange(
-    client: &reqwest::Client,
+    client: &hclient::Client,
     as_md: &AsMetadata,
     reg: &registration::Registration,
     code: &str,
@@ -275,8 +272,7 @@ async fn exchange(
     if let Some(secret) = &reg.client_secret {
         form.push(("client_secret", secret.as_str()));
     }
-    // Encoded here rather than through reqwest's `form`, which this workspace's
-    // feature set does not include; the token request is
+    // Encoded here rather than through a form helper: the token request is
     // `application/x-www-form-urlencoded` either way (RFC 6749 §4.1.3).
     let body = form
         .iter()
@@ -291,12 +287,16 @@ async fn exchange(
     let resp = client
         .post(&as_md.token_endpoint)
         .header("content-type", "application/x-www-form-urlencoded")
-        .body(body)
+        .body(hclient::RequestBody::Full(bytes::Bytes::from(body)))
         .send()
         .await
         .with_context(|| format!("exchanging the code at {}", as_md.token_endpoint))?;
     let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
+    let text = resp
+        .collect()
+        .await
+        .map(|c| c.text().unwrap_or_default())
+        .unwrap_or_default();
     // The body is not quoted back: a token-endpoint error can echo the request,
     // and the request carries the code and the verifier.
     ensure!(
@@ -557,7 +557,7 @@ mod e2e {
     fn browser() -> Box<dyn FnOnce(String) + Send> {
         Box::new(|url: String| {
             tokio::spawn(async move {
-                let _ = reqwest::Client::new().get(&url).send().await;
+                let _ = crate::oauth::http_client().unwrap().get(&url).send().await;
             });
         })
     }
@@ -625,7 +625,7 @@ mod e2e {
                     "{}?code=stolen&state={}&iss=https%3A%2F%2Fevil.example.com",
                     q["redirect_uri"], q["state"]
                 );
-                let _ = reqwest::Client::new().get(&cb).send().await;
+                let _ = crate::oauth::http_client().unwrap().get(&cb).send().await;
             });
         });
 
@@ -696,7 +696,7 @@ mod e2e {
                 let parsed = Url::parse(&url).unwrap();
                 let q: HashMap<_, _> = parsed.query_pairs().into_owned().collect();
                 let cb = format!("{}?code=stolen&state=not-the-state", q["redirect_uri"]);
-                let _ = reqwest::Client::new().get(&cb).send().await;
+                let _ = crate::oauth::http_client().unwrap().get(&cb).send().await;
             });
         });
 

@@ -40,6 +40,38 @@ pub mod registration;
 pub mod run;
 pub mod state;
 
+/// The flow's HTTP client.
+///
+/// One constructor, because a flow that discovered metadata over one stack and
+/// exchanged a code over another would be two security postures wearing one
+/// name. `hclient` keeps the runtime, TLS and resolver as separate seams rather
+/// than picking for you: this is the host's pick — tokio, rustls over the
+/// webpki root set, the system resolver.
+///
+/// Webpki roots rather than the platform store: an authorization server is on
+/// the public web and the bundled set is identical on every machine, so a CI
+/// image with an empty system store cannot make a login fail here and nowhere
+/// else.
+pub(crate) fn http_client() -> anyhow::Result<hclient::Client> {
+    // One home for this choice, in the lowest crate that needs it. See its
+    // doc comment: while `reqwest` is still in the graph, two rustls providers
+    // are, and rustls refuses to guess between them.
+    act_store::fetch::install_crypto_provider();
+
+    let transport = hclient_native::Native::new(
+        hclient_rt_tokio::Tokio,
+        hclient_tls_rustls::Rustls::with_webpki_roots(),
+        hclient_dns_system::SystemDns::new(hclient_rt_tokio::Tokio),
+    );
+    hclient::Client::builder(transport)
+        .user_agent(http::HeaderValue::from_static(concat!(
+            "act/",
+            env!("CARGO_PKG_VERSION")
+        )))
+        .build()
+        .map_err(|e| anyhow::anyhow!("the HTTP backend cannot serve this configuration: {e}"))
+}
+
 /// Bytes from the OS CSPRNG.
 ///
 /// Every unguessable value in this flow comes through here: the PKCE verifier,

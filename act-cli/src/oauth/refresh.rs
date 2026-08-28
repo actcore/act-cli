@@ -38,7 +38,7 @@ use super::run::Acquired;
 /// Returns the same shape acquisition does, so the two paths write a record the
 /// same way and cannot drift in what they store.
 pub async fn refresh(
-    client: &reqwest::Client,
+    client: &hclient::Client,
     issuer: &str,
     reg: &Registration,
     refresh_token: &str,
@@ -68,12 +68,16 @@ pub async fn refresh(
     let resp = client
         .post(&as_md.token_endpoint)
         .header("content-type", "application/x-www-form-urlencoded")
-        .body(body)
+        .body(hclient::RequestBody::Full(bytes::Bytes::from(body)))
         .send()
         .await
         .with_context(|| format!("refreshing at {}", as_md.token_endpoint))?;
     let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
+    let text = resp
+        .collect()
+        .await
+        .map(|c| c.text().unwrap_or_default())
+        .unwrap_or_default();
     // The body is never quoted back: a token-endpoint error can echo the
     // request, and the request carries the refresh token.
     ensure!(

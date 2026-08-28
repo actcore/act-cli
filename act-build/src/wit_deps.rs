@@ -44,10 +44,7 @@ async fn sync_async(wit_dir: &Path) -> Result<()> {
     let deps_dir = wit_dir.join("deps");
     fs::create_dir_all(&deps_dir).with_context(|| format!("creating {}", deps_dir.display()))?;
 
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("act-build/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .context("building reqwest client")?;
+    let client = http_client().context("building the HTTP client")?;
 
     let mut tarball_cache: BTreeMap<String, Vec<u8>> = BTreeMap::new();
 
@@ -80,7 +77,33 @@ async fn sync_async(wit_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn fetch_tarball(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
+/// The host's outbound HTTP stack.
+///
+/// `hclient` keeps the runtime, the TLS stack and the resolver as separate
+/// seams rather than picking for you, so this is where `act-build` picks.
+/// Webpki roots rather than the platform store: a WIT tarball comes from a
+/// registry on the public web, and the bundled set is identical on every
+/// machine — a CI image with an empty system store would otherwise fail here
+/// and nowhere else.
+fn http_client() -> Result<hclient::Client> {
+    let transport = hclient_native::Native::new(
+        hclient_rt_tokio::Tokio,
+        hclient_tls_rustls::Rustls::with_webpki_roots(),
+        hclient_dns_system::SystemDns::new(hclient_rt_tokio::Tokio),
+    );
+    // `build` returns a `Result`: `hclient` refuses to hand back a client whose
+    // configuration the backend cannot honour rather than silently dropping the
+    // part it cannot do.
+    hclient::Client::builder(transport)
+        .user_agent(http::HeaderValue::from_static(concat!(
+            "act-build/",
+            env!("CARGO_PKG_VERSION")
+        )))
+        .build()
+        .map_err(|e| anyhow::anyhow!("the HTTP backend cannot serve this configuration: {e}"))
+}
+
+async fn fetch_tarball(client: &hclient::Client, url: &str) -> Result<Vec<u8>> {
     let resp = client
         .get(url)
         .send()
@@ -88,11 +111,13 @@ async fn fetch_tarball(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
         .with_context(|| format!("HTTP GET {url}"))?
         .error_for_status()
         .with_context(|| format!("HTTP status error for {url}"))?;
-    let bytes = resp
-        .bytes()
+    // `collect` reads the whole body; the tarball is hashed and unpacked in one
+    // piece anyway, so there is nothing to stream it into.
+    let body = resp
+        .collect()
         .await
         .with_context(|| format!("reading response body for {url}"))?;
-    Ok(bytes.to_vec())
+    Ok(body.bytes().to_vec())
 }
 
 fn verify_sha256(bytes: &[u8], expected: &str) -> Result<()> {

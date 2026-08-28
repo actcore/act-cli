@@ -18,30 +18,63 @@ fn now_rfc3339() -> String {
 /// which is the only version a moving tag like `:latest` can be resolved to.
 const K_OCI_VERSION: &str = "org.opencontainers.image.version";
 
-/// A reqwest client that requests + transparently decompresses gzip/br/zstd and
-/// reuses one HTTP/2 connection (ALPN-negotiated over TLS).
-pub(crate) fn compression_client() -> Result<reqwest::Client, StoreError> {
-    reqwest::Client::builder()
-        .gzip(true)
-        .brotli(true)
-        .zstd(true)
-        .http2_adaptive_window(true)
+/// A client that requests and transparently decompresses gzip/br/zstd, over
+/// HTTP/2 where the server negotiates it.
+///
+/// The compression is not a nicety: a registry serving `application/wasm` with
+/// zstd is the difference between a pull measured in tens of megabytes and one
+/// measured in hundreds, so all three encodings stay enabled together.
+///
+/// `hclient` keeps the runtime, TLS and resolver as separate seams rather than
+/// picking for you; this is the store's pick — tokio, rustls over the webpki
+/// roots, the system resolver. Webpki rather than the platform store so a
+/// machine with an empty system trust store cannot make a pull fail here and
+/// nowhere else.
+pub(crate) fn compression_client() -> Result<hclient::Client, StoreError> {
+    install_crypto_provider();
+    let transport = hclient_native::Native::new(
+        hclient_rt_tokio::Tokio,
+        hclient_tls_rustls::Rustls::with_webpki_roots(),
+        hclient_dns_system::SystemDns::new(hclient_rt_tokio::Tokio),
+    );
+    hclient::Client::builder(transport)
         .build()
-        .map_err(|e| StoreError::Io(std::io::Error::other(e)))
+        .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))
+}
+
+/// Choose the process-level rustls crypto provider, once.
+///
+/// rustls picks one by looking at which is compiled in and **refuses to guess
+/// when several are** — correctly. While `act-runtime` still speaks HTTP
+/// through `reqwest`, this workspace carries two: `reqwest`'s and
+/// `hclient-tls-rustls`'s `ring`. Choosing here rather than leaving it to
+/// whichever registers first is the difference between a deliberate crypto
+/// stack and one decided by link order.
+///
+/// Public because `act-cli`'s OAuth flow builds its own client and needs the
+/// same choice; one home for it beats the same `Once` block written twice.
+/// `install_default` returning `Err` means one is already installed, which is
+/// the ordinary case after the first call. The whole function goes away with
+/// the last `reqwest`.
+pub fn install_crypto_provider() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
 }
 
 /// GET a single blob with the right `Accept`, transparent decompression, and a
 /// digest check over the decompressed bytes.
 pub(crate) async fn fetch_blob(
-    http: &reqwest::Client,
+    http: &hclient::Client,
     blob_url: &str,
     accept: &str,
     digest: &str,
     token: Option<&str>,
 ) -> Result<Vec<u8>, StoreError> {
-    let mut req = http.get(blob_url).header(reqwest::header::ACCEPT, accept);
+    let mut req = http.get(blob_url).header("accept", accept);
     if let Some(t) = token {
-        req = req.header(reqwest::header::AUTHORIZATION, format!("Bearer {t}"));
+        req = req.header("authorization", &format!("Bearer {t}"));
     }
     let resp = req
         .send()
@@ -54,9 +87,10 @@ pub(crate) async fn fetch_blob(
         ))));
     }
     let bytes = resp
-        .bytes()
+        .collect()
         .await
-        .map_err(|e| StoreError::Io(std::io::Error::other(e)))?
+        .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?
+        .bytes()
         .to_vec();
     let got = crate::layout::sha256_hex(&bytes);
     if got != strip(digest) {
@@ -121,7 +155,7 @@ pub async fn fetch_http(store: &Store, url: &str) -> Result<Stored, StoreError> 
     let http = compression_client()?;
     let resp = http
         .get(url)
-        .header(reqwest::header::ACCEPT, "application/wasm")
+        .header("accept", "application/wasm")
         .send()
         .await
         .map_err(|e| StoreError::Io(std::io::Error::other(e)))?;
@@ -131,16 +165,16 @@ pub async fn fetch_http(store: &Store, url: &str) -> Result<Stored, StoreError> 
             resp.status()
         ))));
     }
-    let etag = header(&resp, reqwest::header::ETAG);
-    let last_modified = header(&resp, reqwest::header::LAST_MODIFIED);
-    let bytes = resp
-        .bytes()
+    let etag = header(&resp, "etag");
+    let last_modified = header(&resp, "last-modified");
+    let body = resp
+        .collect()
         .await
-        .map_err(|e| StoreError::Io(std::io::Error::other(e)))?;
-    store_http_bytes(store, url, &bytes, etag, last_modified)
+        .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+    store_http_bytes(store, url, body.bytes(), etag, last_modified)
 }
 
-fn header(resp: &reqwest::Response, name: reqwest::header::HeaderName) -> Option<String> {
+fn header<B>(resp: &hclient::Response<B>, name: &str) -> Option<String> {
     resp.headers()
         .get(name)
         .and_then(|v| v.to_str().ok())

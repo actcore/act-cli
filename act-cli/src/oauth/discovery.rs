@@ -107,7 +107,7 @@ fn require_secure(url: &Url) -> Result<()> {
 
 /// Fetch and validate the resource's metadata.
 pub async fn fetch_resource_metadata(
-    client: &reqwest::Client,
+    client: &hclient::Client,
     resource: &Url,
 ) -> Result<ResourceMetadata> {
     let url = protected_resource_url(resource)?;
@@ -133,7 +133,7 @@ pub async fn fetch_resource_metadata(
 }
 
 /// Fetch and validate an authorization server's metadata.
-pub async fn fetch_as_metadata(client: &reqwest::Client, issuer: &Url) -> Result<AsMetadata> {
+pub async fn fetch_as_metadata(client: &hclient::Client, issuer: &Url) -> Result<AsMetadata> {
     let candidates = as_metadata_urls(issuer)?;
     let mut last: Option<anyhow::Error> = None;
     for url in &candidates {
@@ -167,8 +167,8 @@ pub async fn fetch_as_metadata(client: &reqwest::Client, issuer: &Url) -> Result
                 // authorization endpoint is handed to the platform's URL
                 // opener, so a metadata document naming `file:` or any scheme
                 // with a registered handler would have this host open it. The
-                // token endpoint is safer only by accident — reqwest refuses a
-                // non-HTTP scheme — and accident is not a check.
+                // token endpoint is safer only by accident — the client
+                // refuses a non-HTTP scheme — and accident is not a check.
                 for (what, endpoint) in [
                     ("authorization_endpoint", &md.authorization_endpoint),
                     ("token_endpoint", &md.token_endpoint),
@@ -204,19 +204,24 @@ pub async fn fetch_as_metadata(client: &reqwest::Client, issuer: &Url) -> Result
 }
 
 async fn fetch_json<T: serde::de::DeserializeOwned>(
-    client: &reqwest::Client,
+    client: &hclient::Client,
     url: &Url,
 ) -> Result<T> {
     let resp = client
-        .get(url.clone())
+        .get(url.as_str())
         .header("accept", "application/json")
         .send()
         .await
         .with_context(|| format!("requesting {url}"))?;
+    // Status before body, where it was read before: a metadata endpoint that
+    // answers 404 with an HTML page must be reported as the 404, not as a JSON
+    // parse failure.
     let status = resp.status();
     ensure!(status.is_success(), "{url} answered {status}");
-    resp.json::<T>()
+    resp.collect()
         .await
+        .with_context(|| format!("reading {url}"))?
+        .json::<T>()
         .with_context(|| format!("{url} did not answer with the expected JSON"))
 }
 
@@ -286,7 +291,7 @@ mod tests {
     }
 
     /// The endpoints inside a metadata document reach two places that treat a
-    /// URL as an instruction: the platform's URL opener, and reqwest. A scheme
+    /// URL as an instruction: the platform's URL opener, and the client. A scheme
     /// nobody checked is the difference between opening a browser and opening
     /// whatever `file:` or a custom handler is registered to.
     #[test]
@@ -336,7 +341,7 @@ mod tests {
             .await;
 
             let err = fetch_resource_metadata(
-                &reqwest::Client::new(),
+                &crate::oauth::http_client().unwrap(),
                 &Url::parse(&format!("{base}/mcp")).unwrap(),
             )
             .await
@@ -357,7 +362,7 @@ mod tests {
             // The document has to name itself correctly to get past the first
             // check, so the resource is patched in below by re-serving.
             let err = fetch_resource_metadata(
-                &reqwest::Client::new(),
+                &crate::oauth::http_client().unwrap(),
                 &Url::parse(&format!("{base}/mcp")).unwrap(),
             )
             .await
@@ -388,10 +393,13 @@ mod tests {
             ))
             .await;
 
-            let err = fetch_as_metadata(&reqwest::Client::new(), &Url::parse(&base).unwrap())
-                .await
-                .unwrap_err()
-                .to_string();
+            let err = fetch_as_metadata(
+                &crate::oauth::http_client().unwrap(),
+                &Url::parse(&base).unwrap(),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
             assert!(err.contains("as.example.com"), "{err}");
         }
 
@@ -416,10 +424,13 @@ mod tests {
             );
             tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
 
-            let err = fetch_as_metadata(&reqwest::Client::new(), &Url::parse(&base).unwrap())
-                .await
-                .unwrap_err()
-                .to_string();
+            let err = fetch_as_metadata(
+                &crate::oauth::http_client().unwrap(),
+                &Url::parse(&base).unwrap(),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
             assert!(err.contains("S256"), "say what is missing: {err}");
         }
 
@@ -443,10 +454,13 @@ mod tests {
             );
             tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
 
-            let err = fetch_as_metadata(&reqwest::Client::new(), &Url::parse(&base).unwrap())
-                .await
-                .unwrap_err()
-                .to_string();
+            let err = fetch_as_metadata(
+                &crate::oauth::http_client().unwrap(),
+                &Url::parse(&base).unwrap(),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
             assert!(
                 err.contains("authorization_endpoint"),
                 "name which endpoint: {err}"
