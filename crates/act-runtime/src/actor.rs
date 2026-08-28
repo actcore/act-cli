@@ -2,8 +2,9 @@
 //! over a channel. Also the audit envelope each call is wrapped in.
 
 use anyhow::Result;
+use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use tokio::sync::{mpsc, oneshot};
 use tracing::Instrument;
@@ -207,11 +208,29 @@ pub struct CallToolResult {
 }
 /// Handle to send requests to the component actor.
 #[derive(Clone)]
-pub struct ComponentHandle(mpsc::Sender<ComponentRequest>);
+pub struct ComponentHandle {
+    tx: mpsc::Sender<ComponentRequest>,
+    /// Compiled argument schemas, per session.
+    ///
+    /// Per session because a bridge's tool list is not fixed: `mcp-bridge` and
+    /// `openapi-bridge` expose the tools of whatever upstream a session opened,
+    /// so a schema cached without the session id would be the wrong component's.
+    ///
+    /// Populated by one `list-tools` the first time a session calls a tool, and
+    /// reused after — validating must not double the guest round trips.
+    schemas: Arc<Mutex<HashMap<Option<String>, Arc<ToolSchemas>>>>,
+}
+
+/// Tool name to its compiled schema, `None` where the component shipped one
+/// that could not be compiled (see `validate::Validator::compile`).
+type ToolSchemas = HashMap<String, Option<Arc<crate::validate::Validator>>>;
 
 impl ComponentHandle {
     pub(crate) fn new(tx: mpsc::Sender<ComponentRequest>) -> Self {
-        Self(tx)
+        Self {
+            tx,
+            schemas: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     /// A handle with no actor behind it: every call answers
@@ -222,7 +241,7 @@ impl ComponentHandle {
     /// build one of these itself.
     pub fn disconnected() -> Self {
         let (tx, _rx) = mpsc::channel(1);
-        Self(tx)
+        Self::new(tx)
     }
 
     /// Send one request and wait for its reply.
@@ -236,7 +255,7 @@ impl ComponentHandle {
         build: impl FnOnce(oneshot::Sender<Result<T, ComponentError>>) -> ComponentRequest,
     ) -> Result<T, ComponentError> {
         let (reply, answer) = oneshot::channel();
-        self.0.send(build(reply)).await.map_err(|_| {
+        self.tx.send(build(reply)).await.map_err(|_| {
             ComponentError::Internal(anyhow::anyhow!("component actor unavailable"))
         })?;
         answer.await.map_err(|_| {
@@ -259,6 +278,14 @@ impl ComponentHandle {
     /// question. `None` for transports that prompt locally or not at all — see
     /// [`crate::consent`] for why the ask travels back to the caller rather
     /// than the gate reaching for a peer itself.
+    /// Call a tool, after checking its arguments against the schema the
+    /// component published for it (`ACT-SPEC.md` §6.4).
+    ///
+    /// The check happens here rather than in a transport so that every caller
+    /// gets it — `act call` on the command line as much as an agent over MCP.
+    /// A rejection is `ComponentError::Tool` with kind `std:invalid-args`, the
+    /// same shape the guest would have produced, and the guest is never
+    /// reached.
     pub async fn call_tool(
         &self,
         name: &str,
@@ -266,6 +293,7 @@ impl ComponentHandle {
         metadata: Vec<(String, Vec<u8>)>,
         consent: Option<consent::ConsentSink>,
     ) -> Result<CallToolResult, ComponentError> {
+        self.check_arguments(name, &arguments, &metadata).await?;
         self.round_trip(|reply| ComponentRequest::CallTool {
             name: name.to_string(),
             arguments,
@@ -274,6 +302,98 @@ impl ComponentHandle {
             consent,
         })
         .await
+    }
+
+    async fn check_arguments(
+        &self,
+        name: &str,
+        arguments: &[u8],
+        metadata: &[(String, Vec<u8>)],
+    ) -> Result<(), ComponentError> {
+        let session = meta_str(&decode_meta_strings(metadata), "std:session-id");
+        let schemas = self.tool_schemas(session, metadata).await?;
+
+        // A tool the listing does not mention is passed through: the component
+        // answers `std:not-found` itself, and a host inventing that answer
+        // would be wrong for a component whose list is genuinely dynamic.
+        let Some(Some(validator)) = schemas.get(name) else {
+            return Ok(());
+        };
+
+        let value = crate::validate::arguments_as_json(arguments)
+            .map_err(|e| ComponentError::Tool(crate::validate::invalid_args(e)))?;
+        validator.check(&value).map_err(|e| {
+            tracing::debug!(tool = %name, "arguments rejected before reaching the component");
+            ComponentError::Tool(crate::validate::invalid_args(format!(
+                "arguments do not match the schema for '{name}': {e}"
+            )))
+        })
+    }
+
+    /// The other half of the same rule, for `open-session` args
+    /// (`ACT-SESSIONS.md` §2.1).
+    ///
+    /// Not cached: a session is opened once, so a cache would hold a schema
+    /// exactly as long as it is useless. The tool path caches because a session
+    /// then makes many calls.
+    async fn check_session_args(
+        &self,
+        args: &[(String, Vec<u8>)],
+        metadata: &[(String, Vec<u8>)],
+    ) -> Result<(), ComponentError> {
+        let schema = self.open_session_args_schema(metadata.to_vec()).await?;
+        let Some(validator) = crate::validate::Validator::compile("open-session", &schema) else {
+            return Ok(());
+        };
+        let value = crate::validate::session_args_as_json(args)
+            .map_err(|e| ComponentError::Tool(crate::validate::invalid_args(e)))?;
+        validator.check(&value).map_err(|e| {
+            ComponentError::Tool(crate::validate::invalid_args(format!(
+                "session arguments do not match the component's schema: {e}"
+            )))
+        })
+    }
+
+    async fn tool_schemas(
+        &self,
+        session: Option<String>,
+        metadata: &[(String, Vec<u8>)],
+    ) -> Result<Arc<ToolSchemas>, ComponentError> {
+        if let Some(hit) = self
+            .schemas
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&session)
+        {
+            return Ok(hit.clone());
+        }
+
+        // Listed with the caller's own metadata, so a bridge sees the session
+        // whose tools it is being asked about. `list-tools` takes it decoded;
+        // a value that is not decodable CBOR is dropped rather than guessed at,
+        // the same rule `decode_meta_strings` follows.
+        let mut listing_meta = Metadata::new();
+        for (k, v) in metadata {
+            if let Ok(value) = act_types::cbor::cbor_to_json(v) {
+                listing_meta.insert(k.clone(), value);
+            }
+        }
+        let listed = self.list_tools(&listing_meta).await?;
+        let compiled: ToolSchemas = listed
+            .tools
+            .iter()
+            .map(|td| {
+                let v = crate::validate::Validator::compile(&td.name, &td.parameters_schema)
+                    .map(Arc::new);
+                (td.name.clone(), v)
+            })
+            .collect();
+        let compiled = Arc::new(compiled);
+        self.schemas
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(session, compiled.clone());
+        Ok(compiled)
     }
 
     /// A component that exports no session-provider fails with
@@ -285,6 +405,7 @@ impl ComponentHandle {
         metadata: Vec<(String, Vec<u8>)>,
         consent: Option<consent::ConsentSink>,
     ) -> Result<sessions::Session, ComponentError> {
+        self.check_session_args(&args, &metadata).await?;
         self.round_trip(|reply| ComponentRequest::OpenSession {
             args,
             metadata,
@@ -323,7 +444,7 @@ impl ComponentHandle {
         // Depth 1: the actor runs one call at a time and blocks on each answer.
         let (consent_tx, mut consent_rx) = mpsc::channel::<consent::ConsentRequest>(1);
 
-        self.0.send(build(reply, consent_tx)).await.map_err(|_| {
+        self.tx.send(build(reply, consent_tx)).await.map_err(|_| {
             ComponentError::Internal(anyhow::anyhow!("component actor unavailable"))
         })?;
 

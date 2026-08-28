@@ -45,6 +45,7 @@ pub mod http_policy;
 pub mod resolve;
 mod runtime;
 pub mod sessions;
+pub mod validate;
 
 mod actor;
 mod engine;

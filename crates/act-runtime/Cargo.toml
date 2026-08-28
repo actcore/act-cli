@@ -32,6 +32,11 @@ http-body = "1"
 http-body-util = "0.1"
 hyper = "1"
 path-clean = "1"
+# JSON Schema validation of what an agent sends, before it reaches a
+# component. `boon` rather than a validator that can fetch: a schema is
+# guest-authored, so a `$ref` must not become an outbound request — see
+# `validate`.
+boon = "0.6"
 hclient.workspace = true
 hclient-native.workspace = true
 hclient-rt-tokio.workspace = true

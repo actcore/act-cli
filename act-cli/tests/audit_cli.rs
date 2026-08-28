@@ -757,8 +757,17 @@ fn tool_arguments_are_digested_by_default() {
 /// default is safe, not that the flag does anything.
 #[test]
 fn audit_args_records_the_full_tool_argument_value() {
-    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/sessions-canary.wasm");
+    // `fs-canary`, not `sessions-canary`: this needs a tool that actually
+    // takes an argument. The sessions canary's `read` declares
+    // `additionalProperties: false` with no properties — it accepts none — and
+    // the call this test used to make was refused the moment the host began
+    // validating arguments against the schema a component publishes. The test
+    // was sending something the tool had always forbidden; nothing had been
+    // checking. `fs-canary`'s `read` requires `path`, and the call failing on
+    // the filesystem gate afterwards is fine: the argument is recorded when the
+    // call is made, not when it succeeds.
+    let fixture =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fs-canary.wasm");
     const MARKER: &str = "zzmarkerzz";
     let out = act_bin()
         .args([
@@ -766,7 +775,7 @@ fn audit_args_records_the_full_tool_argument_value() {
             fixture.to_str().expect("fixture path is utf-8"),
             "read",
             "--args",
-            &format!(r#"{{"name":"{MARKER}"}}"#),
+            &format!(r#"{{"path":"/{MARKER}"}}"#),
             "--audit-args",
         ])
         .output()
@@ -900,5 +909,65 @@ fn sockets_ask_resolution_reaches_the_audit_trail() {
     assert!(
         ask_line.contains("no prompt channel"),
         "ask-deny line must carry the reason, got: {ask_line}"
+    );
+}
+
+/// Arguments that do not match a tool's own schema are refused, and the
+/// component is never called.
+///
+/// The audit trail is what proves the second half. A tool call writes a line
+/// naming the tool; a call refused before dispatch writes none. Asserting only
+/// the error text would leave "rejected after the guest ran" and "rejected
+/// instead of running the guest" indistinguishable, and it is the second that
+/// `ACT-SPEC.md` §6.4 requires — "without calling the component".
+#[test]
+fn arguments_that_fail_the_schema_never_reach_the_component() {
+    let fixture =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fs-canary.wasm");
+
+    // `fs-canary`'s `read` requires `path` and forbids anything else.
+    let refused = act_bin()
+        .args([
+            "call",
+            fixture.to_str().expect("fixture path is utf-8"),
+            "read",
+            "--args",
+            r#"{"nope":1}"#,
+        ])
+        .output()
+        .expect("ran act");
+    let err = String::from_utf8_lossy(&refused.stderr);
+
+    assert!(!refused.status.success(), "the call must fail: {err}");
+    assert!(
+        err.contains("std:invalid-args"),
+        "the kind ACT-CONSTANTS §9 registers for this: {err}"
+    );
+    assert!(
+        err.contains("path") && err.contains("nope"),
+        "an agent has to learn what to add and what to drop: {err}"
+    );
+    assert!(
+        !err.contains("● read"),
+        "a tool-call audit line means the component ran; it must not have: {err}"
+    );
+
+    // The contrast: valid arguments do reach it, and the line appears. Without
+    // this half, a validator that refused everything would pass the assertions
+    // above.
+    let accepted = act_bin()
+        .args([
+            "call",
+            fixture.to_str().expect("fixture path is utf-8"),
+            "read",
+            "--args",
+            r#"{"path":"/etc/hostname"}"#,
+        ])
+        .output()
+        .expect("ran act");
+    let err = String::from_utf8_lossy(&accepted.stderr);
+    assert!(
+        err.contains("● read"),
+        "valid arguments must reach the component: {err}"
     );
 }
