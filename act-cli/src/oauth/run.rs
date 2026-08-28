@@ -272,22 +272,11 @@ async fn exchange(
     if let Some(secret) = &reg.client_secret {
         form.push(("client_secret", secret.as_str()));
     }
-    // Encoded here rather than through a form helper: the token request is
-    // `application/x-www-form-urlencoded` either way (RFC 6749 §4.1.3).
-    let body = form
-        .iter()
-        .fold(
-            url::form_urlencoded::Serializer::new(String::new()),
-            |mut s, (k, v)| {
-                s.append_pair(k, v);
-                s
-            },
-        )
-        .finish();
+    // RFC 6749 §4.1.3. `form` sets the content type itself, and only if the
+    // caller has not.
     let resp = client
         .post(&as_md.token_endpoint)
-        .header("content-type", "application/x-www-form-urlencoded")
-        .body(hclient::RequestBody::Full(bytes::Bytes::from(body)))
+        .form(form)
         .send()
         .await
         .with_context(|| format!("exchanging the code at {}", as_md.token_endpoint))?;

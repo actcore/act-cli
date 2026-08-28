@@ -50,25 +50,18 @@ pub async fn refresh(
         .await
         .with_context(|| format!("rediscovering {issuer} to refresh"))?;
 
-    let body = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("grant_type", "refresh_token")
-        .append_pair("refresh_token", refresh_token)
-        .append_pair("client_id", &reg.client_id)
-        .finish();
-    let body = match &reg.client_secret {
-        Some(secret) => format!(
-            "{body}&{}",
-            url::form_urlencoded::Serializer::new(String::new())
-                .append_pair("client_secret", secret)
-                .finish()
-        ),
-        None => body,
-    };
+    let mut form: Vec<(&str, &str)> = vec![
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
+        ("client_id", reg.client_id.as_str()),
+    ];
+    if let Some(secret) = &reg.client_secret {
+        form.push(("client_secret", secret.as_str()));
+    }
 
     let resp = client
         .post(&as_md.token_endpoint)
-        .header("content-type", "application/x-www-form-urlencoded")
-        .body(hclient::RequestBody::Full(bytes::Bytes::from(body)))
+        .form(form)
         .send()
         .await
         .with_context(|| format!("refreshing at {}", as_md.token_endpoint))?;
