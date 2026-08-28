@@ -16,7 +16,7 @@ readme = "README.md"
 
 [workspace.dependencies]
 act-types = "0.14"
-wasmparser = "0.252.0"
+wasmparser = "0.257.1"
 # The host's own outbound HTTP. `default-features = false` drops `idn` and
 # `public-suffix`: every URL here comes from a metadata document this host
 # already validated, or from a registry reference.
