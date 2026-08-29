@@ -123,6 +123,14 @@ env, then `GITHUB_TOKEN` for `ghcr.io`, then `~/.docker/config.json`
 
 RISC-V (`riscv64`) is a first-class target. Regressions on RISC-V are release-blocking.
 
+Released **glibc** binaries and wheels need **glibc 2.34 or newer** (Debian 12,
+Ubuntu 22.04, RHEL 9 and later); the riscv64 wheel needs 2.39. The floor is one
+symbol: DNS SVCB/HTTPS lookups call `res_query(3)`, which glibc did not export
+under that name before 2.34. Nothing else in the binary requires past 2.33.
+Older distributions are covered by the musl builds, which carry no such floor
+because musl exports the symbol outright. Building from source does not lift
+it — the call is the same one — so musl is the answer there, not `cargo build`.
+
 ## Building
 
 ```bash

@@ -66,12 +66,26 @@ jobs:
     strategy:
       matrix:
         include:
+          # `zig_target` carries the glibc floor and `target` does not, because
+          # the two are read by different things: rustup and the artifact path
+          # want the bare triple, only `cargo zigbuild` understands the suffix.
+          #
+          # 2.34 is where glibc began exporting `res_query`, which
+          # `hclient-dns-system` calls for SVCB/HTTPS records. Below it the
+          # link fails outright; the underscored `__res_query` that older
+          # headers `#define` to is not an escape, since a modern glibc keeps
+          # it only as a compat symbol new code cannot bind to. An unsuffixed
+          # gnu triple is not neutral here — zig picks a default well under
+          # 2.34, which is how these three came to fail while musl passed.
           - name: linux-x86_64-gnu
             target: x86_64-unknown-linux-gnu
+            zig_target: x86_64-unknown-linux-gnu.2.34
           - name: linux-aarch64-gnu
             target: aarch64-unknown-linux-gnu
+            zig_target: aarch64-unknown-linux-gnu.2.34
           - name: linux-riscv64-gnu
             target: riscv64gc-unknown-linux-gnu
+            zig_target: riscv64gc-unknown-linux-gnu.2.34
           - name: linux-x86_64-musl
             target: x86_64-unknown-linux-musl
           - name: linux-aarch64-musl
@@ -91,7 +105,7 @@ jobs:
         working-directory: crates/act-runtime
         env:
           WKG_CONFIG_FILE: wkg-registry.toml
-      - run: cargo zigbuild --release --target ${{ matrix.target }}
+      - run: cargo zigbuild --release --target ${{ matrix.zig_target || matrix.target }}
       - name: Rename binaries
         run: |
           cp target/${{ matrix.target }}/release/act act-${{ matrix.name }}

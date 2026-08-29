@@ -15,9 +15,26 @@ jobs:
           - { name: act-cli, manifest: act-cli/Cargo.toml }
           - { name: act-build, manifest: act-build/Cargo.toml }
         platform:
-          - { name: manylinux-x86_64, os: ubuntu-latest, target: x86_64, manylinux: auto, zig: true }
-          - { name: manylinux-aarch64, os: ubuntu-latest, target: aarch64, manylinux: auto, zig: true }
-          - { name: manylinux-riscv64, os: ubuntu-latest, target: riscv64gc-unknown-linux-gnu, manylinux: auto, zig: true }
+          # The glibc floor is set by ONE symbol. `hclient-dns-system` calls
+          # `res_query(3)` for SVCB/HTTPS records, and glibc only began
+          # exporting that name at 2.34 — before it, `<resolv.h>` was a
+          # `#define res_query __res_query` and only the underscored symbol
+          # existed. Linking the underscored one instead is not a fix: on a
+          # modern glibc it survives only as a versioned compat symbol
+          # (`__res_query@GLIBC_2.2.5`, single `@`) that new code cannot bind
+          # to, so that spelling trades these targets for the native build.
+          # Measured on the built `act`: `res_query` is the only GLIBC_2.34
+          # reference and everything else tops out at 2.33 — the floor is this
+          # one call, not a general modernisation.
+          #
+          # riscv64 takes 2_39 rather than 2_34 because that is the lowest
+          # arch-matched container maturin-action publishes for it; 2_34 there
+          # would fall back to the x86_64 image. musl is unaffected — it
+          # exports `res_query` outright — and so is macOS, which reaches it
+          # through the `res_9_query` alias.
+          - { name: manylinux-x86_64, os: ubuntu-latest, target: x86_64, manylinux: "2_34", zig: true }
+          - { name: manylinux-aarch64, os: ubuntu-latest, target: aarch64, manylinux: "2_34", zig: true }
+          - { name: manylinux-riscv64, os: ubuntu-latest, target: riscv64gc-unknown-linux-gnu, manylinux: "2_39", zig: true }
           - { name: musllinux-x86_64, os: ubuntu-latest, target: x86_64-unknown-linux-musl, manylinux: musllinux_1_2, zig: true }
           - { name: musllinux-aarch64, os: ubuntu-latest, target: aarch64-unknown-linux-musl, manylinux: musllinux_1_2, zig: true }
           - { name: musllinux-riscv64, os: ubuntu-latest, target: riscv64gc-unknown-linux-musl, manylinux: musllinux_1_2, zig: true }
