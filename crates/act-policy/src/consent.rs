@@ -184,6 +184,11 @@ pub struct PendingConsent {
     /// What is asking, named the way the host names its subjects: a component
     /// label in the toolserver, a reference on the command line.
     pub subject: String,
+    /// The host's own identifier for that subject, carried through untouched.
+    /// The queue never interprets it; it exists so an answer can be attributed
+    /// to something more durable than a display name — a toolset membership,
+    /// say — when the host wants to remember it.
+    pub subject_id: i64,
     pub cap_id: String,
     /// The specific thing within the capability — a path, a host, an address.
     pub key: String,
@@ -225,16 +230,18 @@ impl ConsentQueue {
         all
     }
 
-    /// Answer a question, waking whoever asked it. `false` when no such
-    /// question is waiting — it was answered already, or it expired.
-    pub fn resolve(&self, id: u64, allow: bool) -> bool {
-        let Some(waiting) = self.lock().remove(&id) else {
-            return false;
-        };
+    /// Answer a question, waking whoever asked it.
+    ///
+    /// Returns the question that was answered, so a host that wants to
+    /// remember the decision has what it needs without a second lookup — and
+    /// without a window in which the entry could expire between the two.
+    /// `None` when nothing was waiting: it was answered already, or it expired.
+    pub fn resolve(&self, id: u64, allow: bool) -> Option<PendingConsent> {
+        let waiting = self.lock().remove(&id)?;
         // The receiver is gone if the caller stopped waiting; the decision is
         // then moot rather than an error.
         let _ = waiting.answer.send(allow);
-        true
+        Some(waiting.entry)
     }
 
     /// Ask, and wait for an answer or for the deadline.
@@ -243,7 +250,7 @@ impl ConsentQueue {
     /// may have walked away, and the safe direction when nobody answered is
     /// the same as when they said no — with the difference visible to the
     /// caller, which is why this is separate from `DenyPrompter`.
-    pub async fn ask(&self, subject: &str, ask: &ConsentAsk) -> bool {
+    pub async fn ask(&self, subject: &str, subject_id: i64, ask: &ConsentAsk) -> bool {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = tokio::sync::oneshot::channel();
 
@@ -253,6 +260,7 @@ impl ConsentQueue {
                 entry: PendingConsent {
                     id,
                     subject: subject.to_string(),
+                    subject_id,
                     cap_id: ask.cap_id.clone(),
                     key: ask.key.clone(),
                     summary: ask.summary.clone(),
@@ -292,13 +300,15 @@ fn now_epoch() -> i64 {
 pub struct QueuePrompter {
     queue: Arc<ConsentQueue>,
     subject: String,
+    subject_id: i64,
 }
 
 impl QueuePrompter {
-    pub fn new(queue: Arc<ConsentQueue>, subject: impl Into<String>) -> Self {
+    pub fn new(queue: Arc<ConsentQueue>, subject: impl Into<String>, subject_id: i64) -> Self {
         Self {
             queue,
             subject: subject.into(),
+            subject_id,
         }
     }
 }
@@ -306,7 +316,7 @@ impl QueuePrompter {
 #[async_trait::async_trait]
 impl ConsentPrompter for QueuePrompter {
     async fn decide(&self, ask: &ConsentAsk) -> bool {
-        self.queue.ask(&self.subject, ask).await
+        self.queue.ask(&self.subject, self.subject_id, ask).await
     }
 
     /// There is a channel: someone may be looking at the queue. Whether they
@@ -338,7 +348,7 @@ mod queue_tests {
         let queue = queue();
         let asking = tokio::spawn({
             let queue = queue.clone();
-            async move { queue.ask("clock", &ask("/data")).await }
+            async move { queue.ask("clock", 1, &ask("/data")).await }
         });
 
         let pending = wait_for_one(&queue).await;
@@ -347,7 +357,7 @@ mod queue_tests {
         assert_eq!(pending.key, "/data");
         assert!(pending.asked_at > 1_577_836_800);
 
-        assert!(queue.resolve(pending.id, true));
+        assert!(queue.resolve(pending.id, true).is_some());
         assert!(asking.await.unwrap(), "allowing must wake the caller");
         assert!(queue.pending().is_empty());
     }
@@ -357,7 +367,7 @@ mod queue_tests {
         let queue = queue();
         let asking = tokio::spawn({
             let queue = queue.clone();
-            async move { queue.ask("clock", &ask("/etc")).await }
+            async move { queue.ask("clock", 1, &ask("/etc")).await }
         });
 
         let pending = wait_for_one(&queue).await;
@@ -369,7 +379,7 @@ mod queue_tests {
     #[tokio::test]
     async fn answering_a_question_nobody_asked_reports_it() {
         let queue = queue();
-        assert!(!queue.resolve(999, true));
+        assert!(queue.resolve(999, true).is_none());
     }
 
     #[tokio::test]
@@ -377,12 +387,15 @@ mod queue_tests {
         let queue = queue();
         let asking = tokio::spawn({
             let queue = queue.clone();
-            async move { queue.ask("clock", &ask("/data")).await }
+            async move { queue.ask("clock", 1, &ask("/data")).await }
         });
         let pending = wait_for_one(&queue).await;
 
-        assert!(queue.resolve(pending.id, true));
-        assert!(!queue.resolve(pending.id, false), "it is no longer waiting");
+        assert!(queue.resolve(pending.id, true).is_some());
+        assert!(
+            queue.resolve(pending.id, false).is_none(),
+            "it is no longer waiting"
+        );
         assert!(asking.await.unwrap());
     }
 
@@ -391,7 +404,7 @@ mod queue_tests {
     async fn an_unanswered_question_expires_into_a_refusal() {
         let queue = Arc::new(ConsentQueue::new(Duration::from_millis(50)));
 
-        let decision = queue.ask("clock", &ask("/data")).await;
+        let decision = queue.ask("clock", 1, &ask("/data")).await;
 
         assert!(!decision, "expiry denies");
         assert!(queue.pending().is_empty(), "and stops waiting");
@@ -402,11 +415,11 @@ mod queue_tests {
         let queue = queue();
         let first = tokio::spawn({
             let queue = queue.clone();
-            async move { queue.ask("clock", &ask("/a")).await }
+            async move { queue.ask("clock", 1, &ask("/a")).await }
         });
         let second = tokio::spawn({
             let queue = queue.clone();
-            async move { queue.ask("db", &ask("/b")).await }
+            async move { queue.ask("db", 2, &ask("/b")).await }
         });
 
         let mut pending = Vec::new();
@@ -426,7 +439,7 @@ mod queue_tests {
 
     #[tokio::test]
     async fn the_prompter_reports_that_a_human_can_be_reached() {
-        let prompter = QueuePrompter::new(queue(), "clock");
+        let prompter = QueuePrompter::new(queue(), "clock", 1);
         assert!(prompter.has_channel());
     }
 
