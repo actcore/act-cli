@@ -10,6 +10,11 @@ hooks = [
 [[repos]]
 repo = "local"
 hooks = [
+    # `cfg-if` and `assert_matches` are refused: `std::cfg_select!` and
+    # `std::assert_matches!` have been stable since 1.96 and this workspace's
+    # floor is 1.98. The check reads manifests only — see the script for why
+    # cargo-deny is the wrong place for a rule about *direct* dependencies.
+    { id = "forbidden-crates", name = "no crates std has replaced", entry = "python3 scripts/forbidden-crates.py", language = "system", pass_filenames = false, always_run = true },
     { id = "cargo-clippy", name = "cargo clippy (host)", entry = "cargo clippy -- -D warnings", language = "system", pass_filenames = false, always_run = true },
     { id = "cargo-fmt", name = "cargo fmt", entry = "cargo fmt --all", language = "system", pass_filenames = false, always_run = true },
 ]
