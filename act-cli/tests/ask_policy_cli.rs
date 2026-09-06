@@ -6,17 +6,16 @@
 //! does not export. These subprocess tests assert the user-facing contract:
 //! `ask` is a recognised policy mode, and an unknown mode names it.
 
-use std::process::Command;
+mod common;
 
-fn act_bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_act"))
-}
+use common::act;
+use predicates::prelude::*;
 
 #[test]
 fn unknown_policy_mode_error_lists_ask() {
     // A bogus mode in --grant must fail and surface the valid modes,
     // including `ask`.
-    let out = act_bin()
+    act()
         .args([
             "call",
             "nonexistent.wasm",
@@ -26,24 +25,16 @@ fn unknown_policy_mode_error_lists_ask() {
             "--args",
             "{}",
         ])
-        .output()
-        .expect("ran act");
-    assert!(
-        !out.status.success(),
-        "expected non-zero exit for unknown policy mode"
-    );
-    let text = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        text.contains("ask"),
-        "expected unknown-mode error to list 'ask', got: {text}"
-    );
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("ask"));
 }
 
 #[test]
 fn ask_mode_is_accepted_by_grant_parser() {
     // `ask` is a valid mode: parsing/resolution succeeds, so the command only
     // fails later (component not found), NOT with an unknown-mode error.
-    let out = act_bin()
+    act()
         .args([
             "call",
             "nonexistent.wasm",
@@ -53,15 +44,7 @@ fn ask_mode_is_accepted_by_grant_parser() {
             "--args",
             "{}",
         ])
-        .output()
-        .expect("ran act");
-    assert!(
-        !out.status.success(),
-        "expected non-zero exit (component does not exist)"
-    );
-    let text = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        !text.contains("unknown policy mode"),
-        "`ask` should parse as a valid mode, got: {text}"
-    );
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown policy mode").not());
 }

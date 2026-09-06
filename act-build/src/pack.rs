@@ -138,6 +138,38 @@ pub fn run(wasm_path: &Path, overrides: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Walk up from `wasm_path`'s parent directory to find a project root containing
+/// `act.toml`, `Cargo.toml`, or `pyproject.toml`. Falls back to the current
+/// working directory.
+fn find_project_dir(wasm_path: &Path) -> Result<std::path::PathBuf> {
+    let start = wasm_path
+        .parent()
+        .and_then(|p| std::fs::canonicalize(p).ok())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+    let mut dir = start.as_path();
+    loop {
+        if dir.join("act.toml").exists()
+            || dir.join("Cargo.toml").exists()
+            || dir.join("pyproject.toml").exists()
+        {
+            return Ok(dir.to_path_buf());
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent,
+            None => break,
+        }
+    }
+
+    // Fall back to current working directory.
+    let cwd = std::env::current_dir().context("getting current working directory")?;
+    info!(
+        cwd = %cwd.display(),
+        "no project manifest found walking up from WASM path, using current directory"
+    );
+    Ok(cwd)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,36 +233,4 @@ mod tests {
         let out = apply_overrides(i, &["std.description=a=b".to_string()]).unwrap();
         assert_eq!(out.std.description, "a=b");
     }
-}
-
-/// Walk up from `wasm_path`'s parent directory to find a project root containing
-/// `act.toml`, `Cargo.toml`, or `pyproject.toml`. Falls back to the current
-/// working directory.
-fn find_project_dir(wasm_path: &Path) -> Result<std::path::PathBuf> {
-    let start = wasm_path
-        .parent()
-        .and_then(|p| std::fs::canonicalize(p).ok())
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-
-    let mut dir = start.as_path();
-    loop {
-        if dir.join("act.toml").exists()
-            || dir.join("Cargo.toml").exists()
-            || dir.join("pyproject.toml").exists()
-        {
-            return Ok(dir.to_path_buf());
-        }
-        match dir.parent() {
-            Some(parent) => dir = parent,
-            None => break,
-        }
-    }
-
-    // Fall back to current working directory.
-    let cwd = std::env::current_dir().context("getting current working directory")?;
-    info!(
-        cwd = %cwd.display(),
-        "no project manifest found walking up from WASM path, using current directory"
-    );
-    Ok(cwd)
 }

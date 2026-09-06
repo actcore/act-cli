@@ -1,14 +1,12 @@
 //! `act secret set/list/rm` against a temp file-backed store.
 
-use std::path::PathBuf;
+mod common;
+use common::act_binary_path;
+
 use std::process::Command;
 
 fn act() -> Command {
     Command::new(env!("CARGO_BIN_EXE_act"))
-}
-
-fn act_binary_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_act"))
 }
 
 /// A credential is a set of named fields, so with no field named there is

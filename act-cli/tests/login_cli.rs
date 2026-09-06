@@ -22,18 +22,10 @@
 //! offered, but only a real run proves that answering nothing leaves the field
 //! out of the record instead of storing an empty string or aborting.
 
-use std::path::PathBuf;
+mod common;
+use common::{act_binary_path, fixture};
+
 use std::process::{Command, Output, Stdio};
-
-fn act_binary_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_act"))
-}
-
-fn fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures")
-        .join(name)
-}
 
 /// Runs `act login <fixture> <extra_args...>` with stdin closed, as a
 /// headless run would see it. Every case in this file is expected to refuse

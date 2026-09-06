@@ -3,6 +3,9 @@
 //! (tools `read`/`increment`, requires `std:session-id`; `open-session`
 //! accepts `start: u64`).
 
+mod common;
+use common::act_binary_path;
+
 use std::path::PathBuf;
 
 use rmcp::{
@@ -13,10 +16,6 @@ use rmcp::{
 
 fn canary_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sessions-canary.wasm")
-}
-
-fn act_binary_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_act"))
 }
 
 #[tokio::test]

@@ -1,42 +1,38 @@
-//! Integration coverage for `act inspect component-manifest`.
-use std::path::PathBuf;
-use std::process::Command;
+//! Integration coverage for `act inspect component-manifest` and
+//! `act inspect tools`.
 
-fn act_bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_act"))
-}
+mod common;
 
-fn time_fixture() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/time.wasm")
-}
+use common::{act, fixture};
+use predicates::prelude::*;
 
 #[test]
 fn inspect_help_lists_component_manifest() {
-    let out = act_bin()
+    act()
         .args(["inspect", "--help"])
-        .output()
-        .expect("ran act");
-    assert!(out.status.success(), "act inspect --help failed");
-    let text = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        text.contains("component-manifest"),
-        "missing component-manifest in help: {text}"
-    );
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("component-manifest"));
+}
+
+#[test]
+fn inspect_help_lists_tools() {
+    act()
+        .args(["inspect", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("tools"));
 }
 
 #[test]
 fn inspect_component_manifest_emits_raw_json() {
-    let out = act_bin()
+    let out = act()
         .args(["inspect", "component-manifest", "--format", "json"])
-        .arg(time_fixture())
-        .output()
-        .expect("ran act");
-    assert!(
-        out.status.success(),
-        "command failed; stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout is valid JSON");
+        .arg(fixture("time.wasm"))
+        .assert()
+        .success();
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("stdout is valid JSON");
     // Raw manifest exposes the `std` block verbatim.
     assert!(v.get("std").is_some(), "manifest missing std block");
     assert!(
@@ -46,32 +42,14 @@ fn inspect_component_manifest_emits_raw_json() {
 }
 
 #[test]
-fn inspect_help_lists_tools() {
-    let out = act_bin()
-        .args(["inspect", "--help"])
-        .output()
-        .expect("ran act");
-    assert!(out.status.success(), "act inspect --help failed");
-    let text = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        text.contains("tools"),
-        "missing `tools` in inspect help: {text}"
-    );
-}
-
-#[test]
 fn inspect_tools_emits_raw_list_tools_response() {
-    let out = act_bin()
+    let out = act()
         .args(["inspect", "tools", "--format", "json"])
-        .arg(time_fixture())
-        .output()
-        .expect("ran act");
-    assert!(
-        out.status.success(),
-        "command failed; stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout is valid JSON");
+        .arg(fixture("time.wasm"))
+        .assert()
+        .success();
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("stdout is valid JSON");
     // Raw response shape: top-level `metadata` object + `tools` array.
     assert!(
         v.get("metadata").map(|m| m.is_object()).unwrap_or(false),

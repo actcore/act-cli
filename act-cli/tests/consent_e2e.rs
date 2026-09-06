@@ -15,18 +15,10 @@
 //! database as `key`, and never touches anything regardless of the answer —
 //! it is a canary, not a database client.
 
-use std::path::PathBuf;
+mod common;
+use common::{act_cmd as act_bin, fixture};
+
 use std::process::{Command, Stdio};
-
-fn act_bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_act"))
-}
-
-fn fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures")
-        .join(name)
-}
 
 /// Run `act call <fixture> drop_database --args '{"database": ..}'` plus
 /// whatever grant flags the case needs, with stdin closed so `ask` is

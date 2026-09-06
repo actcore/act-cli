@@ -1,12 +1,10 @@
 //! `act pull` / `act store list` / `act store gc` against a temp store,
 //! fully offline (local file source).
 
-use std::process::Command;
+mod common;
 
-fn act_bin() -> Command {
-    let bin = env!("CARGO_BIN_EXE_act");
-    Command::new(bin)
-}
+use common::act;
+use predicates::prelude::*;
 
 #[test]
 fn pull_local_then_list_then_gc() {
@@ -16,44 +14,23 @@ fn pull_local_then_list_then_gc() {
     std::fs::write(&comp, b"\0asm\x01\0\0\0demo").unwrap();
 
     let run = |args: &[&str]| {
-        act_bin()
-            .args(args)
-            .env("ACT_STORE_DIR", &store_dir)
-            .output()
-            .expect("spawn act")
+        let mut cmd = act();
+        cmd.args(args).env("ACT_STORE_DIR", &store_dir);
+        cmd
     };
 
     // pull (install local snapshot)
-    let out = run(&["pull", comp.to_str().unwrap()]);
-    assert!(
-        out.status.success(),
-        "pull failed: stderr={}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    run(&["pull", comp.to_str().unwrap()]).assert().success();
 
     // list shows the component
-    let out = run(&["store", "list"]);
-    assert!(
-        out.status.success(),
-        "list failed: stderr={}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let listing = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        listing.contains("demo.wasm"),
-        "list missing component: stdout={listing}"
-    );
+    run(&["store", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("demo.wasm"));
 
     // gc removes nothing (the component is referenced)
-    let out = run(&["store", "gc"]);
-    assert!(
-        out.status.success(),
-        "gc failed: stderr={}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(
-        String::from_utf8_lossy(&out.stdout).contains("removed 0"),
-        "expected 'removed 0', got: {}",
-        String::from_utf8_lossy(&out.stdout)
-    );
+    run(&["store", "gc"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("removed 0"));
 }

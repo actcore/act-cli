@@ -1,63 +1,62 @@
+//! The flags the config/policy work put on the CLI surface, as clap presents
+//! them to a user reading `--help`.
+
+mod common;
+
+use common::act;
+use predicates::prelude::*;
+
 #[test]
 fn cli_run_help_shows_policy_flags() {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_act"))
+    act()
         .args(["run", "--help"])
-        .output()
-        .expect("failed to run act");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("--grant"), "missing --grant flag");
-    assert!(stdout.contains("--allow"), "missing --allow flag");
-    assert!(stdout.contains("--deny"), "missing --deny flag");
-    assert!(stdout.contains("profile"), "missing --profile flag");
-    assert!(stdout.contains("config"), "missing --config flag");
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--grant"))
+        .stdout(predicate::str::contains("--allow"))
+        .stdout(predicate::str::contains("--deny"))
+        .stdout(predicate::str::contains("profile"))
+        .stdout(predicate::str::contains("config"));
 }
 
 #[test]
 fn cli_call_help_shows_policy_flags() {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_act"))
+    act()
         .args(["call", "--help"])
-        .output()
-        .expect("failed to run act");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("--grant"), "missing --grant in call");
-    assert!(stdout.contains("--allow"), "missing --allow in call");
-    assert!(stdout.contains("--deny"), "missing --deny in call");
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--grant"))
+        .stdout(predicate::str::contains("--allow"))
+        .stdout(predicate::str::contains("--deny"));
 }
 
 #[test]
 fn cli_legacy_allow_dir_rejected() {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_act"))
+    act()
         .args(["run", "--allow-dir", "a:b", "foo"])
-        .output()
-        .expect("failed to run act");
-    assert!(
-        !output.status.success(),
-        "old --allow-dir flag should be rejected"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("unexpected argument") || stderr.contains("--allow-dir"),
-        "expected clap to reject removed flag; got: {stderr}"
-    );
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("unexpected argument")
+                .or(predicate::str::contains("--allow-dir")),
+        );
 }
 
 #[test]
 fn cli_run_mcp_flag_appears_in_run_help() {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_act"))
+    act()
         .args(["run", "--help"])
-        .output()
-        .expect("failed to run act");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("mcp"), "missing --mcp flag in run");
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mcp"));
 }
 
 #[test]
 fn cli_info_help_shows_tools_and_format_flags() {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_act"))
+    act()
         .args(["info", "--help"])
-        .output()
-        .expect("failed to run act");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("tools"), "missing --tools flag in info");
-    assert!(stdout.contains("format"), "missing --format flag in info");
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("tools"))
+        .stdout(predicate::str::contains("format"));
 }

@@ -4,11 +4,10 @@
 //! tests assert the guarantee that cannot be tested in-crate: that the trail
 //! survives every log-level knob a user can reach for.
 
-use std::process::Command;
+mod common;
+use common::{act_cmd as act_bin, deny_line, fixture, fs_grant_rw, rollup_line};
 
-fn act_bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_act"))
-}
+use std::process::Command;
 
 /// Shared setup for the log-level-survival tests below: a temp file the
 /// grant actually covers, so the `read` call succeeds and a rollup line is
@@ -23,18 +22,13 @@ struct FsReadFixture {
 }
 
 fn fs_read_fixture() -> FsReadFixture {
-    let fixture =
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fs-canary.wasm");
     let dir = tempfile::TempDir::new().expect("tempdir");
     let target = dir.path().join("ok.txt");
     std::fs::write(&target, "content").expect("write fixture file");
-    let rule = format!("{}/**", dir.path().display());
-    let grant = format!(
-        r#"{{"wasi:filesystem":{{"mode":"allowlist","allow":[{{"path":"{rule}","mode":"rw"}}]}}}}"#
-    );
+    let grant = fs_grant_rw(dir.path());
     FsReadFixture {
+        fixture: fixture("fs-canary.wasm"),
         _dir: dir,
-        fixture,
         target,
         grant,
     }
@@ -153,8 +147,7 @@ fn no_audit_is_the_only_flag_that_disables_the_trail() {
 /// `inspect tools` to the same behaviour.
 #[test]
 fn inspect_tools_no_audit_actually_silences_the_trail() {
-    let fixture =
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fs-canary.wasm");
+    let fixture = fixture("fs-canary.wasm");
 
     let out = act_bin()
         .args([
@@ -237,16 +230,13 @@ fn a_guest_tool_error_is_audited_as_tool_error_not_ok() {
 /// process: a granted read and an out-of-ceiling read.
 #[test]
 fn fs_decisions_reach_the_audit_trail() {
-    let fixture =
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fs-canary.wasm");
+    let fixture = fixture("fs-canary.wasm");
 
     let dir = tempfile::TempDir::new().expect("tempdir");
     let allowed = dir.path().join("ok.txt");
     std::fs::write(&allowed, "granted content").expect("write fixture file");
     let rule = format!("{}/**", dir.path().display());
-    let grant = format!(
-        r#"{{"wasi:filesystem":{{"mode":"allowlist","allow":[{{"path":"{rule}","mode":"rw"}}]}}}}"#
-    );
+    let grant = fs_grant_rw(dir.path());
 
     // In-ceiling read: the rollup line must carry the `filesystem:` clause
     // naming the matched rule, proving `check_path_sync`'s `Allow` arm ran.
@@ -264,10 +254,7 @@ fn fs_decisions_reach_the_audit_trail() {
         .expect("ran act");
     assert!(out.status.success(), "granted read must succeed: {out:?}");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    let rollup = stderr
-        .lines()
-        .find(|l| l.starts_with("audit: \u{25cf}"))
-        .unwrap_or_else(|| panic!("no rollup line in stderr: {stderr}"));
+    let rollup = rollup_line(&stderr);
     assert!(
         rollup.contains("filesystem:"),
         "rollup must carry a filesystem: clause, got: {rollup}"
@@ -297,10 +284,7 @@ fn fs_decisions_reach_the_audit_trail() {
         "out-of-ceiling read must be denied: {out:?}"
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
-    let deny_line = stderr
-        .lines()
-        .find(|l| l.starts_with("audit: \u{2717} deny"))
-        .unwrap_or_else(|| panic!("no immediate deny line in stderr: {stderr}"));
+    let deny_line = deny_line(&stderr);
     assert!(
         deny_line.contains("wasi:filesystem"),
         "deny line must name the capability, got: {deny_line}"
@@ -325,8 +309,7 @@ fn fs_decisions_reach_the_audit_trail() {
 /// `resolve_ask` still *runs* to produce that verdict, it isn't skipped.
 #[test]
 fn fs_ask_resolution_reaches_the_audit_trail() {
-    let fixture =
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fs-canary.wasm");
+    let fixture = fixture("fs-canary.wasm");
 
     let dir = tempfile::TempDir::new().expect("tempdir");
     let target = dir.path().join("ok.txt");
@@ -412,10 +395,7 @@ fn http_decisions_reach_the_audit_trail() {
         stderr.contains("ConnectionRefused"),
         "an allowed request must reach the transport, got: {stderr}"
     );
-    let rollup = stderr
-        .lines()
-        .find(|l| l.starts_with("audit: \u{25cf}"))
-        .unwrap_or_else(|| panic!("no rollup line in stderr: {stderr}"));
+    let rollup = rollup_line(&stderr);
     assert!(
         rollup.contains("http:"),
         "rollup must carry an http: clause, got: {rollup}"
@@ -450,10 +430,7 @@ fn http_decisions_reach_the_audit_trail() {
         stderr.contains("HttpRequestDenied"),
         "a denied request must be blocked before the transport, got: {stderr}"
     );
-    let deny_line = stderr
-        .lines()
-        .find(|l| l.starts_with("audit: \u{2717} deny"))
-        .unwrap_or_else(|| panic!("no immediate deny line in stderr: {stderr}"));
+    let deny_line = deny_line(&stderr);
     assert!(
         deny_line.contains("wasi:http"),
         "deny line must name the capability, got: {deny_line}"
@@ -524,16 +501,12 @@ fn http_ask_resolution_reaches_the_audit_trail() {
 /// the guest until instantiation (and this header) has already completed.
 #[test]
 fn instantiation_header_precedes_any_tool_output() {
-    let fixture =
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fs-canary.wasm");
+    let fixture = fixture("fs-canary.wasm");
 
     let dir = tempfile::TempDir::new().expect("tempdir");
     let target = dir.path().join("ok.txt");
     std::fs::write(&target, "content").expect("write fixture file");
-    let rule = format!("{}/**", dir.path().display());
-    let grant = format!(
-        r#"{{"wasi:filesystem":{{"mode":"allowlist","allow":[{{"path":"{rule}","mode":"rw"}}]}}}}"#
-    );
+    let grant = fs_grant_rw(dir.path());
 
     let out = act_bin()
         .args([
@@ -585,8 +558,7 @@ fn instantiation_header_precedes_any_tool_output() {
 /// `declared` value at all.
 #[test]
 fn instantiation_header_warns_when_a_declared_capability_is_denied() {
-    let fixture =
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fs-canary.wasm");
+    let fixture = fixture("fs-canary.wasm");
 
     let out = act_bin()
         .args([
@@ -636,8 +608,7 @@ fn instantiation_header_warns_when_a_declared_capability_is_denied() {
 /// agent driving the CLI).
 #[test]
 fn instantiation_header_warns_when_declared_ask_has_no_prompt_channel() {
-    let fixture =
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fs-canary.wasm");
+    let fixture = fixture("fs-canary.wasm");
 
     let out = act_bin()
         .args([
@@ -766,8 +737,7 @@ fn audit_args_records_the_full_tool_argument_value() {
     // checking. `fs-canary`'s `read` requires `path`, and the call failing on
     // the filesystem gate afterwards is fine: the argument is recorded when the
     // call is made, not when it succeeds.
-    let fixture =
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fs-canary.wasm");
+    let fixture = fixture("fs-canary.wasm");
     const MARKER: &str = "zzmarkerzz";
     let out = act_bin()
         .args([
@@ -818,10 +788,7 @@ fn sockets_decisions_reach_the_audit_trail() {
         stderr.contains("ConnectionRefused"),
         "an allowed connect must reach the transport, got: {stderr}"
     );
-    let rollup = stderr
-        .lines()
-        .find(|l| l.starts_with("audit: \u{25cf}"))
-        .unwrap_or_else(|| panic!("no rollup line in stderr: {stderr}"));
+    let rollup = rollup_line(&stderr);
     assert!(
         rollup.contains("sockets:"),
         "rollup must carry a sockets: clause, got: {rollup}"
@@ -852,10 +819,7 @@ fn sockets_decisions_reach_the_audit_trail() {
         stderr.contains("PermissionDenied"),
         "a denied connect must be blocked before the transport, got: {stderr}"
     );
-    let deny_line = stderr
-        .lines()
-        .find(|l| l.starts_with("audit: \u{2717} deny"))
-        .unwrap_or_else(|| panic!("no immediate deny line in stderr: {stderr}"));
+    let deny_line = deny_line(&stderr);
     assert!(
         deny_line.contains("wasi:sockets"),
         "deny line must name the capability, got: {deny_line}"
@@ -922,8 +886,7 @@ fn sockets_ask_resolution_reaches_the_audit_trail() {
 /// `ACT-SPEC.md` §6.4 requires — "without calling the component".
 #[test]
 fn arguments_that_fail_the_schema_never_reach_the_component() {
-    let fixture =
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fs-canary.wasm");
+    let fixture = fixture("fs-canary.wasm");
 
     // `fs-canary`'s `read` requires `path` and forbids anything else.
     let refused = act_bin()

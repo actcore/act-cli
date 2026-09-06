@@ -2,6 +2,9 @@
 //! (built via `cd components/time && just build && just pack`). Rebuild when the
 //! component source or its pack metadata changes.
 
+mod common;
+use common::act_binary_path;
+
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -17,10 +20,6 @@ use tokio::sync::Mutex as AsyncMutex;
 
 fn time_component_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/time.wasm")
-}
-
-fn act_binary_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_act"))
 }
 
 /// Spawn `act run <component> --mcp` with stderr piped instead of inherited,
@@ -243,14 +242,14 @@ async fn emitted_meta_keys_are_conformant() {
     );
 
     for block in &result.content {
-        if let rmcp::model::ContentBlock::Text(t) = block {
-            if let Some(meta) = t.meta.as_ref() {
-                for key in meta.0.keys() {
-                    assert!(
-                        !key.contains(':'),
-                        "block _meta key `{key}` contains a colon"
-                    );
-                }
+        if let rmcp::model::ContentBlock::Text(t) = block
+            && let Some(meta) = t.meta.as_ref()
+        {
+            for key in meta.0.keys() {
+                assert!(
+                    !key.contains(':'),
+                    "block _meta key `{key}` contains a colon"
+                );
             }
         }
     }

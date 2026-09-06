@@ -22,8 +22,11 @@
 //!
 //! See `tests/fixtures-src/README.md` for how both are built.
 
+mod common;
+use common::{act_binary_path, fixture};
+
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,16 +47,6 @@ const SECRET: &str = "sekrit-canary-value";
 
 /// The key both canaries ask for — see `PROBE_KEY` in the fixture source.
 const PROBE_KEY: &str = "probe";
-
-fn act_binary_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_act"))
-}
-
-fn fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures")
-        .join(name)
-}
 
 /// One test's hermetic environment: a private credential store and an empty
 /// config file, both under a tempdir that dies with the test.
