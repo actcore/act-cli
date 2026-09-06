@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ffb1ed83d8745b9da17a46253589b4446e7e223b4fa1bdb49bea18e4099a143e # shrinks to cfg = FsConfig { mode: Allowlist, allow: [FsAllow { glob: "/c", mode: Ro }], deny: [] }, path = "/c"
+cc 86e544e236dfc94901200cbddeeeedfae320449c492c41fa7d84722bbcbe32f4 # shrinks to cfg = FsConfig { mode: Allowlist, allow: [FsAllow { glob: "/db.sqlite", mode: Ro }], deny: [] }, path = "/db.sqlite", acc = Write
