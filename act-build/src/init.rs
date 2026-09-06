@@ -159,16 +159,15 @@ fn resolve_target(name_arg: Option<&str>, output: Option<&Path>) -> Result<(Path
         };
         return Ok((target, name));
     }
-    match name_arg {
-        Some(n) => Ok((cwd.join(n), n.to_string())),
-        None => {
-            let base = cwd
-                .file_name()
-                .and_then(|s| s.to_str())
-                .ok_or_else(|| anyhow!("cannot derive component name from current directory"))?
-                .to_string();
-            Ok((cwd, base))
-        }
+    if let Some(n) = name_arg {
+        Ok((cwd.join(n), n.to_string()))
+    } else {
+        let base = cwd
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| anyhow!("cannot derive component name from current directory"))?
+            .to_string();
+        Ok((cwd, base))
     }
 }
 
@@ -178,18 +177,12 @@ fn validate_name(name: &str) -> Result<()> {
     }
     let first = name.chars().next().unwrap();
     if !first.is_ascii_lowercase() {
-        bail!(
-            "component name must start with a lowercase ASCII letter (got {:?})",
-            name
-        );
+        bail!("component name must start with a lowercase ASCII letter (got {name:?})");
     }
     for c in name.chars() {
         let ok = c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-';
         if !ok {
-            bail!(
-                "component name contains invalid character {:?}; allowed: a-z, 0-9, '-'",
-                c
-            );
+            bail!("component name contains invalid character {c:?}; allowed: a-z, 0-9, '-'");
         }
     }
     Ok(())
@@ -297,7 +290,7 @@ fn walk_embedded(
                 if is_template {
                     let src = f
                         .contents_utf8()
-                        .ok_or_else(|| anyhow!("embedded template file {:?} is not UTF-8", rel))?;
+                        .ok_or_else(|| anyhow!("embedded template file {rel:?} is not UTF-8"))?;
                     let rendered = env
                         .render_str(src, ctx)
                         .with_context(|| format!("rendering embedded {}", rel.display()))?;

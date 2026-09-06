@@ -101,7 +101,7 @@ fn run_case(protocol_version: &str, answer: Option<&str>) -> Outcome {
                 continue;
             }
 
-            match message.get("id").and_then(|id| id.as_u64()) {
+            match message.get("id").and_then(serde_json::Value::as_u64) {
                 Some(1) => {
                     send(serde_json::json!({
                         "jsonrpc": "2.0", "method": "notifications/initialized"

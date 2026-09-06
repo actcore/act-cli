@@ -28,12 +28,11 @@ pub fn resolve(dir: &Path) -> Result<ComponentInfo> {
     let pyproject_path = dir.join("pyproject.toml");
 
     if cargo_path.exists() {
-        let (base, inline_patch) = match cargo::from_cargo_metadata(dir) {
-            Ok(result) => result,
-            Err(_) => {
-                tracing::debug!("cargo metadata failed, falling back to raw TOML parsing");
-                cargo::from_toml(&cargo_path)?
-            }
+        let (base, inline_patch) = if let Ok(result) = cargo::from_cargo_metadata(dir) {
+            result
+        } else {
+            tracing::debug!("cargo metadata failed, falling back to raw TOML parsing");
+            cargo::from_toml(&cargo_path)?
         };
         info = Some(base);
 

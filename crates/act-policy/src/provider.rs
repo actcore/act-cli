@@ -71,7 +71,7 @@ pub trait CompiledCeiling: Send + Sync {
         crate::grant::PolicyMode::Deny
     }
     /// Test/diagnostic tag; production impls keep the default.
-    fn tag(&self) -> &str {
+    fn tag(&self) -> &'static str {
         ""
     }
 }
@@ -108,7 +108,7 @@ impl ProviderRegistry {
                 best = Some((k, p));
             }
         }
-        best.map(|(_, p)| p).unwrap_or(&self.generic)
+        best.map_or(&self.generic, |(_, p)| p)
     }
 
     /// Build a registry pre-loaded with the built-in fs/http/sockets providers
@@ -157,7 +157,9 @@ mod tests {
         fn declared(&self) -> bool {
             true
         }
-        fn tag(&self) -> &str {
+        // `&'static str`, not `&str`: the trait says `'static`, and
+        // `clippy::unnecessary_literal_bound` does not read the trait.
+        fn tag(&self) -> &'static str {
             self.0
         }
     }

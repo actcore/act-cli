@@ -154,7 +154,7 @@ impl ActRmcpBridge {
     }
 
     /// Ask the component for its `get-open-session-args-schema` JSON Schema.
-    /// Errors bubble up as MCP errors so the agent sees them at list_tools time.
+    /// Errors bubble up as MCP errors so the agent sees them at `list_tools` time.
     async fn fetch_open_session_args_schema(&self) -> Result<Value, rmcp::ErrorData> {
         let schema = self
             .handle
@@ -1358,7 +1358,7 @@ pub async fn confirm_via_peer(
     capabilities: Option<&rmcp::model::ClientCapabilities>,
     message: String,
 ) -> bool {
-    if !capabilities.is_some_and(|caps| caps.elicitation.is_some()) {
+    if capabilities.is_none_or(|caps| caps.elicitation.is_none()) {
         return false;
     }
 

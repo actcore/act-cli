@@ -1,4 +1,4 @@
-//! Built-in sockets provider — wraps the Stage 1 net matcher and effective_sockets.
+//! Built-in sockets provider — wraps the Stage 1 net matcher and `effective_sockets`.
 
 use std::collections::BTreeMap;
 
@@ -67,22 +67,21 @@ async fn pin_hostnames(rules: Vec<SocketsRule>) -> Vec<SocketsRule> {
             && host != "*"
             && host.parse::<IpAddr>().is_err()
         {
-            match tokio::net::lookup_host((host, 0u16)).await {
-                Ok(addrs) => {
-                    for addr in addrs {
-                        let mut synth = rule.clone();
-                        synth.net.host = None;
-                        synth.net.cidr = Some(match addr.ip() {
-                            IpAddr::V4(v4) => format!("{v4}/32"),
-                            IpAddr::V6(v6) => format!("{v6}/128"),
-                        });
-                        out.push(synth);
-                    }
+            if let Ok(addrs) = tokio::net::lookup_host((host, 0u16)).await {
+                for addr in addrs {
+                    let mut synth = rule.clone();
+                    synth.net.host = None;
+                    synth.net.cidr = Some(match addr.ip() {
+                        IpAddr::V4(v4) => format!("{v4}/32"),
+                        IpAddr::V6(v6) => format!("{v6}/128"),
+                    });
+                    out.push(synth);
                 }
-                Err(_) => tracing::warn!(
+            } else {
+                tracing::warn!(
                     host = %host,
                     "wasi:sockets rule host did not resolve; rule has no effect"
-                ),
+                );
             }
         }
         out.push(rule);
@@ -91,7 +90,7 @@ async fn pin_hostnames(rules: Vec<SocketsRule>) -> Vec<SocketsRule> {
 }
 
 struct SocketsCeiling {
-    /// Effective config (grant ∩ declaration host/port filtering via effective_sockets).
+    /// Effective config (grant ∩ declaration host/port filtering via `effective_sockets`).
     config: SocketsConfig,
     /// Raw declaration rules — used for protocol ceiling enforcement.
     decl_rules: Vec<SocketsRule>,
@@ -239,7 +238,7 @@ fn parse_sockets_rules(cs: &[serde_json::Value]) -> Result<Vec<SocketsRule>, Pol
 }
 
 /// Build a `Capabilities` struct containing only `cap_id`'s declared constraints.
-/// Empty declared → empty Capabilities → effective_sockets treats as undeclared.
+/// Empty declared → empty Capabilities → `effective_sockets` treats as undeclared.
 fn caps_from_declared(cap_id: &str, declared: &[serde_json::Value]) -> Capabilities {
     if declared.is_empty() {
         return Capabilities::default();
@@ -281,7 +280,7 @@ mod tests {
         let ok_op = ResourceOp {
             cap_id: "wasi:sockets".into(),
             key: "198.51.100.7:5900".into(),
-            action: "".into(),
+            action: String::new(),
             attrs: json!({"protocol": "tcp"}),
         };
         assert_eq!(c.classify(&ok_op), Decision::Allow);
@@ -289,7 +288,7 @@ mod tests {
         let bad_proto_op = ResourceOp {
             cap_id: "wasi:sockets".into(),
             key: "198.51.100.7:5900".into(),
-            action: "".into(),
+            action: String::new(),
             attrs: json!({"protocol": "udp"}),
         };
         assert_eq!(c.classify(&bad_proto_op), Decision::Deny);
@@ -316,7 +315,7 @@ mod tests {
         let op = ResourceOp {
             cap_id: "wasi:sockets".into(),
             key: "127.0.0.1:5900".into(),
-            action: "".into(),
+            action: String::new(),
             attrs: json!({"protocol": "tcp"}),
         };
         assert_eq!(c.classify(&op), Decision::Allow);
@@ -334,7 +333,7 @@ mod tests {
         let op = ResourceOp {
             cap_id: "wasi:sockets".into(),
             key: "host.example.com:5900".into(),
-            action: "".into(),
+            action: String::new(),
             attrs: json!({"protocol": "tcp"}),
         };
         assert_eq!(c.classify(&op), Decision::Deny);

@@ -273,7 +273,7 @@ pub fn render_exception(r: &CapDecisionRecord) -> String {
     let subject = if r.action.is_empty() {
         key_escaped.to_string()
     } else {
-        format!("{} {}", action_escaped, key_escaped)
+        format!("{action_escaped} {key_escaped}")
     };
     let cap_id_escaped = escape_audit_field(&r.cap_id);
     let reason = r
@@ -325,7 +325,7 @@ pub fn render_rollup(span: &SpanFields, roll: &Rollup) -> String {
     if let Some(sid) = &span.session_id {
         let sid_trunc = take_bytes(sid, 8);
         let sid_escaped = escape_audit_field(sid_trunc);
-        line.push_str(&format!("  session:{}", sid_escaped));
+        line.push_str(&format!("  session:{sid_escaped}"));
     }
 
     // Group by capability so one clause covers all actions on that class.

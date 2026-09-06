@@ -55,8 +55,7 @@ async fn session_of_1_hides_virtual_tools_and_uses_default_session() {
         .input_schema
         .get("properties")
         .and_then(|p| p.as_object())
-        .map(|props| props.contains_key("_meta"))
-        .unwrap_or(false);
+        .is_some_and(|props| props.contains_key("_meta"));
     assert!(
         !has_meta,
         "session-of-1 must not inject the _meta arg-hint; read schema: {:?}",

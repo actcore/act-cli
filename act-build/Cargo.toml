@@ -16,6 +16,9 @@ readme.workspace = true
 name = "act-build"
 path = "src/main.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 act-types.workspace = true
 anyhow.workspace = true

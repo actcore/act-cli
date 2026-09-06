@@ -190,7 +190,7 @@ impl wasmtime_wasi_http::WasiHttpHooks for PolicyHttpHooks {
                 let cache = self.cache.clone();
                 let prompter = self.prompter.clone();
                 let ask = Self::http_ask(method.as_deref(), &uri);
-                let log_uri = uri.clone();
+                let log_uri = uri;
                 Box::new(async move {
                     if !resolve_http_ask(cache, prompter, ask).await {
                         tracing::warn!(%log_uri, "http policy ask denied");

@@ -265,7 +265,7 @@ pub fn inject_arg_meta_property(schema: &mut serde_json::Map<String, Value>) {
 }
 
 pub fn build_annotations(metadata: &[(String, Vec<u8>)]) -> Option<rmcp::model::ToolAnnotations> {
-    use act_types::constants::*;
+    use act_types::constants::{META_DESTRUCTIVE, META_IDEMPOTENT, META_READ_ONLY};
     let meta = act_types::types::Metadata::from(metadata.to_vec());
 
     let read_only_hint = meta.get_as::<bool>(META_READ_ONLY);
@@ -338,19 +338,16 @@ pub fn fold_events_to_result(result: act_runtime::CallToolResult) -> rmcp::model
         }
     }
 
-    match error_detail {
-        Some(detail) => {
-            let mut out = rmcp::model::CallToolResult::error(content);
-            out.meta = Some(rmcp::model::MetaObject(
-                detail.as_object().cloned().unwrap_or_default(),
-            ));
-            out
-        }
-        None => {
-            let mut out = rmcp::model::CallToolResult::success(content);
-            out.structured_content = structured_content_for(&result.events);
-            out
-        }
+    if let Some(detail) = error_detail {
+        let mut out = rmcp::model::CallToolResult::error(content);
+        out.meta = Some(rmcp::model::MetaObject(
+            detail.as_object().cloned().unwrap_or_default(),
+        ));
+        out
+    } else {
+        let mut out = rmcp::model::CallToolResult::success(content);
+        out.structured_content = structured_content_for(&result.events);
+        out
     }
 }
 
@@ -471,12 +468,12 @@ pub fn apply_transport_meta(
 
     // Two passes so the conformant spelling deterministically wins when a
     // client sends both: legacy `std:*` first, `dev.actcore/*` second.
-    for (key, value) in ctx_meta.0.iter() {
+    for (key, value) in &ctx_meta.0 {
         if !is_protocol_reserved(key) && !key.starts_with(MCP_META_PREFIX) {
             forwarded.insert(key.clone(), value.clone());
         }
     }
-    for (key, value) in ctx_meta.0.iter() {
+    for (key, value) in &ctx_meta.0 {
         if !is_protocol_reserved(key) && key.starts_with(MCP_META_PREFIX) {
             forwarded.insert(mcp_key_to_act(key).into_owned(), value.clone());
         }

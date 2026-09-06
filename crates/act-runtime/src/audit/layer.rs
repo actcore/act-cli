@@ -368,7 +368,7 @@ where
             // reads — this is a search-and-push, not a predicate.
             for span in ctx.event_scope(event).into_iter().flatten() {
                 if let Some(state) = span.extensions_mut().get_mut::<InstantiationState>() {
-                    state.classes.push(record.clone());
+                    state.classes.push(record);
                     break;
                 }
             }
@@ -602,7 +602,7 @@ mod tests {
             emit_credential_issue(&CredentialIssueRecord {
                 kind: String::new(),
                 ..issue()
-            })
+            });
         });
         assert_eq!(out.len(), 1, "expected one line, got {out:?}");
         assert!(out[0].contains("notion-work"), "key missing: {}", out[0]);

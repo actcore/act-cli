@@ -1,4 +1,4 @@
-//! Metadata discovery: RFC 9728 for the resource, RFC 8414 (then OpenID
+//! Metadata discovery: RFC 9728 for the resource, RFC 8414 (then `OpenID`
 //! Connect) for the authorization server.
 //!
 //! Every URL contacted here is **derived**, never supplied. The component names
@@ -59,7 +59,7 @@ pub fn protected_resource_url(resource: &Url) -> Result<Url> {
 
 /// Where an authorization server's metadata may live, in the order to try.
 ///
-/// RFC 8414 first, then OpenID Connect Discovery — the design's order. A server
+/// RFC 8414 first, then `OpenID` Connect Discovery — the design's order. A server
 /// that answers both serves the same document; one that answers only the second
 /// is an OIDC provider that never adopted 8414, which is common enough that
 /// stopping at the first would rule out real upstreams.
@@ -198,8 +198,7 @@ pub async fn fetch_as_metadata(client: &hclient::Client, issuer: &Url) -> Result
             .map(Url::as_str)
             .collect::<Vec<_>>()
             .join(" or "),
-        last.map(|e| e.to_string())
-            .unwrap_or_else(|| "no response".into())
+        last.map_or_else(|| "no response".into(), |e| e.to_string())
     )
 }
 

@@ -1,4 +1,4 @@
-//! Built-in filesystem provider — wraps the Stage 1 FsMatcher.
+//! Built-in filesystem provider — wraps the Stage 1 `FsMatcher`.
 
 use std::collections::BTreeMap;
 

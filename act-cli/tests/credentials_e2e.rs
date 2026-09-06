@@ -186,7 +186,10 @@ async fn call_over_mcp(
 ) -> Outcome {
     let component = component.to_path_buf();
     let config = sandbox.config();
-    let extra: Vec<String> = extra_args.iter().map(|s| s.to_string()).collect();
+    let extra: Vec<String> = extra_args
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
     let (transport, stderr) = TokioChildProcess::builder(
         tokio::process::Command::new(act_binary_path()).configure(|cmd| {
             cmd.arg("run")
@@ -293,13 +296,15 @@ async fn a_component_gets_its_credential_and_the_value_never_leaves_the_host() {
         out.transport
     );
     assert_eq!(
-        payload.get("has_fields").and_then(|v| v.as_bool()),
+        payload
+            .get("has_fields")
+            .and_then(serde_json::Value::as_bool),
         Some(true),
         "and the fields: {}",
         out.transport
     );
     assert_eq!(
-        payload.get("value_len").and_then(|v| v.as_u64()),
+        payload.get("value_len").and_then(serde_json::Value::as_u64),
         Some(SECRET.len() as u64),
         "and the material itself, whole — not an empty field map wearing the \
          right kind: {}",

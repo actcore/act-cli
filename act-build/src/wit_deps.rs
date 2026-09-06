@@ -125,7 +125,7 @@ fn verify_sha256(bytes: &[u8], expected: &str) -> Result<()> {
     h.update(bytes);
     let got = hex_lower(&h.finalize());
     if got != expected.to_lowercase() {
-        bail!("sha256 mismatch: expected {}, got {}", expected, got);
+        bail!("sha256 mismatch: expected {expected}, got {got}");
     }
     Ok(())
 }
@@ -134,7 +134,7 @@ fn hex_lower(bytes: &[u8]) -> String {
     use std::fmt::Write;
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
-        write!(&mut s, "{:02x}", b).unwrap();
+        write!(&mut s, "{b:02x}").unwrap();
     }
     s
 }
@@ -155,7 +155,7 @@ fn extract_prefix(gz_bytes: &[u8], prefix: &str, target_dir: &Path) -> Result<()
             continue;
         }
         if rel.split('/').any(|c| c == "..") {
-            bail!("refusing to extract entry with '..': {:?}", path);
+            bail!("refusing to extract entry with '..': {path:?}");
         }
         let out = target_dir.join(rel);
         if entry.header().entry_type().is_dir() {
@@ -171,7 +171,7 @@ fn extract_prefix(gz_bytes: &[u8], prefix: &str, target_dir: &Path) -> Result<()
         written += 1;
     }
     if written == 0 {
-        bail!("no entries matched prefix {:?}", prefix);
+        bail!("no entries matched prefix {prefix:?}");
     }
     Ok(())
 }

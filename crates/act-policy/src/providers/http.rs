@@ -1,4 +1,4 @@
-//! Built-in HTTP provider — wraps the Stage 1 HTTP net matcher and effective_http.
+//! Built-in HTTP provider — wraps the Stage 1 HTTP net matcher and `effective_http`.
 
 use std::collections::BTreeMap;
 
@@ -36,7 +36,7 @@ impl CapabilityProvider for HttpProvider {
 }
 
 struct HttpCeiling {
-    /// Effective config (grant ∩ declaration host/port filtering via effective_http).
+    /// Effective config (grant ∩ declaration host/port filtering via `effective_http`).
     config: HttpConfig,
     /// Raw declaration rules — used for method/scheme ceiling enforcement.
     decl_rules: Vec<HttpRule>,
@@ -164,7 +164,7 @@ fn decl_allows_method(
     })
 }
 
-/// Network-level + scheme match for an HttpRule (no method check).
+/// Network-level + scheme match for an `HttpRule` (no method check).
 fn http_rule_matches_net(rule: &HttpRule, check: &NetworkCheck, scheme: Option<&str>) -> bool {
     if !rule_matches(&rule.net, check) {
         return false;
@@ -223,7 +223,7 @@ fn parse_http_rules(cs: &[serde_json::Value]) -> Result<Vec<HttpRule>, PolicyErr
         .collect()
 }
 
-/// Parse declared constraints as HttpAllow then map to HttpRule for method/scheme ceiling.
+/// Parse declared constraints as `HttpAllow` then map to `HttpRule` for method/scheme ceiling.
 fn parse_http_rules_from_httpallow(
     declared: &[serde_json::Value],
 ) -> Result<Vec<HttpRule>, PolicyError> {
@@ -250,7 +250,7 @@ fn parse_http_rules_from_httpallow(
 }
 
 /// Build a `Capabilities` struct containing only `cap_id`'s declared constraints.
-/// Empty declared → empty Capabilities → effective_http treats as undeclared.
+/// Empty declared → empty Capabilities → `effective_http` treats as undeclared.
 fn caps_from_declared(cap_id: &str, declared: &[serde_json::Value]) -> Capabilities {
     if declared.is_empty() {
         return Capabilities::default();

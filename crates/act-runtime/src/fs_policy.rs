@@ -297,7 +297,7 @@ async fn resolve_ask(
     }
 }
 
-impl<'a> PolicyFilesystemCtxView<'a> {
+impl PolicyFilesystemCtxView<'_> {
     fn inner(&mut self) -> WasiFilesystemCtxView<'_> {
         WasiFilesystemCtxView {
             ctx: self.ctx,

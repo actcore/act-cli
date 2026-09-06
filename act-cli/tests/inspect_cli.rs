@@ -52,7 +52,7 @@ fn inspect_tools_emits_raw_list_tools_response() {
         serde_json::from_slice(&out.get_output().stdout).expect("stdout is valid JSON");
     // Raw response shape: top-level `metadata` object + `tools` array.
     assert!(
-        v.get("metadata").map(|m| m.is_object()).unwrap_or(false),
+        v.get("metadata").is_some_and(serde_json::Value::is_object),
         "raw response missing top-level metadata object: {v}"
     );
     let tools = v["tools"].as_array().expect("tools is an array");
@@ -70,8 +70,7 @@ fn inspect_tools_emits_raw_list_tools_response() {
     assert!(
         first
             .get("metadata")
-            .map(|m| m.is_object())
-            .unwrap_or(false),
+            .is_some_and(serde_json::Value::is_object),
         "tool[0] missing raw metadata object: {first}"
     );
 }

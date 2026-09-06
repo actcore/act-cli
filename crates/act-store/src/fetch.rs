@@ -271,8 +271,7 @@ pub async fn fetch_oci(store: &Store, reference: &str) -> Result<Stored, StoreEr
     let token: Option<String> = client
         .auth(&oci_ref, &auth, RegistryOperation::Pull)
         .await
-        .map_err(|e| StoreError::Io(std::io::Error::other(e)))?
-        .map(|t| t.to_string());
+        .map_err(|e| StoreError::Io(std::io::Error::other(e)))?;
 
     let http = compression_client()?;
     let registry = oci_ref.registry().to_string();
@@ -689,8 +688,8 @@ mod tests {
         ).into_bytes();
         let upstream = crate::layout::sha256_hex(&manifest);
         let mut blobs = std::collections::HashMap::new();
-        blobs.insert(wasm_hex.clone(), wasm.to_vec());
-        blobs.insert(cfg_hex.clone(), cfg.to_vec());
+        blobs.insert(wasm_hex, wasm.to_vec());
+        blobs.insert(cfg_hex, cfg.to_vec());
         let stored = assemble_oci(
             &store,
             "oci://ghcr.io/x/oci:1",
@@ -989,8 +988,7 @@ mod tests {
         let token = client
             .auth(&oci_ref, &RegistryAuth::Anonymous, RegistryOperation::Pull)
             .await
-            .unwrap()
-            .map(|t| t.to_string());
+            .unwrap();
 
         let http = super::compression_client().unwrap();
         let url = super::blob_url("actpkg.dev", "library/random", &layer.digest);

@@ -281,7 +281,7 @@ fn sockets_rule_covers(decl: &SocketsRule, user: &SocketsRule) -> bool {
 /// Return the more restrictive of two `FsMode` values.
 /// `Ro` beats `Rw` (read-only is more restrictive than read-write).
 fn min_mode(a: act_types::FsMode, b: act_types::FsMode) -> act_types::FsMode {
-    use act_types::FsMode::*;
+    use act_types::FsMode::{Ro, Rw};
     if a == Ro || b == Ro { Ro } else { Rw }
 }
 

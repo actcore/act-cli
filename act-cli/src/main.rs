@@ -120,14 +120,14 @@ enum Command {
         #[arg(long)]
         http: bool,
 
-        /// Listen address: [host]:port or just port (default: [::1]:3000)
+        /// Listen address: [host]:port or just port (default: [`::1`]:3000)
         #[arg(short, long)]
         listen: Option<String>,
 
         /// Pre-open a single session at startup from this JSON object and
         /// run as session-of-1: every call uses the pre-opened session, the
         /// session machinery is hidden from clients (no virtual
-        /// open_session/close_session tools, no /sessions endpoints), and any
+        /// `open_session/close_session` tools, no /sessions endpoints), and any
         /// client-supplied std:session-id is ignored. Requires a component
         /// that exports act:sessions/session-provider.
         #[arg(long)]
@@ -244,7 +244,7 @@ enum Command {
     /// binary's, and `act` is installed from cargo, npm, a container and an
     /// OS package alike.
     ///
-    ///   bash   act completions bash > /etc/bash_completion.d/act
+    ///   bash   act completions bash > /`etc/bash_completion.d/act`
     ///   zsh    act completions zsh  > "${fpath[1]}/_act"
     ///   fish   act completions fish > ~/.config/fish/completions/act.fish
     ///
@@ -301,7 +301,7 @@ enum SessionCommand {
 #[allow(clippy::large_enum_variant)]
 #[derive(clap::Subcommand)]
 enum InspectCommand {
-    /// Print the raw decoded `act:component` manifest (full ComponentInfo).
+    /// Print the raw decoded `act:component` manifest (full `ComponentInfo`).
     ComponentManifest {
         /// Component reference (path, URL, OCI ref, or name)
         #[arg(name = "ref")]
@@ -1380,7 +1380,7 @@ async fn cmd_update(reference: Option<ComponentRef>) -> Result<()> {
         match act_store::update(&store, &r).await {
             Ok(act_store::UpdateOutcome::Unchanged) => println!("{r}\tunchanged"),
             Ok(act_store::UpdateOutcome::Updated { from, to }) => {
-                println!("{r}\tupdated {from} -> {to}")
+                println!("{r}\tupdated {from} -> {to}");
             }
             Ok(act_store::UpdateOutcome::NotStored) => println!("{r}\tnot stored"),
             Err(e) => eprintln!("{r}\tERROR: {e}"),
@@ -1528,7 +1528,7 @@ mod tests {
     #[test]
     fn metadata_from_json_object() {
         let json = serde_json::json!({"key": "value"});
-        let meta = runtime::Metadata::from(json.clone());
+        let meta = runtime::Metadata::from(json);
         assert_eq!(meta.len(), 1);
         assert_eq!(meta.get("key"), Some(&serde_json::json!("value")));
     }
@@ -1536,7 +1536,7 @@ mod tests {
     #[test]
     fn metadata_from_json_non_object_is_empty() {
         let json = serde_json::json!("not an object");
-        let meta = runtime::Metadata::from(json.clone());
+        let meta = runtime::Metadata::from(json);
         assert!(meta.is_empty());
     }
 }

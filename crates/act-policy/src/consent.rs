@@ -49,7 +49,7 @@ impl ConsentPrompter for DenyPrompter {
     }
 }
 
-/// Per-session memory of granted/denied (cap_id, key) decisions.
+/// Per-session memory of granted/denied (`cap_id`, key) decisions.
 #[derive(Default)]
 pub struct DecisionCache {
     seen: Mutex<HashMap<(String, String), bool>>,
@@ -281,15 +281,16 @@ impl ConsentQueue {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<u64, Waiting>> {
-        self.waiting.lock().unwrap_or_else(|e| e.into_inner())
+        self.waiting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
 fn now_epoch() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
 /// A prompter that parks its question in a [`ConsentQueue`].

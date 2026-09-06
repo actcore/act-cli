@@ -11,7 +11,7 @@ pub struct PolicyKernel(core::Kernel);
 #[wasm_bindgen]
 impl PolicyKernel {
     /// `declared_caps_json`: the decoded `act:component` `std.capabilities` map.
-    /// `policy_json`: the operator PolicyConfig.
+    /// `policy_json`: the operator `PolicyConfig`.
     #[wasm_bindgen(constructor)]
     pub fn new(declared_caps_json: &str, policy_json: &str) -> Result<PolicyKernel, JsError> {
         core::Kernel::build(declared_caps_json, policy_json)
@@ -19,12 +19,12 @@ impl PolicyKernel {
             .map_err(|e| JsError::new(&e))
     }
 
-    /// `op_json`: a ResourceOp `{ capId, key, action, attrs }`. Returns
+    /// `op_json`: a `ResourceOp` `{ capId, key, action, attrs }`. Returns
     /// `"allow" | "deny" | "ask"`.
     pub fn classify(&self, op_json: &str) -> Result<String, JsError> {
         self.0
             .classify_json(op_json)
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .map_err(|e| JsError::new(&e))
     }
 

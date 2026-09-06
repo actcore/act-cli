@@ -269,11 +269,8 @@ impl CapDecisionRecord {
             // enforces. A custom `reason` on a non-Deny call is dropped
             // rather than surfaced, so an Allow record can never render as
             // if something had been refused.
-            reason: (decision == Decision4::Deny).then(|| {
-                reason
-                    .map(str::to_string)
-                    .unwrap_or_else(|| "outside ceiling".to_string())
-            }),
+            reason: (decision == Decision4::Deny)
+                .then(|| reason.map_or_else(|| "outside ceiling".to_string(), str::to_string)),
             rule,
             never_rollup: false,
         }

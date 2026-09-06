@@ -432,7 +432,7 @@ fn validate_fields(defs: &[FieldDef], fields: &BTreeMap<String, SecretValue>) ->
             anyhow::ensure!(
                 members
                     .get("std:access-token")
-                    .is_some_and(|v| v.is_string()),
+                    .is_some_and(serde_json::Value::is_string),
                 "field '{key}' is a std:oauth2 credential but has no \
                  'std:access-token' string; a component reading it would see no \
                  credential at all rather than an error"
@@ -449,7 +449,7 @@ fn validate_fields(defs: &[FieldDef], fields: &BTreeMap<String, SecretValue>) ->
                 anyhow::ensure!(
                     scopes
                         .as_array()
-                        .is_some_and(|a| a.iter().all(|s| s.is_string())),
+                        .is_some_and(|a| a.iter().all(serde_json::Value::is_string)),
                     "'std:scopes' must be a list of strings, not {}; anything else \
                      is read as 'no scopes granted'",
                     json_type_name(scopes)
@@ -723,12 +723,11 @@ const ECHO_WARNING: &str = "act secret: warning: terminal echo could not be turn
 pub(crate) fn read_hidden_line(label: &str) -> Result<String> {
     // Held across the read; `Drop` puts echo back, on the error path and on a
     // panic as well as on the normal one.
-    let _echo = match crate::tty::echo_off() {
-        Ok(guard) => guard,
-        Err(_) => {
-            eprintln!("{ECHO_WARNING}");
-            None
-        }
+    let _echo = if let Ok(guard) = crate::tty::echo_off() {
+        guard
+    } else {
+        eprintln!("{ECHO_WARNING}");
+        None
     };
 
     eprint!("{label}: ");

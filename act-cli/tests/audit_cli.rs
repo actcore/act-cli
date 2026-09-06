@@ -552,7 +552,7 @@ fn instantiation_header_precedes_any_tool_output() {
 /// Complements the test above: a declared capability that resolves to `deny`
 /// (here, explicitly via `--deny`, not just "never declared") must produce a
 /// second stderr line — right after the header — naming it as declared but
-/// not granted. `layer.rs`'s unit tests already cover the render_header /
+/// not granted. `layer.rs`'s unit tests already cover the `render_header` /
 /// warning-line logic directly; this is the one test that would notice if
 /// `instantiate_component` stopped calling `emit_ceiling_class` with a real
 /// `declared` value at all.

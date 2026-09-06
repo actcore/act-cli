@@ -20,6 +20,9 @@ embed-manifest = "1.5"
 name = "act"
 path = "src/main.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 act-types.workspace = true
 ciborium.workspace = true

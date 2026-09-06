@@ -96,7 +96,7 @@ fn matches_custom_section_name(section_data: &[u8], name: &str) -> bool {
         .is_ok_and(|section_name| section_name == name)
 }
 
-/// Encode a custom section using wasm_encoder, returning raw section bytes
+/// Encode a custom section using `wasm_encoder`, returning raw section bytes
 /// (without component header).
 fn encode_custom_section(name: &str, data: &[u8]) -> Vec<u8> {
     let mut component = Component::new();
@@ -109,12 +109,12 @@ fn encode_custom_section(name: &str, data: &[u8]) -> Vec<u8> {
     full[8..].to_vec()
 }
 
-/// Read a LEB128-encoded u32. Returns (value, bytes_consumed).
+/// Read a LEB128-encoded u32. Returns (value, `bytes_consumed`).
 fn read_leb128(bytes: &[u8]) -> Result<(u32, usize)> {
     let mut result: u32 = 0;
     let mut shift = 0;
     for (i, &byte) in bytes.iter().enumerate() {
-        result |= ((byte & 0x7f) as u32) << shift;
+        result |= u32::from(byte & 0x7f) << shift;
         if byte & 0x80 == 0 {
             return Ok((result, i + 1));
         }

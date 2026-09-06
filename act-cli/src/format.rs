@@ -66,7 +66,7 @@ fn build_info_json(data: &InfoData<'_>) -> InfoJson {
         .extra
         .get("std:skill")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+        .map(std::string::ToString::to_string);
 
     let capabilities = serde_json::to_value(&info.std.capabilities)
         .unwrap_or_else(|_| serde_json::Value::Object(Default::default()));
@@ -429,7 +429,7 @@ fn extract_params(schema: &serde_json::Value) -> Vec<(String, String, bool, Opti
         let description = prop
             .get("description")
             .and_then(|d| d.as_str())
-            .map(|s| s.to_string());
+            .map(std::string::ToString::to_string);
         result.push((name.clone(), type_str, required, description));
     }
 

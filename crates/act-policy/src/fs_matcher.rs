@@ -304,7 +304,7 @@ mod tests {
                     mode: act_types::FsMode::Rw,
                 })
                 .collect(),
-            deny: deny.iter().map(|s| s.to_string()).collect(),
+            deny: deny.iter().map(std::string::ToString::to_string).collect(),
         }
     }
 

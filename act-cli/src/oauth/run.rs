@@ -103,21 +103,20 @@ pub async fn acquire(req: Request<'_>, now: u64) -> Result<Acquired> {
 
     // 3. One registration per issuer (SEP-2352).
     let mut clients = ClientStore::load(req.store_root)?;
-    let reg = match clients.get(&as_md.issuer, &registered_redirect) {
-        Some(existing) => existing.clone(),
-        None => {
-            let endpoint = as_md.registration_endpoint.as_deref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "{} supports no dynamic client registration, and this host has no \
-                     pre-registered client for it",
-                    as_md.issuer
-                )
-            })?;
-            let fresh = registration::register(&client, endpoint, &registered_redirect).await?;
-            clients.insert(&as_md.issuer, fresh.clone());
-            clients.save(req.store_root)?;
-            fresh
-        }
+    let reg = if let Some(existing) = clients.get(&as_md.issuer, &registered_redirect) {
+        existing.clone()
+    } else {
+        let endpoint = as_md.registration_endpoint.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} supports no dynamic client registration, and this host has no \
+                 pre-registered client for it",
+                as_md.issuer
+            )
+        })?;
+        let fresh = registration::register(&client, endpoint, &registered_redirect).await?;
+        clients.insert(&as_md.issuer, fresh.clone());
+        clients.save(req.store_root)?;
+        fresh
     };
 
     // 5. The authorization request.
@@ -146,12 +145,11 @@ pub async fn acquire(req: Request<'_>, now: u64) -> Result<Acquired> {
     // platform's opener, and a guard one call away from what it protects is a
     // guard a refactor moves.
     discovery::require_secure_url(&auth_url).context("refusing to open an authorization URL")?;
-    match req.open_with {
-        Some(open) => open(auth_url.to_string()),
-        None => {
-            eprintln!("Opening your browser. If it does not open, visit:\n  {auth_url}");
-            open_browser(auth_url.as_str());
-        }
+    if let Some(open) = req.open_with {
+        open(auth_url.to_string())
+    } else {
+        eprintln!("Opening your browser. If it does not open, visit:\n  {auth_url}");
+        open_browser(auth_url.as_str());
     }
 
     // 6. Callback, then the checks, then the exchange.

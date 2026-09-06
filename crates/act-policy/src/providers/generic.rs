@@ -49,7 +49,7 @@ impl CapabilityProvider for GenericProvider {
     }
 }
 
-/// A compiled constraint set: a list of (dimension → GlobSet) pairs.
+/// A compiled constraint set: a list of (dimension → `GlobSet`) pairs.
 /// A constraint matches when **every** dimension in it has a glob matching
 /// the stringified value. The dimension named `key` (`KEY_DIMENSION`) is the
 /// one exception: it never reads `attrs`, resolving from `ResourceOp::key`
@@ -265,7 +265,7 @@ mod tests {
         let op = |db: &str| ResourceOp {
             cap_id: "db:truncate".into(),
             key: db.into(),
-            action: "".into(),
+            action: String::new(),
             attrs: serde_json::json!({"database": db}),
         };
         assert_eq!(c.classify(&op("staging_events")), Decision::Allow);
@@ -433,7 +433,7 @@ mod tests {
         let op = ResourceOp {
             cap_id: "db:read".into(),
             key: "orders".into(),
-            action: "".into(),
+            action: String::new(),
             attrs: serde_json::json!({"table": "orders"}),
         };
         assert_eq!(c.classify(&op), Decision::Deny);

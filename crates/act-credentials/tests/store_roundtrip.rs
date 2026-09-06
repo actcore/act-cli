@@ -239,7 +239,7 @@ fn concurrent_updates_do_not_lose_one_another() {
         .map(|_| {
             let root = root.clone();
             std::thread::spawn(move || {
-                let store = FileStore::new(root.clone());
+                let store = FileStore::new(root);
                 store
                     .update("comp", "default", &mut |rec| {
                         // Read-modify-write inside the lock: the increment is

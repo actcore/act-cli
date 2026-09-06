@@ -12,6 +12,9 @@ keywords = ["act", "wasm", "component-model", "runtime", "sandbox"]
 categories = ["wasm", "development-tools"]
 include = ["src/**", "wit/**"]
 
+[lints]
+workspace = true
+
 [dependencies]
 act-types.workspace = true
 act-store = { version = "0.12.0", path = "../act-store" }

@@ -22,19 +22,13 @@ pub fn run(wasm_path: &Path) -> Result<()> {
 
     let section_data = match section_data {
         Some(data) => data,
-        None => bail!(
-            "missing `{}` custom section — run `act-build pack` first",
-            ACT_COMPONENT_SECTION
-        ),
+        None => {
+            bail!("missing `{ACT_COMPONENT_SECTION}` custom section — run `act-build pack` first")
+        }
     };
 
-    let info: act_types::ComponentInfo =
-        ciborium::from_reader(section_data).with_context(|| {
-            format!(
-                "`{}` custom section is not valid CBOR",
-                ACT_COMPONENT_SECTION
-            )
-        })?;
+    let info: act_types::ComponentInfo = ciborium::from_reader(section_data)
+        .with_context(|| format!("`{ACT_COMPONENT_SECTION}` custom section is not valid CBOR"))?;
 
     // Step 2: Validate required std fields.
     if info.std.name.is_empty() {
@@ -50,8 +44,7 @@ pub fn run(wasm_path: &Path) -> Result<()> {
 
     if !has_export {
         bail!(
-            "component does not export `{}` — is this a valid ACT component?",
-            TOOL_PROVIDER_INTERFACE
+            "component does not export `{TOOL_PROVIDER_INTERFACE}` — is this a valid ACT component?"
         );
     }
 

@@ -9,6 +9,9 @@ homepage.workspace = true
 description = "Credential profiles, field definitions and storage backends for the ACT host"
 keywords = ["act", "wasm", "credentials"]
 
+[lints]
+workspace = true
+
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

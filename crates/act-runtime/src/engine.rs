@@ -50,12 +50,12 @@ pub fn create_linker(engine: &Engine) -> Result<Linker<HostState>> {
     wasmtime_wasi::p2::bindings::filesystem::types::add_to_linker::<
         HostState,
         fs_policy::PolicyFilesystem,
-    >(&mut linker, |t| t.policy_fs_view())
+    >(&mut linker, super::store::HostState::policy_fs_view)
     .map_err(|e| anyhow::anyhow!("failed to add policy wasi:filesystem/types: {e}"))?;
     wasmtime_wasi::p2::bindings::filesystem::preopens::add_to_linker::<
         HostState,
         fs_policy::PolicyFilesystem,
-    >(&mut linker, |t| t.policy_fs_view())
+    >(&mut linker, super::store::HostState::policy_fs_view)
     .map_err(|e| anyhow::anyhow!("failed to add policy wasi:filesystem/preopens: {e}"))?;
     linker.allow_shadowing(false);
     // Add P3 bindings on top
@@ -70,7 +70,7 @@ pub fn create_linker(engine: &Engine) -> Result<Linker<HostState>> {
     wasmtime_wasi::p3::bindings::filesystem::preopens::add_to_linker::<
         HostState,
         fs_policy::PolicyFilesystem,
-    >(&mut linker, |t| t.policy_fs_view())
+    >(&mut linker, super::store::HostState::policy_fs_view)
     .map_err(|e| anyhow::anyhow!("failed to add policy wasi:filesystem/preopens (p3): {e}"))?;
     linker.allow_shadowing(false);
     // Add WASI HTTP bindings (P2 for wasm32-wasip2 components, P3 for async)

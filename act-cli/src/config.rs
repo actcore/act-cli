@@ -156,7 +156,7 @@ pub fn get_profile<'a>(config: &'a ConfigFile, name: &str) -> Result<&'a Profile
     config
         .profile
         .get(name)
-        .with_context(|| format!("profile '{}' not found in config", name))
+        .with_context(|| format!("profile '{name}' not found in config"))
 }
 
 // ── Resolution ──

@@ -47,9 +47,7 @@ pub struct NetworkRule {
 /// the `cidr` crate; returns `false` for malformed specs rather than
 /// panicking. Family mismatch (v4 rule vs v6 ip) is also `false`.
 pub fn cidr_contains(cidr: &str, ip: IpAddr) -> bool {
-    cidr.parse::<cidr::IpCidr>()
-        .map(|c| c.contains(&ip))
-        .unwrap_or(false)
+    cidr.parse::<cidr::IpCidr>().is_ok_and(|c| c.contains(&ip))
 }
 
 /// Host-pattern match. Supports exact match (case-insensitive), `*.suffix`
@@ -76,7 +74,7 @@ pub fn host_matches(pattern: &str, host: &str) -> bool {
 
 /// A network operation the rule checker inspects. Fields a raw socket
 /// path won't populate (scheme, method) are left `None`; fields an HTTP
-/// path doesn't know yet (resolved_ips, when DNS hasn't run) are empty.
+/// path doesn't know yet (`resolved_ips`, when DNS hasn't run) are empty.
 #[derive(Debug, Clone, Copy)]
 pub struct NetworkCheck<'a> {
     /// The hostname or IP literal the guest asked for. Empty string is
@@ -122,9 +120,7 @@ pub fn rule_matches(rule: &NetworkRule, check: &NetworkCheck) -> bool {
         let ip_literal_match = check
             .host
             .parse::<IpAddr>()
-            .ok()
-            .map(|ip| cidr_contains(cidr_spec, ip))
-            .unwrap_or(false);
+            .is_ok_and(|ip| cidr_contains(cidr_spec, ip));
         let resolved_match = check
             .resolved_ips
             .iter()

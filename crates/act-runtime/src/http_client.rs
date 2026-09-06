@@ -91,7 +91,7 @@ impl PolicyDnsResolver {
     fn filtered_everything(&self, host: &str) -> bool {
         self.seen
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(host)
             .is_some_and(|(offered, kept)| *offered > 0 && *kept == 0)
     }
@@ -199,7 +199,10 @@ impl PolicyDnsResolver {
                 })
             );
             if is_address {
-                let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+                let mut seen = self
+                    .seen
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let counts = seen.entry(host.clone()).or_insert((0, 0));
                 counts.0 += 1;
                 if keep {
@@ -246,6 +249,9 @@ fn redirect_verdict(
         &deny_nets,
         &network::NetworkCheck::new(host, port),
     );
+    // `Allow` and `Ask` produce the same verdict for different reasons, and
+    // the comment on `Ask` is the reason. Merging the arms would delete it.
+    #[allow(clippy::match_same_arms)]
     match decision {
         act_policy::Decision::Allow => RedirectVerdict::follow(),
         // `Ask` gates the request itself, at `send`. This callback is sync and
@@ -386,7 +392,7 @@ impl ActHttpClient {
             .and_then(|u| u.host().map(str::to_string))
             .unwrap_or_default();
         let mut req = self.client.request(method, &url);
-        for (name, value) in headers.iter() {
+        for (name, value) in &headers {
             req = req.header(name.as_str(), value.to_str().unwrap_or_default());
         }
         let resp = match tokio::time::timeout(deadline, req.body(body).send()).await {
@@ -427,18 +433,16 @@ fn to_request_parts(
     let scheme = parts
         .uri
         .scheme_str()
-        .map(str::to_string)
-        .unwrap_or_else(|| "https".into());
+        .map_or_else(|| "https".into(), str::to_string);
     let authority = parts
         .uri
         .authority()
-        .map(|a| a.to_string())
+        .map(std::string::ToString::to_string)
         .ok_or(HttpError::HttpRequestUriInvalid)?;
     let path_and_query = parts
         .uri
         .path_and_query()
-        .map(|p| p.as_str())
-        .unwrap_or("/");
+        .map_or("/", http::uri::PathAndQuery::as_str);
     let url = format!("{scheme}://{authority}{path_and_query}");
 
     // The guest's body goes across as a stream, not a buffer: a component
@@ -500,6 +504,9 @@ fn client_error_to_wasi(err: hclient::Error) -> HttpError {
         // `HttpRequestDenied` says.
         ErrorKind::Redirect => HttpError::HttpRequestDenied,
         ErrorKind::Body => HttpError::HttpRequestBodySize(None),
+        // Named separately from the catch-all on purpose: a decode failure is
+        // a protocol error we understand, and the wildcard is everything we
+        // do not. They agree today; that is not a reason to stop naming it.
         ErrorKind::Decode => HttpError::HttpProtocolError,
         _ => HttpError::HttpProtocolError,
     }
@@ -636,7 +643,7 @@ mod tests {
     #[test]
     fn converts_post_request_with_body_and_port() {
         let body_bytes = bytes::Bytes::from_static(b"payload");
-        let body: WasiBody = http_body_util::Full::new(body_bytes.clone())
+        let body: WasiBody = http_body_util::Full::new(body_bytes)
             .map_err(|_| unreachable!())
             .boxed_unsync();
         let hyper_req = hyper::Request::builder()

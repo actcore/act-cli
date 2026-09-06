@@ -160,7 +160,7 @@ proptest! {
             let permissive = FsMatcher::compile(&FsConfig {
                 mode: PolicyMode::Allowlist,
                 allow: vec![FsAllow { glob: "/**".into(), mode: FsMode::Rw }],
-                deny: cfg.deny.clone(),
+                deny: cfg.deny,
             })
             .expect("compiles");
             if permissive.decide(p, acc) == Decision::Deny {
@@ -185,7 +185,7 @@ proptest! {
         acc in access(),
     ) {
         let allowlist = FsMatcher::compile(&cfg).expect("compiles");
-        let ask = FsMatcher::compile(&FsConfig { mode: PolicyMode::Ask, ..cfg.clone() })
+        let ask = FsMatcher::compile(&FsConfig { mode: PolicyMode::Ask, ..cfg })
             .expect("compiles");
         let p = std::path::Path::new(&path);
         let expected = match allowlist.decide(p, acc) {

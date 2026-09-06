@@ -29,7 +29,12 @@ jobs:
         working-directory: crates/act-runtime
         env:
           WKG_CONFIG_FILE: wkg-registry.toml
-      - run: cargo clippy -- -D warnings
+      # `-D clippy::all -D warnings` is the gate: correctness lints and every
+      # rustc warning block a merge. `pedantic` is deliberately exempt — it is
+      # enabled at `warn` in `Cargo.toml` so its suggestions are visible on
+      # every build without any one of them being able to stop a release. See
+      # the comment on `[workspace.lints.clippy]` for why.
+      - run: cargo clippy -- -D clippy::all -D warnings -A clippy::pedantic
 
   fmt:
     name: Format

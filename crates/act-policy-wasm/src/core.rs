@@ -188,7 +188,7 @@ mod tests {
     // Undeclared physical cap → hard deny even under `ask` (out of ceiling).
     #[test]
     fn http_undeclared_denies_without_ask() {
-        let declared = r#"{}"#;
+        let declared = r"{}";
         let policy = r#"{"default":"ask"}"#;
         let k = Kernel::build(declared, policy).unwrap();
         let op = r#"{"capId":"wasi:http","key":"api.example.com:443","action":"GET","attrs":{"scheme":"https"}}"#;

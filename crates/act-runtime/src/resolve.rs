@@ -92,9 +92,7 @@ pub fn profile_key(component_ref: &ComponentRef) -> String {
             let abs = if path.is_absolute() {
                 path.clone()
             } else {
-                std::env::current_dir()
-                    .map(|cwd| cwd.join(path))
-                    .unwrap_or_else(|_| path.clone())
+                std::env::current_dir().map_or_else(|_| path.clone(), |cwd| cwd.join(path))
             };
             abs.clean().display().to_string()
         }

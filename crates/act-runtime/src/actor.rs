@@ -126,6 +126,10 @@ const REQUEST_ID_SALT_BITS: u32 = 24 - REQUEST_ID_COUNTER_BITS; // 15 bits, 3276
 ///   call` invocations make exactly one request and so always have
 ///   counter == 0 — usually render different visible prefixes too.
 pub(crate) fn pack_visible_request_id(counter: u64, salt: u32) -> u32 {
+    // Truncation is the operation, not a hazard: the mask below keeps only
+    // `REQUEST_ID_COUNTER_BITS` anyway, so the discarded high bits were never
+    // going to reach the result.
+    #[allow(clippy::cast_possible_truncation)]
     let counter_field = (counter as u32) & ((1 << REQUEST_ID_COUNTER_BITS) - 1);
     let salt_field = salt & ((1 << REQUEST_ID_SALT_BITS) - 1);
     (counter_field << REQUEST_ID_SALT_BITS) | salt_field
@@ -153,6 +157,8 @@ pub(crate) fn new_request_id() -> String {
     let salt = *SALT.get_or_init(|| {
         let mut hasher = RandomState::new().build_hasher();
         hasher.write_u32(std::process::id());
+        // A 64-bit hash folded into a 32-bit salt. Truncating is how you
+        // narrow a hash; there is no value to preserve.
         hasher.finish() as u32
     });
 
@@ -362,7 +368,7 @@ impl ComponentHandle {
         if let Some(hit) = self
             .schemas
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&session)
         {
             return Ok(hit.clone());
@@ -391,7 +397,7 @@ impl ComponentHandle {
         let compiled = Arc::new(compiled);
         self.schemas
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(session, compiled.clone());
         Ok(compiled)
     }
@@ -528,7 +534,7 @@ impl ComponentHandle {
 /// ACT component.
 pub use exports::act::tools::tool_provider::Guest as ToolProvider;
 /// Instantiate the component. Returns the tool-provider guest, an optional
-/// SessionProvider (present iff the component exports
+/// `SessionProvider` (present iff the component exports
 /// `act:sessions/session-provider`), and the store.
 ///
 /// `act-world` declares both `tool-provider` and `session-provider` as
@@ -626,7 +632,7 @@ pub async fn instantiate_component(
     Ok((tool_provider, session_provider, store))
 }
 /// Spawn the component actor task. Owns the Store, the tool-provider guest,
-/// and the optional SessionProvider (present iff the component supports
+/// and the optional `SessionProvider` (present iff the component supports
 /// `act:sessions/session-provider`).
 ///
 /// Returns a handle for sending requests.
@@ -742,7 +748,7 @@ pub fn spawn_component_actor(
                                 ) => {
                                     collected
                                         .lock()
-                                        .unwrap_or_else(|e| e.into_inner())
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
                                         .extend(events);
                                     let _ = done_tx.send(());
                                 }
@@ -759,7 +765,7 @@ pub fn spawn_component_actor(
                         Ok(Ok(())) => {
                             let events = collected2
                                 .lock()
-                                .unwrap_or_else(|e| e.into_inner())
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
                                 .drain(..)
                                 .collect();
                             Ok(CallToolResult { events })
@@ -923,7 +929,7 @@ where
         ))),
     }
 }
-/// A StreamConsumer that collects all items into a Vec and signals completion.
+/// A `StreamConsumer` that collects all items into a Vec and signals completion.
 struct CollectingConsumer {
     collected: Arc<std::sync::Mutex<Vec<act::tools::types::ToolEvent>>>,
     done_tx: Option<oneshot::Sender<()>>,
@@ -944,7 +950,7 @@ impl StreamConsumer<HostState> for CollectingConsumer {
         if !buffer.is_empty() {
             self.collected
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .extend(buffer);
         }
 

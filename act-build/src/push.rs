@@ -259,8 +259,7 @@ async fn run_async(wasm_path: &Path, reference: &str, opts: PushOptions) -> Resu
             Ok(Some(remote)) if remote == layer_digest => {
                 if !json {
                     println!(
-                        "{} already published with identical content (digest {}), skipping",
-                        reference, layer_digest
+                        "{reference} already published with identical content (digest {layer_digest}), skipping"
                     );
                 }
                 return Ok(PushReport {
@@ -272,12 +271,9 @@ async fn run_async(wasm_path: &Path, reference: &str, opts: PushOptions) -> Resu
             }
             Ok(Some(remote)) => {
                 bail!(
-                    "{} is already published with a different layer digest.\n\
+                    "{reference} is already published with a different layer digest.\n\
                      Bump the version — a metadata-only change still requires a version bump.\n  \
-                     local:  {}\n  remote: {}",
-                    reference,
-                    layer_digest,
-                    remote
+                     local:  {layer_digest}\n  remote: {remote}"
                 );
             }
             Ok(None) => {

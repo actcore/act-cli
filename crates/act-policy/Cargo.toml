@@ -9,6 +9,9 @@ repository = "https://github.com/actcore/act-cli"
 homepage = "https://actcore.dev"
 keywords = ["act", "capability", "policy", "wasm", "security"]
 
+[lints]
+workspace = true
+
 [dependencies]
 act-types.workspace = true
 serde.workspace = true

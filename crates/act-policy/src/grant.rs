@@ -251,7 +251,7 @@ fn parse_fs_deny_constraints(cs: &[serde_json::Value]) -> Result<Vec<String>, Po
         .collect()
 }
 
-/// Map the `wasi:http` grant to `HttpConfig` (constraints → HttpRule).
+/// Map the `wasi:http` grant to `HttpConfig` (constraints → `HttpRule`).
 pub fn to_http_config(gp: &GrantPolicy) -> Result<HttpConfig, PolicyError> {
     let g = gp.resolve(act_types::constants::CAP_HTTP);
     Ok(HttpConfig {
@@ -272,7 +272,7 @@ fn parse_http_constraints(cs: &[serde_json::Value]) -> Result<Vec<HttpRule>, Pol
         .collect()
 }
 
-/// Map the `wasi:sockets` grant to `SocketsConfig` (constraints → SocketsRule).
+/// Map the `wasi:sockets` grant to `SocketsConfig` (constraints → `SocketsRule`).
 pub fn to_sockets_config(gp: &GrantPolicy) -> Result<SocketsConfig, PolicyError> {
     let g = gp.resolve(act_types::constants::CAP_SOCKETS);
     Ok(SocketsConfig {

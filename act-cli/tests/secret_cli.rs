@@ -334,7 +334,7 @@ fn local_refs_agree_on_one_profile_regardless_of_spelling() {
     assert_eq!(
         all.as_object()
             .map(|o| o.keys().cloned().collect::<Vec<_>>()),
-        Some(vec![abs_str.clone()])
+        Some(vec![abs_str])
     );
 }
 

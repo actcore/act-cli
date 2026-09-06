@@ -119,8 +119,7 @@ async fn call_tool_now_returns_text_content() {
     assert_ne!(
         result.is_error,
         Some(true),
-        "call should succeed, got: {:?}",
-        result
+        "call should succeed, got: {result:?}"
     );
     assert!(
         !result.content.is_empty(),
@@ -264,7 +263,7 @@ async fn emitted_meta_keys_are_conformant() {
 /// `std:traceparent` / `std:agent-id` propagate the same way but, unlike
 /// `std:request-id`, are never rendered into the human audit line by design
 /// (act-audit's `SpanVisitor`: "captured onto the span but stay unrendered
-/// — only REQUEST_ID reaches a line"; they exist for a future OTLP
+/// — only `REQUEST_ID` reaches a line"; they exist for a future OTLP
 /// exporter). This test is the black-box half of the verification the
 /// request id gets; the trace-context mapping itself is proven at the unit
 /// level by `rmcp_bridge::tests::mcp_meta_trace_keys_reach_call_metadata`.

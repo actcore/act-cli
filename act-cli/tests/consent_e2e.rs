@@ -333,7 +333,7 @@ fn call_twice_over_mcp(
                 continue;
             }
 
-            match message.get("id").and_then(|id| id.as_u64()) {
+            match message.get("id").and_then(serde_json::Value::as_u64) {
                 Some(1) => {
                     send(serde_json::json!({
                         "jsonrpc": "2.0", "method": "notifications/initialized"
@@ -351,7 +351,7 @@ fn call_twice_over_mcp(
                     }));
                 }
                 Some(3) => {
-                    results.push(message.clone());
+                    results.push(message);
                     let _ = tx.send((elicited, results.clone()));
                     return;
                 }
@@ -388,7 +388,7 @@ fn a_repeated_question_is_asked_once_not_per_call() {
             reply
                 .get("result")
                 .and_then(|r| r.get("isError"))
-                .and_then(|v| v.as_bool()),
+                .and_then(serde_json::Value::as_bool),
             Some(false),
             "{label} call must have been allowed: {reply}"
         );
@@ -398,7 +398,7 @@ fn a_repeated_question_is_asked_once_not_per_call() {
 /// The negative control for the test above: two calls asking about
 /// *different* keys must each be asked. Without this, a host that ignored
 /// `key` entirely — remembering "db:drop was approved" rather than
-/// "db:drop for test_scratch was approved" — would also pass the test
+/// "db:drop for `test_scratch` was approved" — would also pass the test
 /// above, having collapsed two distinct questions into one blanket
 /// authorization. `gate.rs`'s own unit test
 /// `ask_reaches_the_prompter_once_per_key_and_is_remembered` pins the same

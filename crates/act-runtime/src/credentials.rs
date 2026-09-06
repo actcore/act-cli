@@ -117,8 +117,7 @@ pub struct Refreshed {
 fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// The fields of this record that are too close to expiry to serve.
@@ -229,21 +228,21 @@ impl CredentialHost {
     pub fn note_session_opened(&self, id: &str) {
         self.live_sessions
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(id.to_string());
     }
 
     pub fn note_session_closed(&self, id: &str) {
         self.live_sessions
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(id);
     }
 
     fn live(&self, id: &str) -> bool {
         self.live_sessions
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains(id)
     }
 
@@ -368,7 +367,7 @@ impl CredentialHost {
     fn lock_for(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
         self.refresh_locks
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .entry(key.to_string())
             .or_default()
             .clone()
@@ -1074,8 +1073,7 @@ mod tests {
             members
                 .iter()
                 .find(|(k, _)| matches!(k, Value::Text(s) if s == want))
-                .map(|(_, v)| v.clone())
-                .unwrap_or_else(|| panic!("8.3 registers {want}"))
+                .map_or_else(|| panic!("8.3 registers {want}"), |(_, v)| v.clone())
         };
 
         assert!(

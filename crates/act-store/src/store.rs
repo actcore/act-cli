@@ -242,7 +242,10 @@ impl Store {
                 continue;
             }
             let hex = index::digest_hex(d);
-            let artifact_type = d.artifact_type().as_ref().map(|m| m.to_string());
+            let artifact_type = d
+                .artifact_type()
+                .as_ref()
+                .map(std::string::ToString::to_string);
             let kind = ann
                 .get(K_KIND)
                 .cloned()
@@ -500,10 +503,7 @@ mod tests {
         let stored = store
             .put_oci_artifact(
                 &manifest_bytes,
-                &[
-                    (wasm_hex.clone(), wasm.to_vec()),
-                    (cfg_hex.clone(), cfg.to_vec()),
-                ],
+                &[(wasm_hex, wasm.to_vec()), (cfg_hex, cfg.to_vec())],
                 &prov,
             )
             .unwrap();
