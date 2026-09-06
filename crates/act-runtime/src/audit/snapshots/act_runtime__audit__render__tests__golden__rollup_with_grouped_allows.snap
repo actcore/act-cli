@@ -1,0 +1,5 @@
+---
+source: crates/act-runtime/src/audit/render.rs
+expression: "render_rollup(&span_fields(), &roll)"
+---
+audit: ● run_python  ok 1.4s  args:9e21c4  req:req-9f  filesystem: 12 read 2 write under /data/**  http: 1 GET under pypi.org

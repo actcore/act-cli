@@ -1,0 +1,5 @@
+---
+source: crates/act-runtime/src/audit/render.rs
+expression: "render_declared_ungranted_warning(&[\"wasi:http\".to_string(),\n\"wasi:sockets\".to_string(),])"
+---
+audit: ⚠ declared but not granted: wasi:http, wasi:sockets

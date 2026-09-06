@@ -1,0 +1,5 @@
+---
+source: crates/act-runtime/src/audit/render.rs
+expression: "render_rollup(&sf, &roll)"
+---
+audit: ● run\npython  ok 1.4s  args:9e21c4  req:req-9f  filesystem: 1 read under /data\n audit: forged

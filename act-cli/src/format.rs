@@ -513,6 +513,73 @@ mod tests {
         info
     }
 
+    /// Golden output for the three `act info` renderers.
+    ///
+    /// The `contains` assertions below pin individual facts — the version is
+    /// present, the capability is named. What they cannot see is the layout:
+    /// section order, indentation, blank lines, which fields are omitted when
+    /// absent. `--format text` is what an operator reads and `--format json`
+    /// is what a script parses, so both are contracts, and both can drift
+    /// past a `contains` without a single assertion failing.
+    mod golden {
+        use super::*;
+
+        /// Colour is forced off for the duration of the text snapshot.
+        /// `to_text` asks `owo-colors` whether *stdout* supports colour, and
+        /// under `cargo test` it normally does not — but `CLICOLOR_FORCE=1`
+        /// in the environment flips that, and the snapshot would fail on a
+        /// developer's machine for a reason that has nothing to do with the
+        /// renderer. Pinned rather than left to the ambient answer.
+        struct NoColor;
+
+        impl NoColor {
+            fn set() -> Self {
+                owo_colors::set_override(false);
+                NoColor
+            }
+        }
+
+        impl Drop for NoColor {
+            fn drop(&mut self) {
+                owo_colors::unset_override();
+            }
+        }
+
+        #[test]
+        fn info_text() {
+            let _no_color = NoColor::set();
+            let info = sample_info();
+            let data = InfoData {
+                info: &info,
+                tools: None,
+            };
+            insta::assert_snapshot!(to_text(&data));
+        }
+
+        #[test]
+        fn info_json() {
+            let info = sample_info();
+            let data = InfoData {
+                info: &info,
+                tools: None,
+            };
+            insta::assert_snapshot!(to_json(&data).expect("renders"));
+        }
+
+        /// The compact encoding `--format toon` emits. Its whole point is
+        /// that it is smaller than the JSON above while carrying the same
+        /// data; a diff here is the only way to see that stay true.
+        #[test]
+        fn info_toon() {
+            let info = sample_info();
+            let data = InfoData {
+                info: &info,
+                tools: None,
+            };
+            insta::assert_snapshot!(to_info_toon(&data).expect("renders"));
+        }
+    }
+
     #[test]
     fn text_header_and_description() {
         let info = sample_info();

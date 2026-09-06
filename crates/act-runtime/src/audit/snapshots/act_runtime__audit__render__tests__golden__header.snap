@@ -1,0 +1,5 @@
+---
+source: crates/act-runtime/src/audit/render.rs
+expression: "render_header(\"python-eval@0.16.0\",\n\"1f3a9c4e5d6b7a8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c\",\n&[(\"wasi:filesystem\".to_string(), \"allowlist\".to_string()),\n(\"wasi:http\".to_string(), \"ask\".to_string()),],)"
+---
+audit: python-eval@0.16.0 sha256:1f3a9c │ wasi:filesystem=allowlist wasi:http=ask

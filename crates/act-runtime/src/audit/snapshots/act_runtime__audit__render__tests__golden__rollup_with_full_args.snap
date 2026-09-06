@@ -1,0 +1,5 @@
+---
+source: crates/act-runtime/src/audit/render.rs
+expression: "render_rollup(&sf, &Rollup::new(64))"
+---
+audit: ● run_python  ok 1.4s  args:{"name":"pandas","version":"2.2.0"}  req:req-9f

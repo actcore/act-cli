@@ -394,6 +394,161 @@ mod tests {
         }
     }
 
+    /// Golden lines for every renderer in this module.
+    ///
+    /// The `contains`-style tests below each pin one *intention* — "the line
+    /// must name the reason", "the rule must be attributed" — and are the
+    /// right shape for that: they say why the field is there and they keep
+    /// saying it when the surrounding format moves. What none of them can
+    /// see is the line as a whole, which is what an operator reads and what
+    /// a log pipeline parses: field order, separators, spacing, which fields
+    /// appear at all. A renderer could grow a field, lose one, or reorder
+    /// them and every assertion below would still pass.
+    ///
+    /// So the whole line is pinned here instead, once per renderer and once
+    /// per variant that changes its shape. Review a diff in these the way
+    /// you would review a change to the trail's format — because that is
+    /// what it is.
+    mod golden {
+        use super::*;
+
+        fn cap_decision() -> CapDecisionRecord {
+            CapDecisionRecord {
+                cap_id: "wasi:http".into(),
+                key: "api.telemetry.example.com:443".into(),
+                action: "GET".into(),
+                decision: Decision4::Deny,
+                mode: "allowlist".into(),
+                actor: Actor::Static,
+                reason: Some("outside ceiling".into()),
+                rule: None,
+                never_rollup: false,
+            }
+        }
+
+        #[test]
+        fn header() {
+            insta::assert_snapshot!(render_header(
+                "python-eval@0.16.0",
+                "1f3a9c4e5d6b7a8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c",
+                &[
+                    ("wasi:filesystem".to_string(), "allowlist".to_string()),
+                    ("wasi:http".to_string(), "ask".to_string()),
+                ],
+            ));
+        }
+
+        #[test]
+        fn declared_ungranted_warning() {
+            insta::assert_snapshot!(render_declared_ungranted_warning(&[
+                "wasi:http".to_string(),
+                "wasi:sockets".to_string(),
+            ]));
+        }
+
+        #[test]
+        fn declared_ask_blocked_warning() {
+            insta::assert_snapshot!(render_declared_ask_blocked_warning(&[
+                "wasi:filesystem".to_string()
+            ]));
+        }
+
+        #[test]
+        fn credential_issue() {
+            insta::assert_snapshot!(render_credential_issue(&CredentialIssueRecord {
+                component_ref: "notion@1.2.0".into(),
+                session_id: "sess-4f2a1b".into(),
+                key: "acme:token".into(),
+                kind: "std:oauth2".into(),
+            }));
+        }
+
+        /// A static deny — the shape an operator sees most often.
+        #[test]
+        fn exception_static_deny() {
+            insta::assert_snapshot!(render_exception(&cap_decision()));
+        }
+
+        /// The same decision reached by asking a human. `actor` and the
+        /// decision word both change; the rest of the line must not.
+        #[test]
+        fn exception_ask_denied_by_user() {
+            let mut r = cap_decision();
+            r.decision = Decision4::AskDeny;
+            r.mode = "ask".into();
+            r.actor = Actor::User;
+            r.reason = Some("denied by user".into());
+            insta::assert_snapshot!(render_exception(&r));
+        }
+
+        /// A deny that *did* have a rule to attribute: the `rule` field is
+        /// what distinguishes "your allowlist does not cover this" from
+        /// "nothing ever declared it".
+        #[test]
+        fn exception_with_an_attributed_rule() {
+            let mut r = cap_decision();
+            r.rule = Some("*.example.com".into());
+            r.reason = Some("not granted".into());
+            insta::assert_snapshot!(render_exception(&r));
+        }
+
+        #[test]
+        fn rollup_with_grouped_allows() {
+            let mut roll = Rollup::new(64);
+            for _ in 0..12 {
+                roll.add("wasi:filesystem", "read", Some("/data/**"));
+            }
+            for _ in 0..2 {
+                roll.add("wasi:filesystem", "write", Some("/data/**"));
+            }
+            roll.add("wasi:http", "GET", Some("pypi.org"));
+            insta::assert_snapshot!(render_rollup(&span_fields(), &roll));
+        }
+
+        /// A call that touched no capability at all still reports itself.
+        #[test]
+        fn rollup_with_no_allows() {
+            insta::assert_snapshot!(render_rollup(&span_fields(), &Rollup::new(64)));
+        }
+
+        /// `--audit-args`: the full argument value replaces the digest. The
+        /// one line where a credential could surface, so its exact shape is
+        /// worth pinning.
+        #[test]
+        fn rollup_with_full_args() {
+            let mut sf = span_fields();
+            sf.args_json = Some(r#"{"name":"pandas","version":"2.2.0"}"#.to_string());
+            insta::assert_snapshot!(render_rollup(&sf, &Rollup::new(64)));
+        }
+
+        /// A session id appears, truncated, and the group cap collapses the
+        /// tail into `and N more`.
+        #[test]
+        fn rollup_with_session_and_overflow() {
+            let mut sf = span_fields();
+            sf.session_id = Some("sess-0123456789abcdef".to_string());
+            let mut roll = Rollup::new(2);
+            roll.add("wasi:filesystem", "read", Some("/a/**"));
+            roll.add("wasi:filesystem", "read", Some("/b/**"));
+            roll.add("wasi:filesystem", "read", Some("/c/**"));
+            roll.add("wasi:http", "GET", Some("pypi.org"));
+            insta::assert_snapshot!(render_rollup(&sf, &roll));
+        }
+
+        /// Untrusted text — a guest-chosen tool name, a rule from a grant —
+        /// is escaped, so nothing a component controls can inject a second
+        /// audit line. The escaping is asserted by the tests below; what is
+        /// pinned here is what the escaped line actually looks like.
+        #[test]
+        fn rollup_escapes_untrusted_text() {
+            let mut sf = span_fields();
+            sf.tool = "run\npython".to_string();
+            let mut roll = Rollup::new(64);
+            roll.add("wasi:filesystem", "read", Some("/data\n audit: forged"));
+            insta::assert_snapshot!(render_rollup(&sf, &roll));
+        }
+    }
+
     #[test]
     fn exception_line_names_decision_capability_and_reason() {
         let r = CapDecisionRecord {

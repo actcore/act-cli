@@ -1,0 +1,5 @@
+---
+source: crates/act-runtime/src/audit/render.rs
+expression: render_exception(&cap_decision())
+---
+audit: ✗ deny  wasi:http  GET api.telemetry.example.com:443   outside ceiling  mode:allowlist

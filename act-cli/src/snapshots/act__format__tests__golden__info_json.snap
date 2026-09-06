@@ -1,0 +1,18 @@
+---
+source: act-cli/src/format.rs
+expression: "to_json(&data).expect(\"renders\")"
+---
+{
+  "name": "component-sqlite",
+  "version": "0.2.0",
+  "description": "SQLite database access",
+  "default_language": "en",
+  "capabilities": {
+    "wasi:filesystem": {
+      "params": {
+        "mount-root": "/data"
+      }
+    }
+  },
+  "skill": "Use this component for database operations..."
+}

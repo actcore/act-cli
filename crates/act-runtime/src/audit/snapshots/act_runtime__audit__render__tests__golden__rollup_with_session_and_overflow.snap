@@ -1,0 +1,5 @@
+---
+source: crates/act-runtime/src/audit/render.rs
+expression: "render_rollup(&sf, &roll)"
+---
+audit: ● run_python  ok 1.4s  args:9e21c4  req:req-9f  session:sess-012  filesystem: 1 read 1 read under /a/**, /b/**  and 2 more

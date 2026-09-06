@@ -1,0 +1,5 @@
+---
+source: crates/act-runtime/src/audit/render.rs
+expression: "render_declared_ask_blocked_warning(&[\"wasi:filesystem\".to_string()])"
+---
+audit: ⚠ declared ask, no prompt channel — every access will be denied: wasi:filesystem

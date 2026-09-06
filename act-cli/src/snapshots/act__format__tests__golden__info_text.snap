@@ -1,0 +1,13 @@
+---
+source: act-cli/src/format.rs
+expression: to_text(&data)
+---
+component-sqlite v0.2.0
+
+SQLite database access
+
+Capabilities:
+  wasi:filesystem (mount-root: /data)
+
+Skill:
+Use this component for database operations...

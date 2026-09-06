@@ -1,0 +1,5 @@
+---
+source: crates/act-runtime/src/audit/render.rs
+expression: render_exception(&r)
+---
+audit: ? ask-deny  wasi:http  GET api.telemetry.example.com:443   denied by user  mode:ask
