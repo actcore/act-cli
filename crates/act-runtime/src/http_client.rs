@@ -994,7 +994,6 @@ mod tests {
         };
         act_store::fetch::install_crypto_provider();
         let resolver = PolicyDnsResolver::new(&cfg);
-        let mode = cfg.mode;
         let transport = hclient_native::Native::new(
             hclient_rt_tokio::Tokio,
             hclient_tls_rustls::Rustls::with_webpki_roots(),
@@ -1013,7 +1012,7 @@ mod tests {
         ));
         let _guard = tracing::subscriber::set_default(sub);
 
-        let result = client.get(&format!("http://{addr}/")).send().await;
+        let result = client.get(format!("http://{addr}/")).send().await;
 
         drop(_guard);
         server.await.expect("server task");

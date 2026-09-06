@@ -1,0 +1,96 @@
+# Supply-chain gate for this workspace, run by `cargo deny check` in CI.
+#
+# ACT's pitch is that a component's dependencies are auditable; the toolchain
+# that makes that claim has to hold its own dependencies to the same standard.
+# Four questions, in the order they matter:
+#
+#   advisories  does anything here have a known vulnerability?
+#   sources     did every crate come from crates.io?
+#   licenses    may we ship it?
+#   bans        are we carrying the same library twice?
+#
+# Run locally with `cargo deny check`.
+
+[graph]
+# No `targets` filter: evaluate every platform's dependencies, so a
+# Windows-only or macOS-only crate cannot slip past a gate that only ever
+# looked at Linux. `act` ships on all three.
+all-features = false
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+[advisories]
+# No blanket ignores. An advisory we decide not to act on gets its own entry
+# here with the reason, so "we looked at it" and "we did not notice" stay
+# distinguishable.
+ignore = []
+
+[licenses]
+# Permissive licences only. Everything below is either OSI-approved
+# permissive or a data/public-domain dedication.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception", # the LLVM/wasmtime/cranelift stack
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0", # webpki-roots — the root-certificate data set
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0", # the ICU data crates behind `idna`
+    "Unlicense",   # BurntSushi's crates are `Unlicense OR MIT`
+    "Zlib",
+]
+confidence-threshold = 0.8
+
+# `option-ext` is MPL-2.0 and nothing else — no permissive alternative in its
+# expression, unlike the GPL/LGPL-carrying crates below, which all offer one.
+# MPL-2.0 is file-level copyleft: it reaches the files it licenses, not what
+# links them, and we neither modify nor vendor it. Scoped to this one crate
+# rather than allowed workspace-wide, so the next MPL dependency has to be
+# looked at rather than inherited.
+#
+# Reached through `dirs` → `dirs-sys` → `option-ext`, i.e. by every binary
+# here that resolves a config or cache directory.
+[[licenses.exceptions]]
+name = "option-ext"
+allow = ["MPL-2.0"]
+
+[bans]
+# Duplicate versions are a hygiene signal, not a policy breach, and nearly all
+# of ours are transitive (thiserror 1 + 2, sha2 0.10 + 0.11, three windows-sys
+# majors). Warn so the count is visible and does not grow unnoticed; failing
+# CI on something no direct dependency of ours controls would only teach us to
+# stop reading the output.
+multiple-versions = "warn"
+# A `*` version requirement means "whatever is newest at lock time", which is
+# exactly the shape a dependency-confusion or a surprise-major bump needs.
+wildcards = "deny"
+highlight = "all"
+allow = []
+# Empty on purpose. The crates this workspace refuses — `cfg-if` and
+# `assert_matches`, both replaced by `std` macros stable since 1.96 — cannot
+# be expressed here: `cfg-if` legitimately appears 18 times under third-party
+# parents (`ring`, `getrandom`, `sha2`, `wasm-bindgen`), so denying it would
+# fail on other people's code, and `wrappers` would mean re-listing those
+# parents after every bump. The rule is about *direct* dependencies, so it is
+# checked against our own manifests instead — `scripts/forbidden-crates.py`,
+# run by prek and by the `forbidden` job next to this one.
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+# The gate that matters most for a signed, reproducible artifact: every crate
+# in this build comes from crates.io, and nothing is pulled from a git URL or
+# a private registry that a reader of `Cargo.toml` would have to go verify.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

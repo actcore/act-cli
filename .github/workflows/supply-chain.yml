@@ -1,0 +1,47 @@
+name: Supply chain
+
+on:
+  workflow_call:
+
+jobs:
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: moonrepo/setup-rust@v1
+        with:
+          bins: cargo-deny
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Every gate in `deny.toml`: advisories, bans, licenses, sources.
+      # No `wkg wit fetch` — this reads Cargo.lock, not the WIT deps, so it is
+      # the one job that does not need the registry to be reachable.
+      - run: cargo deny check
+
+  forbidden:
+    name: Crates std has replaced
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      # No toolchain and no lockfile: this reads our own manifests, so it is
+      # the cheapest gate here and the one that answers before a build starts.
+      # It lives beside cargo-deny because it asks the same question — what may
+      # we depend on — but about direct dependencies only, which `deny.toml`
+      # cannot express without re-listing every third-party parent of `cfg-if`.
+      - run: python3 scripts/forbidden-crates.py
+
+  machete:
+    name: Unused dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: moonrepo/setup-rust@v1
+        with:
+          bins: cargo-machete
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: cargo machete

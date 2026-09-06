@@ -83,3 +83,6 @@ jobs:
   build-sbom:
     needs: [check, fmt]
     uses: ./.github/workflows/build-sbom.yml
+
+  supply-chain:
+    uses: ./.github/workflows/supply-chain.yml
