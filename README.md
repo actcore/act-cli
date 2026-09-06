@@ -123,13 +123,31 @@ env, then `GITHUB_TOKEN` for `ghcr.io`, then `~/.docker/config.json`
 
 RISC-V (`riscv64`) is a first-class target. Regressions on RISC-V are release-blocking.
 
-Released **glibc** binaries and wheels need **glibc 2.34 or newer** (Debian 12,
-Ubuntu 22.04, RHEL 9 and later); the riscv64 wheel needs 2.39. The floor is one
-symbol: DNS SVCB/HTTPS lookups call `res_query(3)`, which glibc did not export
-under that name before 2.34. Nothing else in the binary requires past 2.33.
-Older distributions are covered by the musl builds, which carry no such floor
-because musl exports the symbol outright. Building from source does not lift
-it — the call is the same one — so musl is the answer there, not `cargo build`.
+### Runtime requirement: glibc 2.34
+
+A **glibc** build of `act` or `act-build` requires **glibc 2.34 or newer** —
+Debian 12, Ubuntu 22.04, RHEL 9 and later. This is a supported-platform
+commitment, not an incidental build setting: it is asserted in CI, and lowering
+it is a breaking change.
+
+Which channels it applies to:
+
+| Channel | Affected |
+|---|---|
+| npm (`@actcore/act`, `@actcore/act-build`) | **No** — Linux packages ship musl binaries |
+| PyPI `manylinux` wheels | Yes — 2.34; the riscv64 wheel needs 2.39 |
+| GitHub Releases `*-linux-*-gnu` | Yes — 2.34 |
+| GitHub Releases `*-linux-*-musl`, Docker | No |
+
+The floor is one symbol. DNS SVCB/HTTPS lookups call `res_query(3)`, which
+glibc did not export under that name before 2.34 — earlier releases had only
+`__res_query`, and a modern glibc keeps that as a compat symbol new code cannot
+link against, so there is no spelling that satisfies both. Nothing else in the
+binary requires past glibc 2.33.
+
+On an older distribution, use a musl build: musl exports the symbol outright and
+carries no floor. Building from source does not lift the requirement — it is the
+same call — so musl is the answer there, not `cargo build`.
 
 ## Building
 

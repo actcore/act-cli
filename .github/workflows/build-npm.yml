@@ -21,6 +21,15 @@ jobs:
           VERSION=$(cargo metadata --format-version=1 --no-deps | jq -r '.packages[] | select(.name == "act-cli") | .version')
           find npm -name package.json -exec sed -i "s/\"0.0.0\"/\"$VERSION\"/g" {} +
 
+      # **Linux npm packages ship musl builds, and carry no `libc` field.**
+      # Both halves are deliberate. musl means npm users are exempt from the
+      # glibc 2.34 floor the gnu artifacts carry (README, "Runtime requirement:
+      # glibc 2.34") — a statically linked binary runs on any Linux.
+      #
+      # Do not "fix" the missing `libc: ["musl"]`: npm reads that as *only
+      # installable on musl* and would skip these packages on Debian and
+      # Ubuntu, where they work perfectly. The field would describe how the
+      # binary was linked, while npm uses it to decide where it may run.
       - name: Populate act-cli platform packages
         run: |
           cp artifacts/act-linux-x86_64-musl    npm/@actcore/act-cli-linux-x64/act

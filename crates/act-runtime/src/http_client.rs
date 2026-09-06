@@ -812,6 +812,14 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    // Its sibling below already carries this marker for the same reason: the
+    // assertion needs a resolver that actually answers. Without DNS the call
+    // still fails, but with `DnsError` for the opposite reason, and the
+    // `filtered_everything` assertion above is what turns that from a silent
+    // false pass into a loud one. Marked rather than rewritten against a stub
+    // because what it proves — the real resolver's addresses meeting the real
+    // policy — is exactly the part a stub would remove.
+    #[ignore = "network: resolves example.com through the system resolver"]
     async fn dns_resolver_requires_allow_cidr_match_for_hostnames() {
         // mode=Allowlist with only an allow-CIDR rule. Any URI whose
         // resolved IPs land outside that CIDR must fail at DNS level.
@@ -851,6 +859,18 @@ mod tests {
         assert!(
             matches!(err, HttpError::DnsError { .. }),
             "expected DnsError, got {err:?}"
+        );
+        // **`DnsError` alone does not prove the policy did anything.** A
+        // sandbox that cannot reach DNS produces the identical error for the
+        // opposite reason — the name never resolved — so asserting only the
+        // variant makes this test pass most loudly when it is testing
+        // nothing. `filtered_everything` is the state that separates the two:
+        // it is true only when the resolver offered addresses and policy
+        // refused every one.
+        assert!(
+            client.resolver.filtered_everything("example.com"),
+            "the DnsError must come from policy refusing every address, not \
+             from a resolver that never answered — this test needs DNS"
         );
     }
 

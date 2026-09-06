@@ -106,6 +106,39 @@ jobs:
         env:
           WKG_CONFIG_FILE: wkg-registry.toml
       - run: cargo zigbuild --release --target ${{ matrix.zig_target || matrix.target }}
+      # The glibc floor is a documented product requirement (README, "Runtime
+      # requirement: glibc 2.34"), so it is asserted rather than assumed. A
+      # build setting alone would let the floor drift upward silently — one
+      # dependency calling a newer symbol is all it takes, and the failure
+      # would surface as a user's "GLIBC_2.38 not found" months later.
+      #
+      # Both directions are errors. Higher than 2.34 breaks the promise;
+      # missing `res_query` means the SVCB path was dropped, which is the
+      # feature the floor is paid for, and a floor bought for nothing should
+      # be spent rather than kept.
+      - name: the glibc floor is exactly what the README promises
+        if: endsWith(matrix.name, '-gnu')
+        run: |
+          set -euo pipefail
+          for bin in target/${{ matrix.target }}/release/act \
+                     target/${{ matrix.target }}/release/act-build; do
+            highest=$(objdump -T "$bin" \
+              | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -uV | tail -1)
+            echo "$bin requires at most $highest"
+            if [ "$highest" != "GLIBC_2.34" ]; then
+              echo "::error::$bin requires $highest, but the README promises \
+          glibc 2.34. Raising the floor is a breaking change: update the README \
+          and this check together, or find the dependency that raised it."
+              exit 1
+            fi
+          done
+          if ! objdump -T target/${{ matrix.target }}/release/act \
+               | grep -q 'res_query'; then
+            echo "::error::act no longer references res_query, so the 2.34 \
+          floor buys nothing. If SVCB/HTTPS lookups were dropped on purpose, \
+          lower the floor and the README with it."
+            exit 1
+          fi
       - name: Rename binaries
         run: |
           cp target/${{ matrix.target }}/release/act act-${{ matrix.name }}
