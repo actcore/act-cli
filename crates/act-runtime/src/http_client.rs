@@ -120,27 +120,19 @@ impl PolicyDnsResolver {
 }
 
 impl hclient_dns::Resolve for PolicyDnsResolver {
-    type Ipv4<'a> =
-        futures_util::stream::BoxStream<'a, Result<hclient_dns::ResolvedAddr, hclient::Error>>;
-    type Ipv6<'a> =
-        futures_util::stream::BoxStream<'a, Result<hclient_dns::ResolvedAddr, hclient::Error>>;
-    type Svcb<'a> =
-        futures_util::stream::BoxStream<'a, Result<hclient_dns::SvcbEndpoint, hclient::Error>>;
+    type Records<'a> =
+        futures_util::stream::BoxStream<'a, Result<hclient_dns::Record, hclient::Error>>;
 
-    fn lookup_ipv4<'a>(&'a self, name: &str) -> Self::Ipv4<'a> {
-        self.filtered(name, true)
+    /// Whatever the inner resolver can answer, this can — the filter drops
+    /// records, it does not add or remove the ability to ask. Deferring
+    /// rather than answering `false` keeps a policy from silently costing
+    /// the connector an HTTPS lookup it would otherwise have made.
+    fn supports(&self, rtype: u16) -> bool {
+        hclient_dns::Resolve::supports(&*self.inner, rtype)
     }
 
-    fn lookup_ipv6<'a>(&'a self, name: &str) -> Self::Ipv6<'a> {
-        self.filtered(name, false)
-    }
-
-    fn supports_svcb(&self) -> bool {
-        false
-    }
-
-    fn lookup_svcb<'a>(&'a self, _name: &str) -> Self::Svcb<'a> {
-        Box::pin(futures_util::stream::empty())
+    fn lookup<'a>(&'a self, name: &str, rtype: u16) -> Self::Records<'a> {
+        self.filtered(name, rtype)
     }
 }
 
@@ -148,26 +140,65 @@ impl PolicyDnsResolver {
     fn filtered<'a>(
         &'a self,
         name: &str,
-        v4: bool,
-    ) -> futures_util::stream::BoxStream<'a, Result<hclient_dns::ResolvedAddr, hclient::Error>>
-    {
+        rtype: u16,
+    ) -> futures_util::stream::BoxStream<'a, Result<hclient_dns::Record, hclient::Error>> {
         use futures_util::StreamExt;
         let host = name.to_string();
-        let upstream: futures_util::stream::BoxStream<'a, _> = if v4 {
-            Box::pin(hclient_dns::Resolve::lookup_ipv4(&*self.inner, name))
-        } else {
-            Box::pin(hclient_dns::Resolve::lookup_ipv6(&*self.inner, name))
-        };
+        let upstream: futures_util::stream::BoxStream<'a, _> =
+            Box::pin(hclient_dns::Resolve::lookup(&*self.inner, name, rtype));
         Box::pin(upstream.filter(move |item| {
             let keep = match item {
-                Ok(resolved) => self.permits(&host, resolved.addr),
+                Ok(record) => match record.rdata {
+                    hclient_dns::RData::A(v4) => self.permits(&host, v4.into()),
+                    hclient_dns::RData::Aaaa(v6) => self.permits(&host, v6.into()),
+                    // **An HTTPS record carries addresses, so it is checked
+                    // like one.** `ipv4hint`/`ipv6hint` are addresses the
+                    // connector may dial without ever asking for A or AAAA,
+                    // so treating this as a mere routing hint would let a
+                    // name whose every address the policy refuses be reached
+                    // anyway through its hints — which is exactly what
+                    // `dns_resolver_requires_allow_cidr_match_for_hostnames`
+                    // caught when this arm returned `true`.
+                    //
+                    // A record with no hints has nothing to dial and is kept:
+                    // its `target` is resolved by a further lookup that comes
+                    // back through this same filter.
+                    hclient_dns::RData::Https(ref ep) => {
+                        ep.ipv4hint
+                            .iter()
+                            .all(|v4| self.permits(&host, (*v4).into()))
+                            && ep
+                                .ipv6hint
+                                .iter()
+                                .all(|v6| self.permits(&host, (*v6).into()))
+                    }
+                    // `RData` is `#[non_exhaustive]`, which is the point of
+                    // alpha.4's redesign: a record type this client learns
+                    // later must not break us. Anything that is not an
+                    // address is not an address to filter, so it passes for
+                    // the same reason `Https` does.
+                    _ => true,
+                },
                 // A resolver error is not a policy decision and is passed
                 // through: swallowing it would turn "DNS is down" into
                 // "policy refused", and an operator would go looking in the
                 // wrong place.
                 Err(_) => true,
             };
-            if item.is_ok() {
+            // Only address records are counted. `filtered_everything` means
+            // "policy refused every address this name offered", and an HTTPS
+            // record is never refused here — counting one would make a name
+            // whose only answer was a routing hint look like a name whose
+            // addresses were allowed, and suppress the capability record the
+            // operator needs.
+            let is_address = matches!(
+                item,
+                Ok(hclient_dns::Record {
+                    rdata: hclient_dns::RData::A(_) | hclient_dns::RData::Aaaa(_),
+                    ..
+                })
+            );
+            if is_address {
                 let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
                 let counts = seen.entry(host.clone()).or_insert((0, 0));
                 counts.0 += 1;
@@ -216,12 +247,12 @@ fn redirect_verdict(
         &network::NetworkCheck::new(host, port),
     );
     match decision {
-        act_policy::Decision::Allow => RedirectVerdict::Follow,
+        act_policy::Decision::Allow => RedirectVerdict::follow(),
         // `Ask` gates the request itself, at `send`. This callback is sync and
         // cannot prompt, so a hop inside an already-approved request is
         // followed. Per-hop asking is a later phase, and would need the
         // predicate to be async.
-        act_policy::Decision::Ask => RedirectVerdict::Follow,
+        act_policy::Decision::Ask => RedirectVerdict::follow(),
         act_policy::Decision::Deny => {
             tracing::warn!(%to, "http policy: redirect hop blocked");
             emit_cap_decision(&CapDecisionRecord::statik_with_reason(
@@ -236,8 +267,33 @@ fn redirect_verdict(
             // `Refuse`, not `Stop`: stopping would hand the 3xx back as an
             // ordinary answer, and a guest that never checks the status would
             // read a blocked redirect as a successful request.
-            RedirectVerdict::Refuse
+            //
+            // The reason is `&'static str` so the verdict stays `Copy`, so it
+            // names the rule rather than the target. The target is already in
+            // the audit record emitted just above, which is where an operator
+            // looks for which host it was.
+            RedirectVerdict::Refuse("redirect target outside the component's http ceiling")
         }
+    }
+}
+
+/// [`redirect_verdict`] as the policy object `hclient` now takes.
+///
+/// alpha.4 replaced the `redirect_predicate` closure with a `RedirectPolicy`
+/// trait. The upside for us is that policies compose as a lattice — a future
+/// hop limit becomes `CeilingRedirectPolicy(..).and(Limit::new(n))` rather
+/// than another branch inside one closure — and that the ceiling check keeps
+/// its own named type in the audit story instead of being an anonymous
+/// closure in a builder chain.
+#[derive(Debug)]
+struct CeilingRedirectPolicy(HttpConfig);
+
+impl hclient::redirect::RedirectPolicy for CeilingRedirectPolicy {
+    fn follow(
+        &self,
+        hop: &hclient::redirect::ProposedRedirect<'_>,
+    ) -> hclient::redirect::RedirectVerdict {
+        redirect_verdict(&self.0, hop)
     }
 }
 
@@ -286,7 +342,7 @@ impl ActHttpClient {
         });
 
         let client = hclient::Client::builder(transport)
-            .redirect_predicate(move |hop| redirect_verdict(&cfg_for_hops, hop))
+            .redirect(CeilingRedirectPolicy(cfg_for_hops))
             .build()
             .map_err(|e| anyhow::anyhow!("the HTTP backend cannot serve this policy: {e}"))?;
         Ok(Self {
@@ -925,7 +981,7 @@ mod tests {
             resolver.clone(),
         );
         let client = hclient::Client::builder(transport)
-            .redirect_predicate(move |hop| redirect_verdict(&cfg, hop))
+            .redirect(CeilingRedirectPolicy(cfg))
             .build()
             .expect("client builds");
 
