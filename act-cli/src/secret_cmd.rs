@@ -705,55 +705,48 @@ const ECHO_WARNING: &str = "act secret: warning: terminal echo could not be turn
      WILL be visible on screen and in your scrollback. Ctrl-C and use --fields-stdin \
      or --from-command to avoid it.";
 
-/// Reads one line with terminal echo turned off, so a hidden credential
-/// never lands in scrollback or a screen-recording (design §5.3). Shells out
-/// to `stty` rather than pulling in a terminal-control crate — `act-cli`
-/// carries none today, and this is a single interactive-only code path.
+/// Reads one line from stdin with terminal echo turned off, so a hidden
+/// credential never lands in scrollback or a screen-recording (design §5.3).
 ///
-/// If `stty` is missing or fails, the read still happens — refusing would
-/// strand an operator whose terminal is otherwise fine — but it says so
-/// first, so the choice to keep typing is theirs. Silently reading with echo
-/// on would defeat the only thing this function exists for.
-#[cfg(unix)]
+/// The terminal handling lives in [`crate::tty`] — including why the read
+/// stays on stdin rather than moving to the controlling terminal, which is
+/// what a `getpass(3)`-shaped crate would do. One platform-independent path
+/// now: the Windows arm used to announce that it was about to echo the
+/// credential and then do it.
+///
+/// If echo cannot be turned off on a terminal that has one, the read still
+/// happens — refusing would strand an operator whose terminal is otherwise
+/// fine — but it says so first, so the choice to keep typing is theirs.
+/// Silently reading with echo on would defeat the only thing this function
+/// exists for. A non-terminal stdin is not that case and is not warned
+/// about: a piped secret was never going to appear on screen.
 pub(crate) fn read_hidden_line(label: &str) -> Result<String> {
-    let echo_disabled = std::process::Command::new("stty")
-        .arg("-echo")
-        .status()
-        .is_ok_and(|s| s.success());
-    if !echo_disabled {
-        eprintln!("{ECHO_WARNING}");
-    }
+    // Held across the read; `Drop` puts echo back, on the error path and on a
+    // panic as well as on the normal one.
+    let _echo = match crate::tty::echo_off() {
+        Ok(guard) => guard,
+        Err(_) => {
+            eprintln!("{ECHO_WARNING}");
+            None
+        }
+    };
 
     eprint!("{label}: ");
     std::io::stderr().flush().ok();
-    let read_result = {
-        let mut line = String::new();
-        std::io::stdin()
-            .read_line(&mut line)
-            .context("reading from stdin")
-            .map(|n| (n, line))
-    };
-    if echo_disabled {
-        let _ = std::process::Command::new("stty").arg("echo").status();
-    }
+    let mut line = String::new();
+    let read = std::io::stdin()
+        .read_line(&mut line)
+        .context("reading from stdin");
+    // The newline the terminal did not echo back, so the next thing printed
+    // starts on its own line. Unconditional: harmless when echo was on.
     eprintln!();
-    let (read, line) = read_result?;
+    let read = read?;
     // EOF is not an empty credential. `read_line` returns Ok(0) at end of
     // input — a closed pipe, or Ctrl-D at the prompt — and treating that as ""
     // stores an empty value and reports success, which is worse than failing:
     // the operator believes they provisioned something.
     anyhow::ensure!(read > 0, "no input for '{label}' — nothing was stored");
     Ok(line.trim_end_matches(['\n', '\r']).to_string())
-}
-
-/// No terminal-echo control implemented on this platform yet: the value is
-/// visible while typed. A known gap, not a silent downgrade — it says so,
-/// with the same warning and at the same point as the unix arm's failure
-/// path.
-#[cfg(not(unix))]
-pub(crate) fn read_hidden_line(label: &str) -> Result<String> {
-    eprintln!("{ECHO_WARNING}");
-    read_visible_line(label)
 }
 
 #[cfg(test)]

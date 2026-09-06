@@ -6,6 +6,7 @@ mod login_cmd;
 mod oauth;
 mod rmcp_bridge;
 mod secret_cmd;
+mod tty;
 
 use act_types::cbor;
 use login_cmd::LoginOpts;
@@ -236,6 +237,34 @@ enum Command {
         #[command(flatten)]
         opts: LoginOpts,
     },
+    /// Print a shell completion script for `act` on stdout.
+    ///
+    /// Written to stdout rather than installed: where a completion script
+    /// belongs is the shell's and the package manager's business, not this
+    /// binary's, and `act` is installed from cargo, npm, a container and an
+    /// OS package alike.
+    ///
+    ///   bash   act completions bash > /etc/bash_completion.d/act
+    ///   zsh    act completions zsh  > "${fpath[1]}/_act"
+    ///   fish   act completions fish > ~/.config/fish/completions/act.fish
+    ///
+    /// The script is generated from the same clap definition the binary
+    /// parses with, so it cannot drift from the flags that actually exist.
+    Completions {
+        /// Shell to generate for.
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+    /// Write man pages for `act` and each subcommand into a directory.
+    ///
+    /// Hidden: this is packaging machinery, run by a release job or a distro
+    /// recipe, not something an operator has a reason to reach for.
+    #[command(hide = true)]
+    Man {
+        /// Directory to write into. Must already exist.
+        #[arg(short = 'o', long, value_name = "DIR")]
+        out_dir: PathBuf,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -340,7 +369,9 @@ async fn main() -> Result<()> {
         Command::Skill { .. }
         | Command::Pull { .. }
         | Command::Secret { .. }
-        | Command::Login { .. } => (None, false, false),
+        | Command::Login { .. }
+        | Command::Completions { .. }
+        | Command::Man { .. } => (None, false, false),
         Command::Session(sub) => match sub {
             SessionCommand::OpenArgsSchema { opts, .. } => {
                 (opts.config.as_deref(), opts.no_audit, opts.audit_args)
@@ -476,7 +507,49 @@ async fn main() -> Result<()> {
             secret_cmd::cmd_secret(cmd, &global_opts).await
         }
         Command::Login { component, opts } => login_cmd::cmd_login(component, opts).await,
+        Command::Completions { shell } => cmd_completions(shell),
+        Command::Man { out_dir } => cmd_man(&out_dir),
     }
+}
+
+/// Both generators below build the `clap::Command` from the same `Cli` type
+/// `main` parses with, so what they describe is what the binary accepts.
+fn act_command() -> clap::Command {
+    <Cli as clap::CommandFactory>::command()
+}
+
+fn cmd_completions(shell: clap_complete::Shell) -> Result<()> {
+    let mut cmd = act_command();
+    // Into a buffer, not straight at stdout: `clap_complete::generate`
+    // `expect`s on its writer, so handing it the real stdout turns
+    // `act completions fish | head` — an ordinary way to look at the output —
+    // into a panic and a backtrace on a broken pipe.
+    //
+    // `bin_name` explicitly: the crate is `act-cli` and the binary is `act`,
+    // and a completion script registered under the wrong name completes
+    // nothing while looking installed.
+    let mut script = Vec::new();
+    clap_complete::generate(shell, &mut cmd, "act", &mut script);
+
+    use std::io::Write;
+    match std::io::stdout().write_all(&script) {
+        Ok(()) => Ok(()),
+        // The reader went away (`| head`). Nothing was asked of us that we
+        // failed to do, so this is not an error to report.
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(e) => Err(anyhow::Error::from(e).context("writing the completion script")),
+    }
+}
+
+fn cmd_man(out_dir: &std::path::Path) -> Result<()> {
+    anyhow::ensure!(
+        out_dir.is_dir(),
+        "{} is not a directory — create it first",
+        out_dir.display()
+    );
+    clap_mangen::generate_to(act_command(), out_dir)
+        .with_context(|| format!("writing man pages to {}", out_dir.display()))?;
+    Ok(())
 }
 
 /// Merge a JSON value (which must be an object) into `target`, with `source`

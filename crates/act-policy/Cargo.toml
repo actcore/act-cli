@@ -35,3 +35,6 @@ host = ["tokio"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
+# Property tests for the fs and network matchers (`tests/policy_properties.rs`).
+# Already in this build graph via `const-hex`, so it costs no new compilation.
+proptest = "1.11"
