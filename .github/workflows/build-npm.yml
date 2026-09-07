@@ -7,6 +7,9 @@ jobs:
   package:
     name: npm packages
     runs-on: ubuntu-latest
+    # It downloads artifacts and copies files — no compilation. Ten minutes is
+    # already generous; the point is that a stuck download ends by itself.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 

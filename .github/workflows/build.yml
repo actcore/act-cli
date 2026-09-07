@@ -10,6 +10,16 @@ jobs:
   native:
     name: Build (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
+    # Measured: the slowest of these is 12 minutes (both Windows targets) on a
+    # healthy runner, and the rest land between 8 and 10. 45 is a wide margin
+    # for a cold cache or a slow runner while still ending a hung job in a
+    # useful time.
+    #
+    # This file was the only one in the workflow set without a limit, and it
+    # cost a false red: on 2026-09-07 a `windows-aarch64` runner hung and the
+    # job ran 51 minutes before the platform killed it, failing CI on a commit
+    # whose identical code passed in a neighbouring run 12 minutes flat.
+    timeout-minutes: 45
     strategy:
       matrix:
         include:
@@ -63,6 +73,8 @@ jobs:
   zigbuild:
     name: Build (${{ matrix.name }})
     runs-on: ubuntu-latest
+    # Same limit and the same reason as `native` above.
+    timeout-minutes: 45
     strategy:
       matrix:
         include:
