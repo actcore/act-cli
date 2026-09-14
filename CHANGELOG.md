@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-15
+
+Argument validation moves into the host, and the HTTP stack moves to hclient.
+Both change observable behaviour: read the first entry under **Changed** before
+upgrading a component that was passing arguments its schema did not describe.
+
+### Added
+
+- `act completions <bash|zsh|fish>` writes a shell completion script to stdout,
+  generated from the same definition the binary parses with.
+- `act man -o <dir>` writes man pages for `act` and every subcommand.
+
+### Changed
+
+- **The host now validates tool arguments and session args against the
+  component's own JSON Schema, before the component is reached** — required by
+  `ACT-SPEC` §6.4 and `ACT-SESSIONS` §2.1, and previously not done. A call
+  whose arguments do not match the declared schema is refused with
+  `std:invalid-args`, shaped exactly like the error the component would have
+  returned. **This can reject calls that worked in 0.12.0**, if a component's
+  schema and its real arguments had drifted apart. A schema that fails to
+  compile disables checking for that tool with a warning rather than failing
+  every call, and a `$ref` in a guest schema is never fetched over the network.
+- All outbound HTTP — the OAuth flow, OCI registry access, `act-build`'s WIT
+  fetch, and the `wasi:http` host — now goes through `hclient`. The capability
+  ceiling is enforced on every redirect hop, not just the first request.
+- **Released glibc binaries and wheels now require glibc 2.34 or newer**
+  (Debian 12, Ubuntu 22.04, RHEL 9); the riscv64 wheel requires 2.39. npm
+  packages are unaffected — they ship musl binaries and carry no floor. This is
+  now a documented product requirement, asserted in CI. Older distributions are
+  covered by the musl builds.
+- `act-policy`: a consent question carries a `subject_id` alongside its display
+  name, and `resolve` returns the question it answered instead of a bare bool —
+  so an embedder can store a decision against something more durable than a
+  renameable label. Source-breaking for anything embedding `act-policy`.
+
+### Fixed
+
+- `act secret set` and `act login` no longer echo the credential on Windows,
+  where the prompt used to announce that it was about to display the secret and
+  then display it. Terminal echo is now restored on every exit path, including
+  a panic — previously an interrupted prompt could leave the terminal mute.
+
 ## [0.12.0] - 2026-08-27
 
 Two breaking changes and a new subsystem. `act` gains credentials: a host-side
