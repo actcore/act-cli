@@ -77,6 +77,42 @@ impl PolicyDnsResolver {
         }
     }
 
+    /// Whether a resolved record survives the policy.
+    ///
+    /// Extracted from the stream filter so it can be tested without a
+    /// resolver. The property that matters is *which record types get checked
+    /// against [`Self::permits`]*, and the only test that covered it needed a
+    /// live DNS query — so it is `#[ignore]`d and CI never ran it. See
+    /// `svcb_address_hints_are_filtered_like_any_other_address`.
+    fn keeps_record(&self, host: &str, record: &hclient_dns::Record) -> bool {
+        match record.rdata {
+            hclient_dns::RData::A(v4) => self.permits(host, v4.into()),
+            hclient_dns::RData::Aaaa(v6) => self.permits(host, v6.into()),
+            // **An HTTPS record carries addresses, so it is checked like
+            // one.** `ipv4hint`/`ipv6hint` are addresses the connector may
+            // dial without ever asking for A or AAAA, so treating this as a
+            // mere routing hint would let a name whose every address the
+            // policy refuses be reached anyway through its hints.
+            //
+            // A record with no hints has nothing to dial and is kept: its
+            // `target` is resolved by a further lookup that comes back
+            // through this same filter.
+            hclient_dns::RData::Https(ref ep) => {
+                ep.ipv4hint
+                    .iter()
+                    .all(|v4| self.permits(host, (*v4).into()))
+                    && ep
+                        .ipv6hint
+                        .iter()
+                        .all(|v6| self.permits(host, (*v6).into()))
+            }
+            // `RData` is `#[non_exhaustive]`: a record type this client
+            // learns later must not break us. Anything that is not an address
+            // is not an address to filter.
+            _ => true,
+        }
+    }
+
     /// Whether this address may be connected to at all.
     ///
     /// Port zero: a name resolves independently of the port a caller will
@@ -148,37 +184,7 @@ impl PolicyDnsResolver {
             Box::pin(hclient_dns::Resolve::lookup(&*self.inner, name, rtype));
         Box::pin(upstream.filter(move |item| {
             let keep = match item {
-                Ok(record) => match record.rdata {
-                    hclient_dns::RData::A(v4) => self.permits(&host, v4.into()),
-                    hclient_dns::RData::Aaaa(v6) => self.permits(&host, v6.into()),
-                    // **An HTTPS record carries addresses, so it is checked
-                    // like one.** `ipv4hint`/`ipv6hint` are addresses the
-                    // connector may dial without ever asking for A or AAAA,
-                    // so treating this as a mere routing hint would let a
-                    // name whose every address the policy refuses be reached
-                    // anyway through its hints — which is exactly what
-                    // `dns_resolver_requires_allow_cidr_match_for_hostnames`
-                    // caught when this arm returned `true`.
-                    //
-                    // A record with no hints has nothing to dial and is kept:
-                    // its `target` is resolved by a further lookup that comes
-                    // back through this same filter.
-                    hclient_dns::RData::Https(ref ep) => {
-                        ep.ipv4hint
-                            .iter()
-                            .all(|v4| self.permits(&host, (*v4).into()))
-                            && ep
-                                .ipv6hint
-                                .iter()
-                                .all(|v6| self.permits(&host, (*v6).into()))
-                    }
-                    // `RData` is `#[non_exhaustive]`, which is the point of
-                    // alpha.4's redesign: a record type this client learns
-                    // later must not break us. Anything that is not an
-                    // address is not an address to filter, so it passes for
-                    // the same reason `Https` does.
-                    _ => true,
-                },
+                Ok(record) => self.keeps_record(&host, record),
                 // A resolver error is not a policy decision and is passed
                 // through: swallowing it would turn "DNS is down" into
                 // "policy refused", and an operator would go looking in the
@@ -815,6 +821,73 @@ mod tests {
             matches!(err, HttpError::DnsError { .. })
                 || matches!(err, HttpError::ConnectionRefused),
             "expected DnsError or ConnectionRefused, got {err:?}"
+        );
+    }
+
+    /// **An HTTPS record's address hints meet the policy, checked offline.**
+    ///
+    /// `ipv4hint`/`ipv6hint` are addresses the connector may dial without ever
+    /// asking for A or AAAA, so a filter that checks address records and waves
+    /// HTTPS records through is defeated by the seam that replaced them. That
+    /// hole shipped briefly during the alpha.4 port.
+    ///
+    /// It was caught then only by
+    /// `dns_resolver_requires_allow_cidr_match_for_hostnames`, which needs a
+    /// live resolver and is `#[ignore]`d — so CI never ran it, and re-breaking
+    /// the arm passed a full `cargo test`. This drives `keeps_record`
+    /// directly: no DNS, no network, runs by default.
+    #[test]
+    fn svcb_address_hints_are_filtered_like_any_other_address() {
+        use act_policy::grant::{HttpConfig, HttpRule, PolicyMode};
+        use act_policy::net::NetworkRule;
+
+        let cfg = HttpConfig {
+            mode: PolicyMode::Allowlist,
+            allow: vec![HttpRule {
+                net: NetworkRule {
+                    cidr: Some("10.0.0.0/8".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            deny: vec![],
+        };
+        let r = PolicyDnsResolver::new(&cfg);
+
+        let inside: std::net::Ipv4Addr = "10.1.2.3".parse().unwrap();
+        let outside: std::net::Ipv4Addr = "93.184.216.34".parse().unwrap();
+
+        // Baseline both ways: without these the assertions below would also
+        // pass on a filter that refuses everything.
+        assert!(r.keeps_record(
+            "example.com",
+            &hclient_dns::Record::new(hclient_dns::RData::A(inside))
+        ));
+        assert!(!r.keeps_record(
+            "example.com",
+            &hclient_dns::Record::new(hclient_dns::RData::A(outside))
+        ));
+
+        let mut ep = hclient_dns::SvcbEndpoint::new(1, "example.com".into());
+        ep.ipv4hint = vec![outside];
+        assert!(
+            !r.keeps_record(
+                "example.com",
+                &hclient_dns::Record::new(hclient_dns::RData::Https(ep))
+            ),
+            "an HTTPS record's ipv4hint is an address the connector can dial, \
+             so it must meet the same rule an A record does"
+        );
+
+        let mut ep_ok = hclient_dns::SvcbEndpoint::new(1, "example.com".into());
+        ep_ok.ipv4hint = vec![inside];
+        assert!(
+            r.keeps_record(
+                "example.com",
+                &hclient_dns::Record::new(hclient_dns::RData::Https(ep_ok))
+            ),
+            "a hint inside the allowed CIDR must pass — this is a filter, not \
+             a blanket refusal of HTTPS records"
         );
     }
 
