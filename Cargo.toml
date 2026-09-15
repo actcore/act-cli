@@ -113,3 +113,21 @@ tempfile = "3"
 
 [profile.release]
 lto = "thin"
+# Measured on 0.13.0: `act` 69.27 MB -> 48.63 MB, `act-build` 18.70 MB ->
+# 14.28 MB. Nearly 30% of the binary was the symbol table — 20.63 MB, of
+# which 17.62 MB is `.strtab` alone, bloated by mangled wasmtime and
+# cranelift generic instantiations.
+#
+# `symbols`, not `debuginfo`: the release profile emits no DWARF in the
+# first place, so `debuginfo` measured as exactly zero saved. The weight
+# was never debug info.
+#
+# **What this costs, stated plainly:** a panic backtrace from a release
+# binary now prints `<unknown>` for every frame. The error message itself
+# is unaffected — `Error: component not found: …` still reads the same —
+# and the audit trail, which is what an operator actually diagnoses from,
+# does not go through backtraces at all. CI keeps no unstripped copy, so a
+# frame-level backtrace means rebuilding at the release tag with
+# `--config profile.release.strip=false` — which is reproducible, since the
+# tag pins both the source and the lockfile.
+strip = "symbols"
