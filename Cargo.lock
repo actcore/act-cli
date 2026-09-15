@@ -710,7 +710,7 @@ dependencies = [
  "num-traits",
  "serde",
  "wasm-bindgen",
- "windows-link",
+ "windows-link 0.2.1",
 ]
 
 [[package]]
@@ -1830,9 +1830,9 @@ dependencies = [
 
 [[package]]
 name = "hclient"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86ea1de50b701a3790e63f49b6d7a22ecbdd3959f8e99d7d2bf07a60c4dddff9"
+checksum = "8ae96058f2dfada76665a4bf49bebee295a32079b988637bca156cd0ed1f6cdb"
 dependencies = [
  "brotli-decompressor",
  "bytes",
@@ -1858,9 +1858,9 @@ dependencies = [
 
 [[package]]
 name = "hclient-core"
-version = "0.1.0-alpha.4"
+version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff35368c4fd9f7b05af083e298d64d19da56c3f724d6eb7ba8e5ebd3698e5014"
+checksum = "1b61820e2b41e8c1a03889df69a894aeddb1299b5057c950dece2f161920a5cd"
 dependencies = [
  "bytes",
  "futures-core",
@@ -1872,9 +1872,9 @@ dependencies = [
 
 [[package]]
 name = "hclient-dns"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ea411df06c5559dcb1d75e46dcc5ed4207f5ab6d86344611fe4c5b68404a483"
+checksum = "c7c86d4683e1ef1179e5c197fdff99412e89d0bfc761669f8f47f2ae93069f27"
 dependencies = [
  "bytes",
  "futures-core",
@@ -1884,9 +1884,9 @@ dependencies = [
 
 [[package]]
 name = "hclient-dns-system"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "84613b8617287c94b64eafd85fe42fd0e40318c852a8789577c3629bb5a3dfda"
+checksum = "a897b4a4fc98381b308fcc050a4697fba5778d1db3acb15309e69095a3aa3465"
 dependencies = [
  "domain",
  "futures-core",
@@ -1900,9 +1900,9 @@ dependencies = [
 
 [[package]]
 name = "hclient-fetch"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d04a7ca10a8ab4b81bfb1117c6687da9ba556fa88e6e2c29bc5d5c4c0b80e688"
+checksum = "a688a146f397b758d25a465b850316d4f4075705e78861bbec828fc18e92685d"
 dependencies = [
  "bytes",
  "futures-channel",
@@ -1922,9 +1922,9 @@ dependencies = [
 
 [[package]]
 name = "hclient-native"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34880a8875e191c10bcdd9d427029e96d34e4435f2be3e441cd66df69b8a9253"
+checksum = "acc82064d89c572b21edd9f03b19f8e69801645e1545b2259d3fc728d4b03e9c"
 dependencies = [
  "bytes",
  "futures-core",
@@ -1950,9 +1950,9 @@ dependencies = [
 
 [[package]]
 name = "hclient-proto"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0062e27a910c7bbe25dee82ac84360e31d643521db2557aec8cbffbdd5c03ede"
+checksum = "5542c5f0f39aff0cd271876e566f8e436e99abb33b6bcadeb0b28998b38e9713"
 dependencies = [
  "base64 0.23.0",
  "bytes",
@@ -1965,9 +1965,9 @@ dependencies = [
 
 [[package]]
 name = "hclient-proxy"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e14499979b7d386d0e7553a94f5f8068b260036345d34bf7255e7687e1ae5aee"
+checksum = "0b874d7cee9a90ac37cc430d2806d2c6c3d93f22752ae4335ba6ebcd1aca3943"
 dependencies = [
  "bytes",
  "hclient-core",
@@ -1978,9 +1978,9 @@ dependencies = [
 
 [[package]]
 name = "hclient-rt"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ed40ee1f9b6d3f6aa0129be3a4a66818cb07eacd5dce3bfdd045663df455936"
+checksum = "a7861c26c82aa948c5ea92031176fd12f011f92fb80e1d600e57e6d15ad58454"
 dependencies = [
  "futures-core",
  "futures-io",
@@ -1991,9 +1991,9 @@ dependencies = [
 
 [[package]]
 name = "hclient-rt-tokio"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9888b98c291faeb7f2a8ffcdc6c2110765fc644287fd4560c9f9039594f33fd"
+checksum = "74da4fe4524a18befb0dded80d312d54ada58d50f4b0a2f4a3ea554ea4e4ba9d"
 dependencies = [
  "futures-core",
  "hclient-rt",
@@ -2004,9 +2004,9 @@ dependencies = [
 
 [[package]]
 name = "hclient-tls"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdd2eaf48e5618eb2ed30d9266a7037eef3ac406a3a707f8264bfeda9912fb44"
+checksum = "f2e42c0c3788d9de881f643dfad37faccebf5d82768fbb6a6c911f2145a32e32"
 dependencies = [
  "hclient-core",
  "hyper",
@@ -2014,9 +2014,9 @@ dependencies = [
 
 [[package]]
 name = "hclient-tls-rustls"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa7e2e67585d0150d75b2effdca4f510747a0f83f76ac29be03de05f60de69bc"
+checksum = "b819a4bc0e554604e00958db371ae59f0f951aebab660ec3abf57340dcbde456"
 dependencies = [
  "hclient-core",
  "hclient-tls",
@@ -2495,7 +2495,7 @@ dependencies = [
  "simd_cesu8",
  "thiserror 2.0.18",
  "walkdir",
- "windows-link",
+ "windows-link 0.2.1",
 ]
 
 [[package]]
@@ -2988,7 +2988,7 @@ dependencies = [
  "libc",
  "redox_syscall",
  "smallvec",
- "windows-link",
+ "windows-link 0.2.1",
 ]
 
 [[package]]
@@ -4153,12 +4153,12 @@ dependencies = [
 
 [[package]]
 name = "system-resolver"
-version = "0.2.1"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4de590f7890ee54267e862aa80b07853616739da66b3bb4d4acf428bee8ae53"
+checksum = "5dc84affe07119765b373be9d907e52e75e132387a3b0625feb459255bc22089"
 dependencies = [
  "thiserror 2.0.18",
- "windows-strings",
+ "windows-strings 0.100.0",
  "windows-sys 0.61.2",
 ]
 
@@ -5334,9 +5334,9 @@ checksum = "b8e83a14d34d0623b51dce9581199302a221863196a1dde71a7663a4c2be9deb"
 dependencies = [
  "windows-implement",
  "windows-interface",
- "windows-link",
+ "windows-link 0.2.1",
  "windows-result",
- "windows-strings",
+ "windows-strings 0.5.1",
 ]
 
 [[package]]
@@ -5346,7 +5346,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e1d6f90251fe18a279739e78025bd6ddc52a7e22f921070ccdc67dde84c605cb"
 dependencies = [
  "windows-core",
- "windows-link",
+ "windows-link 0.2.1",
  "windows-threading",
 ]
 
@@ -5379,13 +5379,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
 
 [[package]]
+name = "windows-link"
+version = "0.100.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b39de7c7fe78858b0144c50c3fc000bab3be17d5e9b85b1053871693c7f7415"
+
+[[package]]
 name = "windows-numerics"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e2e40844ac143cdb44aead537bbf727de9b044e107a0f1220392177d15b0f26"
 dependencies = [
  "windows-core",
- "windows-link",
+ "windows-link 0.2.1",
 ]
 
 [[package]]
@@ -5394,7 +5400,7 @@ version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7781fa89eaf60850ac3d2da7af8e5242a5ea78d1a11c49bf2910bb5a73853eb5"
 dependencies = [
- "windows-link",
+ "windows-link 0.2.1",
 ]
 
 [[package]]
@@ -5403,7 +5409,16 @@ version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7837d08f69c77cf6b07689544538e017c1bfcf57e34b4c0ff58e6c2cd3b37091"
 dependencies = [
- "windows-link",
+ "windows-link 0.2.1",
+]
+
+[[package]]
+name = "windows-strings"
+version = "0.100.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a70b590c684f1d2854f74999896f7c0558f1bdde62f599088599e20ea1d2f60"
+dependencies = [
+ "windows-link 0.100.0",
 ]
 
 [[package]]
@@ -5430,7 +5445,7 @@ version = "0.61.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 dependencies = [
- "windows-link",
+ "windows-link 0.2.1",
 ]
 
 [[package]]
@@ -5455,7 +5470,7 @@ version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3949bd5b99cafdf1c7ca86b43ca564028dfe27d66958f2470940f73d86d75b37"
 dependencies = [
- "windows-link",
+ "windows-link 0.2.1",
 ]
 
 [[package]]
