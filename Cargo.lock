@@ -1830,9 +1830,9 @@ dependencies = [
 
 [[package]]
 name = "hclient"
-version = "0.1.0-alpha.9"
+version = "0.1.0-alpha.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ae96058f2dfada76665a4bf49bebee295a32079b988637bca156cd0ed1f6cdb"
+checksum = "1d5f013bc62e67bc3192190c2a64e6ba497eb6a82dde5719d6bc33e8508d7d10"
 dependencies = [
  "brotli-decompressor",
  "bytes",
@@ -1872,9 +1872,9 @@ dependencies = [
 
 [[package]]
 name = "hclient-dns"
-version = "0.1.0-alpha.9"
+version = "0.1.0-alpha.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7c86d4683e1ef1179e5c197fdff99412e89d0bfc761669f8f47f2ae93069f27"
+checksum = "0ce5466fc2688d14bcbd9f151e37c7ea7d25ed9a23ddb436825d035e3b1fc49b"
 dependencies = [
  "bytes",
  "futures-core",
@@ -1884,9 +1884,9 @@ dependencies = [
 
 [[package]]
 name = "hclient-dns-system"
-version = "0.1.0-alpha.9"
+version = "0.1.0-alpha.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a897b4a4fc98381b308fcc050a4697fba5778d1db3acb15309e69095a3aa3465"
+checksum = "8cdae918045fb60ec68b5bcfdbe9976937bc4581befdb61d804e3a58e73b27e1"
 dependencies = [
  "domain",
  "futures-core",
@@ -1900,9 +1900,9 @@ dependencies = [
 
 [[package]]
 name = "hclient-fetch"
-version = "0.1.0-alpha.9"
+version = "0.1.0-alpha.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a688a146f397b758d25a465b850316d4f4075705e78861bbec828fc18e92685d"
+checksum = "661c0bc642bccc073272f36e6fdcbaa9a82270eb4abc3171d7ea3d9206b5a013"
 dependencies = [
  "bytes",
  "futures-channel",
@@ -1922,9 +1922,9 @@ dependencies = [
 
 [[package]]
 name = "hclient-native"
-version = "0.1.0-alpha.9"
+version = "0.1.0-alpha.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "acc82064d89c572b21edd9f03b19f8e69801645e1545b2259d3fc728d4b03e9c"
+checksum = "fdd812d7784cf119087e9ce7b6b12020add5cbf1313647c6d8b6e82e17790bc2"
 dependencies = [
  "bytes",
  "futures-core",
@@ -1950,9 +1950,9 @@ dependencies = [
 
 [[package]]
 name = "hclient-proto"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5542c5f0f39aff0cd271876e566f8e436e99abb33b6bcadeb0b28998b38e9713"
+checksum = "743f78fee3bcccb08a471ff7f7f39c41846b040225e29e4350969829e27e9975"
 dependencies = [
  "base64 0.23.0",
  "bytes",
@@ -1965,9 +1965,9 @@ dependencies = [
 
 [[package]]
 name = "hclient-proxy"
-version = "0.1.0-alpha.9"
+version = "0.1.0-alpha.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b874d7cee9a90ac37cc430d2806d2c6c3d93f22752ae4335ba6ebcd1aca3943"
+checksum = "802ac88a82695cfd45b61332ef420fea131f741bb34ec5bf67c5882b63786315"
 dependencies = [
  "bytes",
  "hclient-core",
@@ -1978,9 +1978,9 @@ dependencies = [
 
 [[package]]
 name = "hclient-rt"
-version = "0.1.0-alpha.9"
+version = "0.1.0-alpha.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7861c26c82aa948c5ea92031176fd12f011f92fb80e1d600e57e6d15ad58454"
+checksum = "6f94b7a66f3f4e6fd664d592d8f9b6e873d61bc626d4a9184f6c034c8117588a"
 dependencies = [
  "futures-core",
  "futures-io",
@@ -1991,9 +1991,9 @@ dependencies = [
 
 [[package]]
 name = "hclient-rt-tokio"
-version = "0.1.0-alpha.9"
+version = "0.1.0-alpha.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74da4fe4524a18befb0dded80d312d54ada58d50f4b0a2f4a3ea554ea4e4ba9d"
+checksum = "0bdec4d343d10053dcc5721346720755272c6a538a78fe7b5bab3a59bf9fadf9"
 dependencies = [
  "futures-core",
  "hclient-rt",
@@ -2014,9 +2014,9 @@ dependencies = [
 
 [[package]]
 name = "hclient-tls-rustls"
-version = "0.1.0-alpha.9"
+version = "0.1.0-alpha.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b819a4bc0e554604e00958db371ae59f0f951aebab660ec3abf57340dcbde456"
+checksum = "b5b3d140a3c8fab93805f7331a0b09008d883169914da3e4e97b03028598e64c"
 dependencies = [
  "hclient-core",
  "hclient-tls",
@@ -4153,9 +4153,9 @@ dependencies = [
 
 [[package]]
 name = "system-resolver"
-version = "0.2.3"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5dc84affe07119765b373be9d907e52e75e132387a3b0625feb459255bc22089"
+checksum = "99b93a923420770ca25ae2b89ea8cb086687685cf53c296a6faf4d5dca3c32fc"
 dependencies = [
  "thiserror 2.0.18",
  "windows-strings 0.100.0",
