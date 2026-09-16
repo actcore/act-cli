@@ -1830,9 +1830,9 @@ dependencies = [
 
 [[package]]
 name = "hclient"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d5f013bc62e67bc3192190c2a64e6ba497eb6a82dde5719d6bc33e8508d7d10"
+checksum = "f7f473c566384039554afa1f84dcd42bb0455fac7d87004b3b52760d37a94876"
 dependencies = [
  "brotli-decompressor",
  "bytes",
@@ -1884,9 +1884,9 @@ dependencies = [
 
 [[package]]
 name = "hclient-dns-system"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8cdae918045fb60ec68b5bcfdbe9976937bc4581befdb61d804e3a58e73b27e1"
+checksum = "625c74f6146d4a54ef505c5b8bd53ca3a3b0faa85323b998b20b1bd665286925"
 dependencies = [
  "domain",
  "futures-core",
@@ -1896,13 +1896,14 @@ dependencies = [
  "hclient-rt",
  "system-resolver",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
 name = "hclient-fetch"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "661c0bc642bccc073272f36e6fdcbaa9a82270eb4abc3171d7ea3d9206b5a013"
+checksum = "f621636421858c7b3ef2f8a01ef6d116b95459c44c0da52b614aa1485d08c490"
 dependencies = [
  "bytes",
  "futures-channel",
@@ -1922,9 +1923,9 @@ dependencies = [
 
 [[package]]
 name = "hclient-native"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdd812d7784cf119087e9ce7b6b12020add5cbf1313647c6d8b6e82e17790bc2"
+checksum = "337fc473cde2094e0b2f5c980469520e630bf81158beb60f523bc1b5495a4b06"
 dependencies = [
  "bytes",
  "futures-core",
@@ -1944,15 +1945,16 @@ dependencies = [
  "pin-project-lite",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "web-time",
  "winnow 1.0.3",
 ]
 
 [[package]]
 name = "hclient-proto"
-version = "0.1.0-alpha.7"
+version = "0.1.0-alpha.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "743f78fee3bcccb08a471ff7f7f39c41846b040225e29e4350969829e27e9975"
+checksum = "36702c60206af13f38fbb2971170aaa1f89089dc5bb38975aeaa9fb4e68cfacd"
 dependencies = [
  "base64 0.23.0",
  "bytes",
@@ -1965,15 +1967,16 @@ dependencies = [
 
 [[package]]
 name = "hclient-proxy"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "802ac88a82695cfd45b61332ef420fea131f741bb34ec5bf67c5882b63786315"
+checksum = "6f955faadcb95c2bb8ee45007009f7f0c9dea6c0fe5ae41bfb9ea2a4e61e75ce"
 dependencies = [
  "bytes",
  "hclient-core",
  "hclient-proto",
  "http",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -2014,9 +2017,9 @@ dependencies = [
 
 [[package]]
 name = "hclient-tls-rustls"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5b3d140a3c8fab93805f7331a0b09008d883169914da3e4e97b03028598e64c"
+checksum = "dbc3f4702a1d6da78c8ac74ff5bbe294a66e03098239dddad77a1db01db5e71d"
 dependencies = [
  "hclient-core",
  "hclient-tls",
@@ -2025,6 +2028,7 @@ dependencies = [
  "rustls-pki-types",
  "rustls-platform-verifier",
  "thiserror 2.0.18",
+ "tracing",
  "webpki-roots",
 ]
 
