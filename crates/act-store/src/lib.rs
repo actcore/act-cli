@@ -9,6 +9,7 @@ pub mod lock;
 pub mod provenance;
 pub mod reference;
 pub mod referrer;
+pub mod registry;
 pub mod store;
 
 use std::path::PathBuf;
