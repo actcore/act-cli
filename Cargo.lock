@@ -1818,9 +1818,9 @@ dependencies = [
 
 [[package]]
 name = "hclient"
-version = "0.1.0-alpha.12"
+version = "0.1.0-alpha.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3331768b48bfc997c7ec59d2a9f8b299c67f1a7f714e431974e91cae795e5b46"
+checksum = "a18074e988d138117d1f06d311c8e07fa958157feab6b99c0281b7448aa008b1"
 dependencies = [
  "brotli-decompressor",
  "bytes",
@@ -1889,9 +1889,9 @@ dependencies = [
 
 [[package]]
 name = "hclient-fetch"
-version = "0.1.0-alpha.11"
+version = "0.1.0-alpha.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f621636421858c7b3ef2f8a01ef6d116b95459c44c0da52b614aa1485d08c490"
+checksum = "68c7299724f4ed799f4df1c903ddb81ff3c1e9db99e3ddbc6c7ae9f0b85ee996"
 dependencies = [
  "bytes",
  "futures-channel",
@@ -1905,15 +1905,15 @@ dependencies = [
  "thiserror 2.0.20",
  "wasm-bindgen",
  "wasm-bindgen-futures",
- "wasm-streams 0.6.0",
+ "wasm-streams 0.7.0",
  "web-sys",
 ]
 
 [[package]]
 name = "hclient-native"
-version = "0.1.0-alpha.12"
+version = "0.1.0-alpha.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd7d4ac89962e67c5ff27b957d87903c0cbcc8c32cc37c16b624ae46395262fe"
+checksum = "28e4d9f109ac64369e79a4aa93d104687a9d23fb6700cf5df74b209777cc6a1f"
 dependencies = [
  "bytes",
  "futures-core",
@@ -1955,9 +1955,9 @@ dependencies = [
 
 [[package]]
 name = "hclient-proxy"
-version = "0.1.0-alpha.11"
+version = "0.1.0-alpha.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f955faadcb95c2bb8ee45007009f7f0c9dea6c0fe5ae41bfb9ea2a4e61e75ce"
+checksum = "46ca890064942f362653ca5a3753f752a6e227eae509bbf4ebbf3f7873c94e92"
 dependencies = [
  "bytes",
  "hclient-core",
@@ -1982,9 +1982,9 @@ dependencies = [
 
 [[package]]
 name = "hclient-rt-tokio"
-version = "0.1.0-alpha.11"
+version = "0.1.0-alpha.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07baf2cd9dbdbe666ab3852f7ac2bc2b4002b7c082c175bce9cebe47e2b8d4aa"
+checksum = "7b527f2125f610e5540368a9addf07bc86f3e4071646e92de99a2352c8f9f9fa"
 dependencies = [
  "futures-core",
  "hclient-rt",
@@ -4885,9 +4885,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-streams"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e7d3be8814f5ba5f074491a469eed3d73c273ffad955f25ed1635efac4b0d269"
+checksum = "94ce9bdac782bbca70d6ac48a3ba18b873c848a706d6dc3bd9a03c1b96f04693"
 dependencies = [
  "futures-util",
  "js-sys",

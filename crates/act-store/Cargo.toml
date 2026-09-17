@@ -36,6 +36,10 @@ tracing.workspace = true
 futures = "0.3"
 
 [dev-dependencies]
+# `dangerous-insecure` only here, never in `[dependencies]`: it is what lets
+# `examples/probe_push.rs` talk to a throwaway registry on loopback under a
+# private CA. A shipped binary must not be able to skip certificate checks.
+hclient-tls-rustls = { workspace = true, features = ["dangerous-insecure"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread"] }
 wiremock = "0.6"
