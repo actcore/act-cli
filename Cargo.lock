@@ -35,8 +35,8 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "walkdir",
- "wasm-encoder 0.252.0",
- "wasmparser 0.252.0",
+ "wasm-encoder 0.259.0",
+ "wasmparser 0.259.0",
 ]
 
 [[package]]
@@ -85,7 +85,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
- "wasmparser 0.252.0",
+ "wasmparser 0.259.0",
  "webbrowser",
  "windows-sys 0.61.2",
 ]
@@ -176,7 +176,7 @@ dependencies = [
  "toml 1.1.6+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
- "wasmparser 0.252.0",
+ "wasmparser 0.259.0",
  "wasmtime",
  "wasmtime-wasi",
  "wasmtime-wasi-http",
@@ -197,7 +197,7 @@ dependencies = [
  "hclient-rt-tokio",
  "hclient-tls-rustls",
  "oci-client",
- "oci-spec",
+ "oci-spec 0.10.0",
  "regex",
  "rustls",
  "serde_json",
@@ -2929,7 +2929,7 @@ dependencies = [
  "http-auth",
  "jsonwebtoken",
  "lazy_static",
- "oci-spec",
+ "oci-spec 0.9.0",
  "olpc-cjson",
  "regex",
  "reqwest",
@@ -2947,6 +2947,23 @@ name = "oci-spec"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8445a2631507cec628a15fdd6154b54a3ab3f20ed4fe9d73a3b8b7a4e1ba03a"
+dependencies = [
+ "const_format",
+ "derive_builder",
+ "getset",
+ "regex",
+ "serde",
+ "serde_json",
+ "strum",
+ "strum_macros",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "oci-spec"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3df6f876ad774d6a676f7e968f5c3edacc32f90e65fe680a8b686235396556fb"
 dependencies = [
  "const_format",
  "derive_builder",
@@ -4623,9 +4640,9 @@ checksum = "dbc4bc3a9f746d862c45cb89d705aa10f187bb96c76001afab07a0d35ce60142"
 
 [[package]]
 name = "unicode-ident"
-version = "1.0.25"
+version = "1.0.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab72a15cf68d77cb0987d3684aa8a45c5ef827e8cb49ee2f30bfd7ba2feb519f"
+checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
 
 [[package]]
 name = "unicode-normalization"
@@ -4824,16 +4841,6 @@ dependencies = [
 
 [[package]]
 name = "wasm-encoder"
-version = "0.252.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8185ae345fa5687c054626ff9a50e7089797a343d9904d1dc9820eb4c4d3196f"
-dependencies = [
- "leb128fmt",
- "wasmparser 0.252.0",
-]
-
-[[package]]
-name = "wasm-encoder"
 version = "0.254.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09480d646178e5fdd12bb06e812d0af9a3a191dbc9cd697fdc86687beade7393"
@@ -4892,19 +4899,6 @@ dependencies = [
 
 [[package]]
 name = "wasmparser"
-version = "0.252.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3eb099dcadcde5be9eef55e3a337128efd4e44b4c93122487e4d2e4e1c6627c"
-dependencies = [
- "bitflags 2.13.2",
- "hashbrown 0.17.1",
- "indexmap 2.14.2",
- "semver",
- "serde",
-]
-
-[[package]]
-name = "wasmparser"
 version = "0.254.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d5769a29f799fbab136aaf65b4fe5384cd7d93fe6fc9ba0dcb6c8382a1f16e27"
@@ -4923,8 +4917,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0f7c12eac7bb587801590f6a67ff0bc84d0748513864b71108e4b311cc3df694"
 dependencies = [
  "bitflags 2.13.2",
+ "hashbrown 0.17.1",
  "indexmap 2.14.2",
  "semver",
+ "serde",
 ]
 
 [[package]]
