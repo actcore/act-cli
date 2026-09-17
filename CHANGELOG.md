@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-09-18
+
+A patch release: three fixes, each for something that failed outright, plus a
+download a third smaller.
+
+### Fixed
+
+- **Tool lists are accepted by strict MCP clients again.** A `tools/list`
+  response omitted the SEP-2549 cache hints (`ttlMs`, `cacheScope`), and a
+  client that validates them as required rejected the entire list with
+  `Invalid result for tools/list` — the server looked broken while being
+  perfectly reachable. Claude Code validates them, so this was the difference
+  between every ACT component working over MCP and none of them.
+- **`act pull` no longer fails on large components.** Blobs over roughly a
+  megabyte aborted with `tls: received plaintext buffer full`, a backpressure
+  bug in the TLS layer where rustls' "drain the plaintext first" signal was
+  treated as a hard failure. It needed HTTP/2 *and* TLS together to appear,
+  which is why it hit exactly the components worth caching and nothing smaller.
+- **RUSTSEC-2026-0285 (rustls).** TLS 1.3 handshake messages were accepted at
+  the wrong encryption level when they followed a key change in the same
+  record, against RFC 8446 §5.1. A network attacker could not alter or complete
+  a handshake — the transcript stays authenticated — but a peer could send in
+  plaintext what should have been encrypted without the connection being
+  refused. Closed in both copies of rustls this binary carries.
+
+### Changed
+
+- **Release binaries are about 30% smaller** — `act` 69 MB → 49 MB,
+  `act-build` 18.7 MB → 14.3 MB. The symbol table is now stripped, and nearly
+  all of it was mangled names from the embedded WebAssembly compiler. A panic
+  backtrace from a release build now prints `<unknown>` for each frame; the
+  error message itself is unchanged, and the audit trail is unaffected.
+
 ## [0.13.0] - 2026-09-15
 
 Argument validation moves into the host, and the HTTP stack moves to hclient.
