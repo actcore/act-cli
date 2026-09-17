@@ -121,6 +121,50 @@ pub async fn fetch_manifest(
     Ok((bytes, digest, token))
 }
 
+/// GET the referrers index for `digest`.
+///
+/// `Ok(None)` when the registry does not implement the API or has nothing to
+/// say. Referrer collection is best-effort by design — a signature that cannot
+/// be fetched must not fail the component pull that carries it — so the
+/// distinction that matters to the caller is "index or not", and the reason is
+/// logged rather than returned.
+pub async fn fetch_referrers(
+    http: &hclient::Client,
+    reg: &super::reference::ParsedRef,
+    digest: &str,
+    token: Option<&str>,
+) -> Option<oci_spec::image::ImageIndex> {
+    let url = format!(
+        "https://{}/v2/{}/referrers/{digest}",
+        reg.registry, reg.repository
+    );
+    let mut req = http.get(&url);
+    if let Some(t) = token {
+        req = req.header("authorization", &format!("Bearer {t}"));
+    }
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::debug!(%url, error = %e, "referrers request failed");
+            return None;
+        }
+    };
+    // A registry without the API answers 404; that is the documented way to
+    // say "not supported", not a failure to report.
+    if !resp.status().is_success() {
+        tracing::debug!(%url, status = resp.status().as_u16(), "no referrers");
+        return None;
+    }
+    let body = resp.collect().await.ok()?;
+    match serde_json::from_slice(body.bytes()) {
+        Ok(index) => Some(index),
+        Err(e) => {
+            tracing::debug!(%url, error = %e, "referrers index did not parse");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

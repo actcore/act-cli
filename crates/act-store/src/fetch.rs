@@ -232,50 +232,27 @@ pub fn assemble_oci(
 
 /// Pull an OCI component (manifest + blobs) and store it verbatim.
 pub async fn fetch_oci(store: &Store, reference: &str) -> Result<Stored, StoreError> {
-    use oci_client::client::{ClientConfig, ClientProtocol};
-    use oci_client::manifest::{IMAGE_MANIFEST_MEDIA_TYPE, OCI_IMAGE_MEDIA_TYPE};
-    use oci_client::secrets::RegistryAuth;
-    use oci_client::{Client, Reference, RegistryOperation};
+    let oci_ref = crate::registry::reference::ParsedRef::parse(reference)?;
 
-    let oci_ref: Reference = reference
-        .strip_prefix("oci://")
-        .unwrap_or(reference)
-        .parse()
-        .map_err(|e| {
-            StoreError::Io(std::io::Error::other(format!(
-                "bad OCI ref {reference}: {e}"
-            )))
-        })?;
-    let client = Client::new(ClientConfig {
-        protocol: ClientProtocol::Https,
-        ..Default::default()
-    });
-    let auth = RegistryAuth::Anonymous;
+    let http = compression_client()?;
 
-    // pull_manifest_raw returns (bytes::Bytes, String) in oci-client 0.17
-    let (manifest_raw, manifest_digest) = client
-        .pull_manifest_raw(
-            &oci_ref,
-            &auth,
-            &[OCI_IMAGE_MEDIA_TYPE, IMAGE_MANIFEST_MEDIA_TYPE],
-        )
-        .await
-        .map_err(|e| StoreError::Io(std::io::Error::other(e)))?;
-    let manifest_bytes: Vec<u8> = manifest_raw.to_vec();
+    // One request pair, not two: `fetch_manifest` does the `401` -> token ->
+    // retry dance and hands back the token, which every blob GET below reuses.
+    // Acquiring it again would be a second round trip to the token endpoint
+    // for a credential already in hand.
+    let (manifest_bytes, manifest_digest, token) = crate::registry::client::fetch_manifest(
+        &http,
+        &oci_ref.registry,
+        &oci_ref.repository,
+        &oci_ref.reference,
+    )
+    .await?;
 
     let manifest: OciImageManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|e| StoreError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
 
-    // Acquire the registry token once; reuse it for every blob GET.
-    // NOTE: oci-client 0.17 `auth` returns `Result<Option<String>>` directly.
-    let token: Option<String> = client
-        .auth(&oci_ref, &auth, RegistryOperation::Pull)
-        .await
-        .map_err(|e| StoreError::Io(std::io::Error::other(e)))?;
-
-    let http = compression_client()?;
-    let registry = oci_ref.registry().to_string();
-    let repository = oci_ref.repository().to_string();
+    let registry = oci_ref.registry.clone();
+    let repository = oci_ref.repository.clone();
 
     let mut descriptors = vec![manifest.config.clone()];
     descriptors.extend(manifest.layers.iter().cloned());
@@ -306,9 +283,9 @@ pub async fn fetch_oci(store: &Store, reference: &str) -> Result<Stored, StoreEr
             .ok_or_else(|| StoreError::Digest(hex.into()))
     })?;
     collect_referrers(
-        &client,
-        &auth,
+        &http,
         &oci_ref,
+        token.as_deref(),
         &manifest_digest,
         store,
         REFERRER_DEPTH,
@@ -342,25 +319,11 @@ pub fn store_referrer(
     store.put_referrer(manifest_bytes, blobs, subject_digest, artifact_type)
 }
 
-/// Build a by-digest `Reference` in the same repo as `repo`.
-fn digest_ref(
-    repo: &oci_client::Reference,
-    digest: &str,
-) -> Result<oci_client::Reference, StoreError> {
-    let d = if digest.contains(':') {
-        digest.to_string()
-    } else {
-        format!("sha256:{digest}")
-    };
-    format!("{}/{}@{}", repo.registry(), repo.repository(), d)
-        .parse()
-        .map_err(|e| StoreError::Io(std::io::Error::other(format!("bad digest ref: {e}"))))
-}
-
 /// Pull a referrer manifest's config + layer blobs into `(hex, bytes)` pairs.
 async fn referrer_blobs(
-    client: &oci_client::Client,
-    referrer_ref: &oci_client::Reference,
+    http: &hclient::Client,
+    reg: &crate::registry::reference::ParsedRef,
+    token: Option<&str>,
     manifest_bytes: &[u8],
 ) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
     let manifest: OciImageManifest = serde_json::from_slice(manifest_bytes)
@@ -369,12 +332,9 @@ async fn referrer_blobs(
     descriptors.extend(manifest.layers.iter().cloned());
     let mut out = Vec::new();
     for d in &descriptors {
-        let mut buf: Vec<u8> = Vec::new();
-        client
-            .pull_blob(referrer_ref, d, &mut buf)
-            .await
-            .map_err(|e| StoreError::Io(std::io::Error::other(e)))?;
-        out.push((strip(&d.digest), buf));
+        let url = blob_url(&reg.registry, &reg.repository, &d.digest);
+        let bytes = fetch_blob(http, &url, &d.media_type, &d.digest, token).await?;
+        out.push((strip(&d.digest), bytes));
     }
     Ok(out)
 }
@@ -385,66 +345,59 @@ async fn referrer_blobs(
 /// referrers API yields nothing; per-referrer errors are logged and skipped so
 /// referrer collection never fails the component pull.
 async fn collect_referrers(
-    client: &oci_client::Client,
-    auth: &oci_client::secrets::RegistryAuth,
-    repo: &oci_client::Reference,
+    http: &hclient::Client,
+    repo: &crate::registry::reference::ParsedRef,
+    token: Option<&str>,
     subject_digest: &str,
     store: &Store,
     depth: u8,
 ) {
-    use oci_client::manifest::{IMAGE_MANIFEST_MEDIA_TYPE, OCI_IMAGE_MEDIA_TYPE};
     if depth == 0 {
         return;
     }
-    let subject_ref = match digest_ref(repo, subject_digest) {
-        Ok(r) => r,
-        Err(_) => return,
+    let Some(index) =
+        crate::registry::client::fetch_referrers(http, repo, subject_digest, token).await
+    else {
+        return;
     };
-    let index = match client.pull_referrers(&subject_ref, None).await {
-        Ok(idx) => idx,
-        Err(e) => {
-            tracing::debug!(%subject_digest, error = %e, "no referrers / referrers API unavailable");
-            return;
-        }
-    };
-    for desc in index.manifests {
-        let ref_digest = desc.digest.clone();
-        let referrer_ref = match digest_ref(repo, &ref_digest) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        let pulled = client
-            .pull_manifest_raw(
-                &referrer_ref,
-                auth,
-                &[OCI_IMAGE_MEDIA_TYPE, IMAGE_MANIFEST_MEDIA_TYPE],
-            )
-            .await;
+
+    for desc in index.manifests() {
+        let ref_digest = desc.digest().to_string();
+        let referrer_ref = repo.at_digest(&ref_digest);
+        let pulled = crate::registry::client::fetch_manifest(
+            http,
+            &referrer_ref.registry,
+            &referrer_ref.repository,
+            &referrer_ref.reference,
+        )
+        .await;
         let (m_bytes, m_digest) = match pulled {
-            Ok((b, d)) => (b.to_vec(), d),
+            Ok((b, d, _)) => (b, d),
             Err(e) => {
                 tracing::warn!(%ref_digest, error = %e, "failed to pull referrer manifest");
                 continue;
             }
         };
-        let blobs = match referrer_blobs(client, &referrer_ref, &m_bytes).await {
+        let blobs = match referrer_blobs(http, &referrer_ref, token, &m_bytes).await {
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!(%ref_digest, error = %e, "failed to pull referrer blobs");
                 continue;
             }
         };
-        let artifact_type = desc.artifact_type.clone();
+        let artifact_type = desc.artifact_type().as_ref().map(ToString::to_string);
         if let Err(e) =
             store.put_referrer(&m_bytes, &blobs, subject_digest, artifact_type.as_deref())
         {
             tracing::warn!(%ref_digest, error = %e, "failed to store referrer");
             continue;
         }
+        // A signature can itself be signed; the depth cap is what stops a
+        // cycle or a malicious chain from recursing without end.
         Box::pin(collect_referrers(
-            client,
-            auth,
+            http,
             repo,
+            token,
             &m_digest,
             store,
             depth - 1,
