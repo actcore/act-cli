@@ -11,3 +11,4 @@
 //! which is the part that was pulling a whole second stack in.
 
 pub mod auth;
+pub mod client;
