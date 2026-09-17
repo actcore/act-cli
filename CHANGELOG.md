@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-09-18
+
+### Fixed
+
+- **Outbound HTTP/2 requests no longer carry a `Host` header.** HTTP/2 conveys
+  the destination in `:authority`; `Host` alongside it states the same fact
+  twice, and front-end proxies disagree about that pair. Measured upstream
+  against an nginx-fronted origin, the identical request succeeded 10/10
+  without the header and 3/8 with it — the failures arriving as a generic 400
+  the origin application never saw. A component using `wasi:http` was the
+  sharpest case: the host synthesises `Host` from the component's authority and
+  has no say in the protocol, since ALPN negotiates h2 on its own. The symptom
+  was an intermittent 400 from a server that was working, with nothing in the
+  audit trail to explain it.
+
+### Note on 0.13.1
+
+0.13.1's entry claimed release binaries were "about 30% smaller". That was
+wrong: the released 0.13.0 binaries were already stripped by the release
+pipeline, and measuring a local `cargo build --release` instead is what
+produced the 69 MB figure. `act-linux-x86_64-gnu` was 48.2 MB in 0.13.0 and
+48.4 MB in 0.13.1. The `strip` setting added then aligns local builds with
+released ones; it changed nothing for anyone downloading a binary.
+
 ## [0.13.1] - 2026-09-18
 
 A patch release: three fixes, each for something that failed outright, plus a
