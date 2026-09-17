@@ -196,7 +196,6 @@ dependencies = [
  "hclient-native",
  "hclient-rt-tokio",
  "hclient-tls-rustls",
- "oci-client",
  "oci-spec 0.10.0",
  "regex",
  "rustls",

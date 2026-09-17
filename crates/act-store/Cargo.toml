@@ -21,7 +21,6 @@ fs4 = { version = "1", features = ["sync"] }
 oci-spec = "0.10.0"
 dirs.workspace = true
 tokio = { workspace = true, features = ["rt", "macros", "fs", "io-util"] }
-oci-client.workspace = true
 hclient.workspace = true
 hclient-native.workspace = true
 hclient-rt-tokio.workspace = true

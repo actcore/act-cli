@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use oci_client::manifest::OciImageManifest;
+use oci_spec::image::ImageManifest;
 
 use crate::provenance::{Provenance, Source};
 use crate::reference::Ref;
@@ -194,7 +194,7 @@ pub fn assemble_oci(
     manifest_digest: &str,
     get_blob: impl Fn(&str) -> Result<Vec<u8>, StoreError>,
 ) -> Result<Stored, StoreError> {
-    let manifest: OciImageManifest = serde_json::from_slice(manifest_bytes)
+    let manifest: ImageManifest = serde_json::from_slice(manifest_bytes)
         .map_err(|e| StoreError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
 
     let mut blobs: Vec<(String, Vec<u8>)> = Vec::new();
@@ -203,9 +203,9 @@ pub fn assemble_oci(
         blobs.push((hex.clone(), get_blob(&hex)?));
         Ok(())
     };
-    want(&manifest.config.digest)?;
-    for layer in &manifest.layers {
-        want(&layer.digest)?;
+    want(manifest.config().digest().as_ref())?;
+    for layer in manifest.layers() {
+        want(layer.digest().as_ref())?;
     }
 
     let source = Source::Oci {
@@ -215,7 +215,7 @@ pub fn assemble_oci(
     // A moving tag (`:latest`) says nothing about the version, so the
     // publisher's annotation outranks it when present.
     let annotated_version = manifest
-        .annotations
+        .annotations()
         .as_ref()
         .and_then(|a| a.get(K_OCI_VERSION))
         .cloned();
@@ -248,21 +248,21 @@ pub async fn fetch_oci(store: &Store, reference: &str) -> Result<Stored, StoreEr
     )
     .await?;
 
-    let manifest: OciImageManifest = serde_json::from_slice(&manifest_bytes)
+    let manifest: ImageManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|e| StoreError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
 
     let registry = oci_ref.registry.clone();
     let repository = oci_ref.repository.clone();
 
-    let mut descriptors = vec![manifest.config.clone()];
-    descriptors.extend(manifest.layers.iter().cloned());
+    let mut descriptors = vec![manifest.config().clone()];
+    descriptors.extend(manifest.layers().iter().cloned());
 
     // Fetch config + every layer concurrently over one HTTP/2 connection.
     let jobs = descriptors.iter().map(|desc| {
         let http = http.clone(); // cheap Arc clone; clones share the connection pool (h2 multiplexing preserved)
-        let url = blob_url(&registry, &repository, &desc.digest);
-        let accept = desc.media_type.clone();
-        let digest = desc.digest.clone();
+        let url = blob_url(&registry, &repository, desc.digest().as_ref());
+        let accept = desc.media_type().to_string();
+        let digest = desc.digest().to_string();
         let token = token.clone();
         async move {
             let bytes = fetch_blob(&http, &url, &accept, &digest, token.as_deref()).await?;
@@ -326,15 +326,22 @@ async fn referrer_blobs(
     token: Option<&str>,
     manifest_bytes: &[u8],
 ) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
-    let manifest: OciImageManifest = serde_json::from_slice(manifest_bytes)
+    let manifest: ImageManifest = serde_json::from_slice(manifest_bytes)
         .map_err(|e| StoreError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
-    let mut descriptors = vec![manifest.config.clone()];
-    descriptors.extend(manifest.layers.iter().cloned());
+    let mut descriptors = vec![manifest.config().clone()];
+    descriptors.extend(manifest.layers().iter().cloned());
     let mut out = Vec::new();
     for d in &descriptors {
-        let url = blob_url(&reg.registry, &reg.repository, &d.digest);
-        let bytes = fetch_blob(http, &url, &d.media_type, &d.digest, token).await?;
-        out.push((strip(&d.digest), bytes));
+        let url = blob_url(&reg.registry, &reg.repository, d.digest().as_ref());
+        let bytes = fetch_blob(
+            http,
+            &url,
+            d.media_type().as_ref(),
+            d.digest().as_ref(),
+            token,
+        )
+        .await?;
+        out.push((strip(d.digest().as_ref()), bytes));
     }
     Ok(out)
 }
@@ -915,42 +922,29 @@ mod tests {
     #[tokio::test]
     #[ignore = "network: pulls a real blob from actpkg.dev and checks compression"]
     async fn fetch_blob_live_actpkg_compresses() {
-        // Resolve the random component's layer digest via the manifest, then fetch it.
-        use oci_client::client::{Client, ClientConfig, ClientProtocol};
-        use oci_client::manifest::{
-            IMAGE_MANIFEST_MEDIA_TYPE, OCI_IMAGE_MEDIA_TYPE, OciImageManifest,
-        };
-        use oci_client::secrets::RegistryAuth;
-        use oci_client::{Reference, RegistryOperation};
-
-        let oci_ref: Reference = "actpkg.dev/library/random:latest".parse().unwrap();
-        let client = Client::new(ClientConfig {
-            protocol: ClientProtocol::Https,
-            ..Default::default()
-        });
-        let (raw, _d) = client
-            .pull_manifest_raw(
-                &oci_ref,
-                &RegistryAuth::Anonymous,
-                &[OCI_IMAGE_MEDIA_TYPE, IMAGE_MANIFEST_MEDIA_TYPE],
-            )
-            .await
-            .unwrap();
-        let manifest: OciImageManifest = serde_json::from_slice(&raw).unwrap();
-        let layer = &manifest.layers[0];
-        let token = client
-            .auth(&oci_ref, &RegistryAuth::Anonymous, RegistryOperation::Pull)
-            .await
-            .unwrap();
+        // Resolve the random component's layer digest via the manifest, then
+        // fetch it — through this crate's own client now, which is also what
+        // makes this a check of the replacement rather than of `oci-client`.
+        let http0 = super::compression_client().unwrap();
+        let (raw, _d, token) = crate::registry::client::fetch_manifest(
+            &http0,
+            "actpkg.dev",
+            "library/random",
+            "latest",
+        )
+        .await
+        .unwrap();
+        let manifest: ImageManifest = serde_json::from_slice(&raw).unwrap();
+        let layer = &manifest.layers()[0];
 
         let http = super::compression_client().unwrap();
-        let url = super::blob_url("actpkg.dev", "library/random", &layer.digest);
+        let url = super::blob_url("actpkg.dev", "library/random", layer.digest().as_ref());
         // Succeeds only if the digest verifies over decompressed bytes.
         let bytes = super::fetch_blob(
             &http,
             &url,
-            &layer.media_type,
-            &layer.digest,
+            layer.media_type().as_ref(),
+            layer.digest().as_ref(),
             token.as_deref(),
         )
         .await
@@ -958,8 +952,8 @@ mod tests {
         eprintln!(
             "pulled+verified {} bytes (Accept={})",
             bytes.len(),
-            layer.media_type
+            layer.media_type()
         );
-        assert_eq!(bytes.len() as i64, layer.size);
+        assert_eq!(bytes.len() as u64, layer.size());
     }
 }
