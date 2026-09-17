@@ -100,6 +100,30 @@ pub async fn run_http(
 
 // ── ServerHandler impl ──────────────────────────────────────────────────────
 
+/// Wrap the tool list in the result shape a peer validates.
+///
+/// **Extracted so a test can reach it.** The hints below are the difference
+/// between every ACT component working over MCP and none of them, and the only
+/// way to check them from a unit test is to call the thing the server calls —
+/// `list_tools_impl` needs a live component, so the part that does not is
+/// here. See `list_tools_result_carries_the_sep_2549_cache_hints`.
+///
+/// `with_all_items` sets the SEP-2322 `resultType: "complete"` discriminator.
+/// rmcp strips `resultType` again when the peer negotiated a pre-2026-07-28
+/// version.
+///
+/// The SEP-2549 cache hints are set explicitly: rmcp leaves both `None` on a
+/// paginated result, which serializes them as absent, and a client that
+/// validates them as required (Claude Code does) then rejects the whole tool
+/// list. `ttl_ms: 0` means "do not cache" — a component's tool list can change
+/// whenever its session does — and `Private` because the list is scoped to
+/// this host's grants and session, never shared across users.
+fn list_tools_result(tools: Vec<rmcp::model::Tool>) -> rmcp::model::ListToolsResult {
+    rmcp::model::ListToolsResult::with_all_items(tools)
+        .with_ttl_ms(0)
+        .with_cache_scope(rmcp::model::CacheScope::Private)
+}
+
 impl ActRmcpBridge {
     /// Whether session lifecycle ops are exposed to clients. False in
     /// session-of-1 mode (a default session is pre-opened and hidden).
@@ -146,11 +170,7 @@ impl ActRmcpBridge {
             tools.push(virtual_close_session_tool());
         }
 
-        // `with_all_items` sets the SEP-2322 `resultType: "complete"`
-        // discriminator and leaves the SEP-2549 cache hints (`ttlMs`,
-        // `cacheScope`) unset. rmcp strips `resultType` again when the peer
-        // negotiated a pre-2026-07-28 version.
-        Ok(rmcp::model::ListToolsResult::with_all_items(tools))
+        Ok(list_tools_result(tools))
     }
 
     /// Ask the component for its `get-open-session-args-schema` JSON Schema.
@@ -1242,6 +1262,36 @@ mod tests {
         assert_eq!(
             result.structured_content.as_ref().unwrap()["ok"],
             serde_json::json!(true)
+        );
+    }
+
+    /// A `tools/list` result MUST carry the SEP-2549 cache hints. rmcp leaves
+    /// both `None` on a paginated result and then omits them from the wire;
+    /// a client that validates them as required rejects the entire tool list
+    /// with `Invalid result for tools/list` and the server looks broken while
+    /// being perfectly reachable. Claude Code is such a client, so this is the
+    /// difference between every ACT component working over MCP and none of
+    /// them. Asserted on the serialized JSON, because it is the bytes on the
+    /// wire — not the Rust value — that a peer validates.
+    #[test]
+    fn list_tools_result_carries_the_sep_2549_cache_hints() {
+        // Through `list_tools_result` — the function the server actually calls.
+        // Building a `ListToolsResult` here instead would assert that rmcp
+        // serializes what it is given, which it does, while the bridge quietly
+        // stopped giving it: removing the two setters from the production path
+        // left that version of this test green.
+        let wire =
+            serde_json::to_value(list_tools_result(vec![])).expect("ListToolsResult serializes");
+
+        assert_eq!(
+            wire.get("ttlMs"),
+            Some(&serde_json::json!(0)),
+            "ttlMs must be present and numeric; absent fails client validation"
+        );
+        assert_eq!(
+            wire.get("cacheScope"),
+            Some(&serde_json::json!("private")),
+            "cacheScope must be present and one of public|private"
         );
     }
 
