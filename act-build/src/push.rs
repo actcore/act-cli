@@ -8,8 +8,8 @@
 //! - annotations: `org.opencontainers.image.{version, description, source}`
 //!   from the `act:component` custom section, with CLI overrides
 
+use act_store::registry::reference::ParsedRef;
 use anyhow::{Context, Result, bail};
-use oci_client::Reference;
 use oci_spec::image::{
     Descriptor, DescriptorBuilder, ImageManifest, ImageManifestBuilder, MediaType, SCHEMA_VERSION,
 };
@@ -178,8 +178,7 @@ async fn run_async(wasm_path: &Path, reference: &str, opts: PushOptions) -> Resu
     if normalized != reference {
         tracing::info!(from = %reference, to = %normalized, "lowercased OCI repository");
     }
-    let oci_ref: Reference = normalized
-        .parse()
+    let oci_ref = ParsedRef::parse(&normalized)
         .with_context(|| format!("invalid OCI reference: {normalized}"))?;
 
     // 4. Build vnd.wasm.config.v0+json blob.
@@ -328,10 +327,10 @@ async fn run_async(wasm_path: &Path, reference: &str, opts: PushOptions) -> Resu
     }
 
     // 7. Authenticate.
-    let registry = oci_ref.resolve_registry();
+    let registry = &oci_ref.registry;
     let creds = crate::oci_auth::resolve(registry).context("resolving registry auth")?;
     let http = registry_client()?;
-    let reg = act_store::registry::reference::ParsedRef::parse(&oci_ref.whole())?;
+    let reg = oci_ref.clone();
     // One token for the whole push: the blob uploads and the manifest PUT share
     // it, and it is scoped `pull,push` because the manifest is read back after
     // it is written.
@@ -460,12 +459,12 @@ fn build_annotations(
 
 /// Build a new Reference identical to `base` but with `tag` instead of the
 /// existing tag/digest.
-fn retag(base: &Reference, tag: &str) -> Reference {
-    Reference::with_tag(
-        base.registry().to_string(),
-        base.repository().to_string(),
-        tag.to_string(),
-    )
+fn retag(base: &ParsedRef, tag: &str) -> ParsedRef {
+    ParsedRef {
+        registry: base.registry.clone(),
+        repository: base.repository.clone(),
+        reference: tag.to_string(),
+    }
 }
 
 /// Best-effort probe: pull the existing manifest and return the first layer's
@@ -477,7 +476,6 @@ fn retag(base: &Reference, tag: &str) -> Reference {
 /// system resolver — so a push and a pull of the same artifact go over the
 /// same stack rather than two that could disagree about TLS or DNS.
 fn registry_client() -> Result<hclient::Client> {
-    act_store::fetch::install_crypto_provider();
     // **The platform's trust store, not the bundled roots.** Pushing is the one
     // place a private registry is normal — a corporate mirror behind an
     // internal CA — and `oci-client` honoured that CA because reqwest reads the
@@ -496,9 +494,9 @@ fn registry_client() -> Result<hclient::Client> {
         .map_err(|e| anyhow::anyhow!("the HTTP backend cannot serve this configuration: {e}"))
 }
 
-async fn probe_existing_layer_digest(oci_ref: &Reference) -> Result<Option<String>> {
-    let creds = crate::oci_auth::resolve(oci_ref.resolve_registry())?;
-    let reg = act_store::registry::reference::ParsedRef::parse(&oci_ref.whole())?;
+async fn probe_existing_layer_digest(oci_ref: &ParsedRef) -> Result<Option<String>> {
+    let creds = crate::oci_auth::resolve(&oci_ref.registry)?;
+    let reg = oci_ref.clone();
     let http = registry_client()?;
     let (bytes, _digest, _token) = act_store::registry::client::fetch_manifest_as(
         &http,
@@ -627,11 +625,11 @@ mod tests {
 
     #[test]
     fn retag_preserves_registry_and_repository() {
-        let base: Reference = "ghcr.io/actpkg/sqlite:0.1.0".parse().unwrap();
+        let base = ParsedRef::parse("ghcr.io/actpkg/sqlite:0.1.0").unwrap();
         let tagged = retag(&base, "latest");
-        assert_eq!(tagged.registry(), "ghcr.io");
-        assert_eq!(tagged.repository(), "actpkg/sqlite");
-        assert_eq!(tagged.tag(), Some("latest"));
+        assert_eq!(tagged.registry, "ghcr.io");
+        assert_eq!(tagged.repository, "actpkg/sqlite");
+        assert_eq!(tagged.reference, "latest");
     }
 
     #[test]

@@ -75,6 +75,26 @@ impl ParsedRef {
     }
 }
 
+impl std::fmt::Display for ParsedRef {
+    /// Round-trips through [`ParsedRef::parse`].
+    ///
+    /// A digest is joined with `@` and a tag with `:` — the same split `parse`
+    /// makes, so printing a reference and re-parsing it yields the same value
+    /// rather than a repository with `sha256` glued to its tail.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let sep = if self.reference.contains(':') {
+            '@'
+        } else {
+            ':'
+        };
+        write!(
+            f,
+            "{}/{}{sep}{}",
+            self.registry, self.repository, self.reference
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,6 +143,27 @@ mod tests {
         assert_eq!(r.registry, "localhost:5000");
         assert_eq!(r.repository, "library/time");
         assert_eq!(r.reference, "latest");
+    }
+
+    /// Printing and re-parsing must be the identity, including for a digest —
+    /// joining that with `:` would make `parse` read `sha256` as part of the
+    /// repository.
+    #[test]
+    fn display_round_trips_through_parse() {
+        for r in [
+            "actpkg.dev/library/time:0.3.2",
+            "ghcr.io/actcore/act/shim-tools-sync:0.1.0",
+            "localhost:5000/library/time:latest",
+            "actpkg.dev/library/time@sha256:84370542c13b56a34df9c551eb694400441da0ae799e40b17867877cb901e5fb",
+        ] {
+            let parsed = ParsedRef::parse(r).expect("parses");
+            let printed = parsed.to_string();
+            assert_eq!(
+                ParsedRef::parse(&printed).expect("re-parses"),
+                parsed,
+                "{r} printed as {printed}"
+            );
+        }
     }
 
     #[test]

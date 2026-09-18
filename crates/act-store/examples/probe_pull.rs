@@ -1,7 +1,6 @@
 //! End-to-end: pull a component through the new client and count its referrers.
 #[tokio::main]
 async fn main() {
-    act_store::fetch::install_crypto_provider();
     let dir = std::env::temp_dir().join(format!("act-probe-{}", std::process::id()));
     let store = act_store::store::Store::open(&dir).expect("store");
     match act_store::fetch::fetch_oci(&store, "actpkg.dev/library/time:latest").await {

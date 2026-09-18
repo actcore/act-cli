@@ -328,7 +328,6 @@ impl ActHttpClient {
     pub fn new(cfg: HttpConfig) -> anyhow::Result<Self> {
         let cfg_for_hops = cfg.clone();
 
-        act_store::fetch::install_crypto_provider();
         let resolver = PolicyDnsResolver::new(&cfg);
         let mode = cfg.mode;
         let transport = hclient_native::Native::new(
@@ -1072,7 +1071,6 @@ mod tests {
             }],
             deny: vec![],
         };
-        act_store::fetch::install_crypto_provider();
         let resolver = PolicyDnsResolver::new(&cfg);
         let transport = hclient_native::Native::new(
             hclient_rt_tokio::Tokio,

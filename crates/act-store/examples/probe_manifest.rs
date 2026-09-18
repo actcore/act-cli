@@ -2,7 +2,6 @@
 //! Not a test: it needs the network. `cargo run -p act-store --example probe_manifest`
 #[tokio::main]
 async fn main() {
-    act_store::fetch::install_crypto_provider();
     let transport = hclient_native::Native::new(
         hclient_rt_tokio::Tokio,
         hclient_tls_rustls::Rustls::with_webpki_roots(),

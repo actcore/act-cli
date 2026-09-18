@@ -31,7 +31,6 @@ const K_OCI_VERSION: &str = "org.opencontainers.image.version";
 /// machine with an empty system trust store cannot make a pull fail here and
 /// nowhere else.
 pub(crate) fn compression_client() -> Result<hclient::Client, StoreError> {
-    install_crypto_provider();
     let transport = hclient_native::Native::new(
         hclient_rt_tokio::Tokio,
         hclient_tls_rustls::Rustls::with_webpki_roots(),
@@ -40,30 +39,6 @@ pub(crate) fn compression_client() -> Result<hclient::Client, StoreError> {
     hclient::Client::builder(transport)
         .build()
         .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))
-}
-
-/// Choose the process-level rustls crypto provider, once.
-///
-/// rustls picks one by looking at which is compiled in and **refuses to guess
-/// when several are** — correctly. Two are, and not because anything here
-/// asks for both: `oci-client` brings `reqwest`, which brings `hyper-rustls`
-/// with `aws-lc-rs`, while `hclient-tls-rustls` uses `ring`. Nothing in this
-/// workspace calls `reqwest` any more; it arrives underneath the OCI client.
-///
-/// Choosing here rather than leaving it to whichever registers first is the
-/// difference between a deliberate crypto stack and one decided by link order.
-/// It can go when `oci-client` stops bringing its own TLS stack, which is a
-/// bigger question than this function.
-///
-/// Public because `act-cli`'s OAuth flow and `act-runtime`'s `wasi:http` client
-/// need the same choice; one home beats the same `Once` written three times.
-/// `install_default` returning `Err` means one is already installed, which is
-/// the ordinary case after the first call.
-pub fn install_crypto_provider() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    });
 }
 
 /// GET a single blob with the right `Accept`, transparent decompression, and a

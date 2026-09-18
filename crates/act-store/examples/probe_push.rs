@@ -2,7 +2,6 @@
 //! back — the digests must match what the incumbent produced.
 #[tokio::main]
 async fn main() {
-    act_store::fetch::install_crypto_provider();
     // The local stand uses a private CA. `danger_accept_invalid_certs` is
     // acceptable here and nowhere else: this example exists to exercise the
     // wire format against a throwaway registry on loopback.

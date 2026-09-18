@@ -1,7 +1,6 @@
 //! Live check of `fetch_referrers`: a registry that has them, and a digest that has none.
 #[tokio::main]
 async fn main() {
-    act_store::fetch::install_crypto_provider();
     let transport = hclient_native::Native::new(
         hclient_rt_tokio::Tokio,
         hclient_tls_rustls::Rustls::with_webpki_roots(),

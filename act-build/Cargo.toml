@@ -25,16 +25,13 @@ anyhow.workspace = true
 base64.workspace = true
 globset.workspace = true
 clap.workspace = true
-# `oci-client::Client::push_manifest_raw` takes an `http::HeaderValue` for the
-# manifest content-type; same `http` 1.x oci-client itself uses.
 http.workspace = true
 ciborium.workspace = true
 dirs.workspace = true
 json-patch = "4"
 act-store = { version = "0.13.2", path = "../crates/act-store" }
 oci-spec = "0.10.0"
-oci-client.workspace = true
-# Canonical-JSON formatter — must match what `oci-client` uses to serialize
+# Canonical-JSON formatter: sorted keys, no insignificant whitespace, which is
 # manifests on push, so our computed digest equals the registry's stored one.
 olpc-cjson = "0.1"
 serde.workspace = true
