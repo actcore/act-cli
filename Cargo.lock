@@ -200,7 +200,6 @@ dependencies = [
  "hclient-tls-rustls",
  "oci-spec",
  "regex",
- "rustls",
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
