@@ -186,6 +186,7 @@ dependencies = [
 name = "act-store"
 version = "0.13.2"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "dirs",
  "flate2",

@@ -119,6 +119,38 @@ pub fn pull_scope(repository: &str) -> String {
     format!("repository:{repository}:pull")
 }
 
+/// Credentials for a registry, resolved by the caller.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Credentials {
+    /// No credentials; the token endpoint is asked anonymously.
+    #[default]
+    Anonymous,
+    /// A username and password or token, sent as HTTP Basic.
+    Basic(String, String),
+}
+
+impl Credentials {
+    /// The `Authorization` value to present to a **token endpoint**.
+    ///
+    /// Basic against the token endpoint is how a username and password become
+    /// a bearer: the registry itself is never sent the password. `None` for
+    /// anonymous, which is a request without the header rather than one with
+    /// an empty value — some token endpoints reject the latter.
+    pub fn basic_header(&self) -> Option<String> {
+        match self {
+            Self::Anonymous => None,
+            Self::Basic(user, pass) => {
+                use base64::Engine as _;
+                let raw = format!("{user}:{pass}");
+                Some(format!(
+                    "Basic {}",
+                    base64::engine::general_purpose::STANDARD.encode(raw)
+                ))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,6 +246,22 @@ mod tests {
         let c = Challenge::parse(r#"Bearer realm="https://r.example/token?a=1",service="r""#)
             .expect("parses");
         assert_eq!(c.token_url(), "https://r.example/token?a=1&service=r");
+    }
+
+    /// RFC 7617's encoding, checked against a value that is easy to verify by
+    /// hand: `user:pass` is `dXNlcjpwYXNz`.
+    #[test]
+    fn basic_credentials_encode_as_rfc_7617() {
+        let c = Credentials::Basic("user".into(), "pass".into());
+        assert_eq!(c.basic_header().as_deref(), Some("Basic dXNlcjpwYXNz"));
+    }
+
+    /// Anonymous sends no header at all. An empty `Authorization` is not the
+    /// same thing, and some token endpoints refuse it.
+    #[test]
+    fn anonymous_credentials_send_no_header() {
+        assert!(Credentials::Anonymous.basic_header().is_none());
+        assert_eq!(Credentials::default(), Credentials::Anonymous);
     }
 
     #[test]

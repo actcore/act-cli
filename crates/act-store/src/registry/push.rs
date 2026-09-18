@@ -28,6 +28,7 @@ pub fn push_scope(repository: &str) -> String {
 pub async fn push_token(
     http: &hclient::Client,
     reg: &ParsedRef,
+    creds: &super::auth::Credentials,
 ) -> Result<Option<String>, StoreError> {
     let probe = format!(
         "https://{}/v2/{}/blobs/uploads/",
@@ -57,7 +58,7 @@ pub async fn push_token(
             .or_else(|| Some(push_scope(&reg.repository))),
         ..challenge
     };
-    fetch_token(http, &challenge).await
+    fetch_token(http, &challenge, creds).await
 }
 
 /// Attach the bearer when there is one.

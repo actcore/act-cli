@@ -20,8 +20,16 @@ fn io(e: impl std::fmt::Display) -> StoreError {
 pub async fn fetch_token(
     http: &hclient::Client,
     challenge: &Challenge,
+    creds: &super::auth::Credentials,
 ) -> Result<Option<String>, StoreError> {
-    let resp = http.get(challenge.token_url()).send().await.map_err(io)?;
+    let mut req = http.get(challenge.token_url());
+    // Basic goes to the *token endpoint*, never to the registry: that exchange
+    // is the point of the dance, and it keeps the password off every request
+    // that follows.
+    if let Some(basic) = creds.basic_header() {
+        req = req.header("authorization", &basic);
+    }
+    let resp = req.send().await.map_err(io)?;
     if !resp.status().is_success() {
         return Ok(None);
     }
@@ -59,6 +67,24 @@ pub async fn fetch_manifest(
     repository: &str,
     reference: &str,
 ) -> Result<(Vec<u8>, String, Option<String>), StoreError> {
+    fetch_manifest_as(
+        http,
+        registry,
+        repository,
+        reference,
+        &super::auth::Credentials::Anonymous,
+    )
+    .await
+}
+
+/// [`fetch_manifest`] with credentials, for a private repository.
+pub async fn fetch_manifest_as(
+    http: &hclient::Client,
+    registry: &str,
+    repository: &str,
+    reference: &str,
+    creds: &super::auth::Credentials,
+) -> Result<(Vec<u8>, String, Option<String>), StoreError> {
     let url = format!("https://{registry}/v2/{repository}/manifests/{reference}");
 
     let first = http
@@ -90,7 +116,7 @@ pub async fn fetch_manifest(
             scope: challenge.scope.or_else(|| Some(pull_scope(repository))),
             ..challenge
         };
-        let token = fetch_token(http, &challenge).await?;
+        let token = fetch_token(http, &challenge, creds).await?;
         let mut req = http.get(&url).header("accept", MANIFEST_ACCEPT);
         if let Some(t) = &token {
             req = req.header("authorization", &format!("Bearer {t}"));

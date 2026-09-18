@@ -21,7 +21,13 @@ async fn main() {
     let config = b"{}".to_vec();
     let config_digest = format!("sha256:{}", act_store::layout::sha256_hex(&config));
 
-    let token = push::push_token(&http, &reg).await.expect("token probe");
+    let token = push::push_token(
+        &http,
+        &reg,
+        &act_store::registry::auth::Credentials::Anonymous,
+    )
+    .await
+    .expect("token probe");
     println!("token: {}", if token.is_some() { "yes" } else { "none" });
 
     push::push_blob(&http, &reg, &layer_digest, wasm.clone(), token.as_deref())
