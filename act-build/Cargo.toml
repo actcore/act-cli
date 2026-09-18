@@ -31,6 +31,8 @@ http.workspace = true
 ciborium.workspace = true
 dirs.workspace = true
 json-patch = "4"
+act-store = { version = "0.13.2", path = "../crates/act-store" }
+oci-spec = "0.10.0"
 oci-client.workspace = true
 # Canonical-JSON formatter — must match what `oci-client` uses to serialize
 # manifests on push, so our computed digest equals the registry's stored one.

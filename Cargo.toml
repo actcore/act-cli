@@ -80,7 +80,7 @@ hclient-native = { version = "0.1.0-alpha.13", features = ["http2"] }
 # not pick for you. This is the host's pick: tokio, rustls over the webpki
 # roots, the system resolver.
 hclient-rt-tokio = "0.1.0-alpha.12"
-hclient-tls-rustls = { version = "0.1.0-alpha.12", features = ["webpki-roots"] }
+hclient-tls-rustls = { version = "0.1.0-alpha.12", features = ["webpki-roots", "platform-verifier"] }
 hclient-dns = "0.1.0-alpha.11"
 hclient-dns-system = "0.1.0-alpha.12"
 # Shared across two or more workspace members.

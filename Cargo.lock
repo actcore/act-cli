@@ -6,6 +6,7 @@ version = 4
 name = "act-build"
 version = "0.13.2"
 dependencies = [
+ "act-store",
  "act-types",
  "anyhow",
  "base64 0.22.1",
@@ -24,6 +25,7 @@ dependencies = [
  "json-patch",
  "minijinja",
  "oci-client",
+ "oci-spec 0.10.0",
  "olpc-cjson",
  "serde",
  "serde_json",

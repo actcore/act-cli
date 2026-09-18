@@ -11,10 +11,10 @@
 //! `password = $GITHUB_TOKEN`) — matches what `oras login ghcr.io` does
 //! in CI.
 
+use act_store::registry::auth::Credentials as RegistryAuth;
 use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
-use oci_client::secrets::RegistryAuth;
 use serde::Deserialize;
 use std::path::PathBuf;
 
