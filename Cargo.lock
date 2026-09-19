@@ -62,7 +62,7 @@ dependencies = [
  "clap_mangen",
  "dirs",
  "embed-manifest",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "hclient",
  "hclient-dns-system",
  "hclient-native",
