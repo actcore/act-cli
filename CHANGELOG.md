@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-09-23
+
+One HTTP stack instead of two. `act` and `act-build` now talk to OCI
+registries over the same hclient transport that already carried everything
+else, and the second client stack is gone from both binaries. Nothing about
+how you call them changes; the registry path underneath is new, which is why
+this is a minor release rather than a patch.
+
+### Changed
+
+- **Registry pull and push run on a new OCI client built over hclient,
+  replacing `oci-client`.** `act pull`, `act run`/`call`/`info` on OCI refs,
+  and `act-build push` all go through it: the bearer-token exchange (with
+  credentials when a registry asks for them), manifests, blobs, and the
+  referrers that carry sigstore signatures. What goes on the wire is unchanged:
+  pushing the same component yields byte-identical manifest, config and layer
+  digests before and after the switch.
+- **Smaller binaries.** Dropping `oci-client` removed `reqwest`, `hyper-rustls`
+  and `aws-lc-rs` from the dependency tree. Measured on the CI-built
+  `linux-x86_64-gnu` binaries: `act` 48.4 → 44.3 MiB, `act-build`
+  14.3 → 9.7 MiB, down by about a third for a tool that only ever needed a
+  client to reach a registry.
+- **wasmtime 49** (from 48). No behaviour change for components; the
+  filesystem, HTTP and sockets capability suites pass unchanged.
+- **Dependencies refreshed**, including `oci-spec` 0.10, `wasm-tools` 0.259,
+  `getrandom` 0.4, `dirs` 7 and `base64` 0.23. `dirs` decides where the config
+  and credential store live; the functions `act` uses return the same paths in
+  7 as in 6 on Linux, macOS and Windows, so existing config and stored
+  credentials stay where they were.
+
 ## [0.13.2] - 2026-09-18
 
 ### Fixed
