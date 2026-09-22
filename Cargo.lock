@@ -9,7 +9,7 @@ dependencies = [
  "act-store",
  "act-types",
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "ciborium",
  "clap",
  "dirs",
@@ -54,7 +54,7 @@ dependencies = [
  "assert_cmd",
  "async-trait",
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytesize",
  "ciborium",
  "clap",
@@ -109,7 +109,7 @@ version = "0.13.2"
 dependencies = [
  "act-runtime",
  "act-types",
- "base64 0.22.1",
+ "base64 0.23.1",
  "rmcp",
  "serde_json",
 ]
@@ -187,7 +187,7 @@ dependencies = [
 name = "act-store"
 version = "0.13.2"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "dirs",
  "flate2",

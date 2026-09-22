@@ -85,7 +85,7 @@ hclient-dns = "0.1.0-alpha.11"
 hclient-dns-system = "0.1.0-alpha.12"
 # Shared across two or more workspace members.
 anyhow = "1.0.102"
-base64 = "0.22.1"
+base64 = "0.23.1"
 # CSPRNG for the OAuth flow's PKCE verifier, `state`, and one-time callback
 # path. `getrandom` rather than `rand`: these want OS entropy directly, not a
 # seeded PRNG, and 0.3 is already in the tree.
