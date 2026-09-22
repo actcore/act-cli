@@ -195,6 +195,11 @@ pub struct PendingConsent {
     pub summary: String,
     /// Unix epoch seconds.
     pub asked_at: i64,
+    /// Which agent's call raised this, as the host describes it — for a
+    /// person deciding, never for deciding. It is whatever the agent said
+    /// about itself, so nothing here reads it and no answer depends on it.
+    /// `None` when the host could not tie the question to a call.
+    pub asked_by: Option<String>,
 }
 
 struct Waiting {
@@ -273,6 +278,18 @@ impl ConsentQueue {
     /// the same as when they said no — with the difference visible to the
     /// caller, which is why this is separate from `DenyPrompter`.
     pub async fn ask(&self, subject: &str, subject_id: i64, ask: &ConsentAsk) -> bool {
+        self.ask_for(subject, subject_id, None, ask).await
+    }
+
+    /// [`Self::ask`], saying which agent's call raised the question. See
+    /// [`PendingConsent::asked_by`] for why that is display and nothing more.
+    pub async fn ask_for(
+        &self,
+        subject: &str,
+        subject_id: i64,
+        asked_by: Option<&str>,
+        ask: &ConsentAsk,
+    ) -> bool {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = tokio::sync::oneshot::channel();
 
@@ -287,6 +304,7 @@ impl ConsentQueue {
                     key: ask.key.clone(),
                     summary: ask.summary.clone(),
                     asked_at: now_epoch(),
+                    asked_by: asked_by.map(str::to_string),
                 },
                 answer: tx,
             },
@@ -469,6 +487,33 @@ mod queue_tests {
     async fn the_prompter_reports_that_a_human_can_be_reached() {
         let prompter = QueuePrompter::new(queue(), "clock", 1);
         assert!(prompter.has_channel());
+    }
+
+    /// The host can say which agent's call raised the question. It is carried
+    /// for display and nothing else: the queue neither checks nor uses it.
+    #[tokio::test]
+    async fn a_question_can_say_which_agent_asked() {
+        let queue = queue();
+        let _asking = tokio::spawn({
+            let queue = queue.clone();
+            async move {
+                queue
+                    .ask_for("files", 1, Some("claude-code 2.1 · #3"), &ask("/data"))
+                    .await
+            }
+        });
+        let pending = wait_for_one(&queue).await;
+        assert_eq!(pending.asked_by.as_deref(), Some("claude-code 2.1 · #3"));
+    }
+
+    #[tokio::test]
+    async fn a_plain_ask_says_nobody_in_particular_asked() {
+        let queue = queue();
+        let _asking = tokio::spawn({
+            let queue = queue.clone();
+            async move { queue.ask("files", 1, &ask("/data")).await }
+        });
+        assert_eq!(wait_for_one(&queue).await.asked_by, None);
     }
 
     /// A window showing the queue must hear about every way it changes, not

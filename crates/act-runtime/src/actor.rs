@@ -443,7 +443,7 @@ impl ComponentHandle {
         mut answer: F,
     ) -> Result<T, ComponentError>
     where
-        F: FnMut(String) -> Fut,
+        F: FnMut(act_policy::consent::ConsentAsk, String) -> Fut,
         Fut: std::future::Future<Output = bool>,
     {
         let (reply, mut answer_rx) = oneshot::channel();
@@ -458,7 +458,7 @@ impl ComponentHandle {
             tokio::select! {
                 biased;
                 Some(ask) = consent_rx.recv() => {
-                    let decision = answer(ask.message).await;
+                    let decision = answer(ask.ask, ask.message).await;
                     let _ = ask.reply.send(decision);
                 }
                 reply = &mut answer_rx => break reply,
@@ -479,7 +479,7 @@ impl ComponentHandle {
         answer: F,
     ) -> Result<CallToolResult, ComponentError>
     where
-        F: FnMut(String) -> Fut,
+        F: FnMut(act_policy::consent::ConsentAsk, String) -> Fut,
         Fut: std::future::Future<Output = bool>,
     {
         self.round_trip_servicing_consent(
@@ -505,7 +505,7 @@ impl ComponentHandle {
         answer: F,
     ) -> Result<sessions::Session, ComponentError>
     where
-        F: FnMut(String) -> Fut,
+        F: FnMut(act_policy::consent::ConsentAsk, String) -> Fut,
         Fut: std::future::Future<Output = bool>,
     {
         self.round_trip_servicing_consent(

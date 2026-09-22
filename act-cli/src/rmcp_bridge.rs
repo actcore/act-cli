@@ -279,7 +279,7 @@ impl ActRmcpBridge {
                 &request.name,
                 cbor_args,
                 call_metadata.into(),
-                |message| confirm_via_peer(&context.peer, capabilities.as_ref(), message),
+                |_ask, message| confirm_via_peer(&context.peer, capabilities.as_ref(), message),
             )
             .await
             .map_err(component_error_to_mcp)?;
@@ -300,7 +300,7 @@ impl ActRmcpBridge {
         let capabilities = context.client_capabilities();
         let session = self
             .handle
-            .open_session_servicing_consent(wit_args, metadata.into(), |message| {
+            .open_session_servicing_consent(wit_args, metadata.into(), |_ask, message| {
                 confirm_via_peer(&context.peer, capabilities.as_ref(), message)
             })
             .await
@@ -1468,7 +1468,15 @@ impl ConsentPrompter for McpElicitationPrompter {
         };
 
         let (reply, answer) = oneshot::channel();
-        if sink.send(ConsentRequest { message, reply }).await.is_err() {
+        if sink
+            .send(ConsentRequest {
+                ask: ask.clone(),
+                message,
+                reply,
+            })
+            .await
+            .is_err()
+        {
             return false;
         }
         answer.await.unwrap_or(false)

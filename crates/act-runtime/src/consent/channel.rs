@@ -34,6 +34,11 @@ use crate::audit::render::escape_audit_field;
 /// A consent question travelling from the component actor task to the MCP
 /// request handler task, with the channel to answer it on.
 pub struct ConsentRequest {
+    /// The question itself, as policy sees it. A host that keeps answers —
+    /// the toolserver's standing grants — needs the class and key, which the
+    /// rendered `message` only shows.
+    pub ask: ConsentAsk,
+    /// The same question as the one line a human reads, from [`consent_line`].
     pub message: String,
     pub reply: oneshot::Sender<bool>,
 }
