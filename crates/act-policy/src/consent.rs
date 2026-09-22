@@ -212,6 +212,9 @@ pub struct ConsentQueue {
     next_id: AtomicU64,
     waiting: Mutex<HashMap<u64, Waiting>>,
     timeout: Duration,
+    /// A revision counter, bumped whenever the set of waiting questions
+    /// changes. See [`Self::changes`].
+    revision: tokio::sync::watch::Sender<u64>,
 }
 
 impl ConsentQueue {
@@ -220,7 +223,25 @@ impl ConsentQueue {
             next_id: AtomicU64::new(0),
             waiting: Mutex::new(HashMap::new()),
             timeout,
+            revision: tokio::sync::watch::Sender::new(0),
         }
+    }
+
+    /// Hear about every change to [`Self::pending`]: a question asked, one
+    /// answered, one expired.
+    ///
+    /// A revision counter rather than the questions themselves, on purpose.
+    /// A `watch` keeps only the latest value, so a listener that falls behind
+    /// catches up in one wake instead of replaying a backlog, and it re-reads
+    /// `pending` for the truth — which is also what a listener that subscribed
+    /// late has to do anyway. Answers given elsewhere count: a window must
+    /// stop offering a question the command line already answered.
+    pub fn changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.revision.subscribe()
+    }
+
+    fn changed(&self) {
+        self.revision.send_modify(|r| *r += 1);
     }
 
     /// Questions waiting right now, oldest first.
@@ -238,6 +259,7 @@ impl ConsentQueue {
     /// `None` when nothing was waiting: it was answered already, or it expired.
     pub fn resolve(&self, id: u64, allow: bool) -> Option<PendingConsent> {
         let waiting = self.lock().remove(&id)?;
+        self.changed();
         // The receiver is gone if the caller stopped waiting; the decision is
         // then moot rather than an error.
         let _ = waiting.answer.send(allow);
@@ -269,12 +291,17 @@ impl ConsentQueue {
                 answer: tx,
             },
         );
+        self.changed();
 
         match tokio::time::timeout(self.timeout, rx).await {
             Ok(Ok(decision)) => decision,
             // Timed out, or the sender was dropped with the queue.
             _ => {
-                self.lock().remove(&id);
+                // Only a change if it was still there: an answer that landed
+                // at the deadline already took it out, and announced that.
+                if self.lock().remove(&id).is_some() {
+                    self.changed();
+                }
                 false
             }
         }
@@ -442,6 +469,56 @@ mod queue_tests {
     async fn the_prompter_reports_that_a_human_can_be_reached() {
         let prompter = QueuePrompter::new(queue(), "clock", 1);
         assert!(prompter.has_channel());
+    }
+
+    /// A window showing the queue must hear about every way it changes, not
+    /// only about new questions: an answer given elsewhere (the command line)
+    /// and an expiry both take a question away, and a window that missed
+    /// either would keep offering an answer nobody is waiting for.
+    #[tokio::test]
+    async fn asking_answering_and_expiring_each_announce_a_change() {
+        let queue = Arc::new(ConsentQueue::new(Duration::from_millis(80)));
+        let mut changes = queue.changes();
+        let seen = *changes.borrow_and_update();
+
+        let asking = tokio::spawn({
+            let queue = queue.clone();
+            async move { queue.ask("clock", 1, &ask("/data")).await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), changes.changed())
+            .await
+            .expect("a new question is announced")
+            .unwrap();
+        let after_ask = *changes.borrow_and_update();
+        assert!(after_ask > seen);
+
+        let pending = wait_for_one(&queue).await;
+        queue.resolve(pending.id, true);
+        tokio::time::timeout(Duration::from_secs(1), changes.changed())
+            .await
+            .expect("an answer is announced")
+            .unwrap();
+        assert!(asking.await.unwrap());
+
+        // Nobody answers this one; its expiry must be announced too.
+        let expired = queue.ask("clock", 1, &ask("/etc")).await;
+        assert!(!expired);
+        changes.borrow_and_update();
+        assert!(queue.pending().is_empty());
+        assert!(
+            *queue.changes().borrow() >= after_ask + 3,
+            "ask, answer, ask and expiry are four changes"
+        );
+    }
+
+    /// Answering something that was not waiting changes nothing, so it must
+    /// not wake a window into re-reading a queue that is exactly as it was.
+    #[tokio::test]
+    async fn a_miss_is_not_a_change() {
+        let queue = queue();
+        let before = *queue.changes().borrow();
+        assert!(queue.resolve(42, true).is_none());
+        assert_eq!(*queue.changes().borrow(), before);
     }
 
     async fn wait_for_one(queue: &ConsentQueue) -> PendingConsent {
