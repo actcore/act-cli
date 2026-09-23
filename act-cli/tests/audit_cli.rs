@@ -295,6 +295,56 @@ fn fs_decisions_reach_the_audit_trail() {
     );
 }
 
+/// A p3 guest never gets a filesystem: its path operations cannot be checked
+/// against a grant, so `fs_policy.rs` hands it an empty preopen list instead.
+/// That refusal has to reach the audit trail, not just `RUST_LOG` — under an
+/// `allowlist` grant the operator granted something and the guest got nothing,
+/// and the audit line is the only place that says why. `fs-canary`'s
+/// `p3-preopens` tool reports the count the guest actually received.
+#[test]
+fn p3_preopens_withheld_reaches_the_audit_trail() {
+    let fixture = fixture("fs-canary.wasm");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+
+    for (grant_flag, grant, reason) in [
+        (
+            "--grant",
+            fs_grant_rw(dir.path()),
+            "p3 filesystem unsupported",
+        ),
+        ("--deny", "wasi:filesystem".to_string(), "not granted"),
+    ] {
+        let out = act_bin()
+            .args([
+                "call",
+                fixture.to_str().expect("fixture path is utf-8"),
+                "p3-preopens",
+                "--args",
+                "{}",
+                grant_flag,
+                &grant,
+            ])
+            .output()
+            .expect("ran act");
+        assert!(out.status.success(), "p3-preopens must run: {out:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "0",
+            "{grant_flag} {grant}: a p3 guest must get no preopens"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let deny_line = deny_line(&stderr);
+        assert!(
+            deny_line.contains("wasi:filesystem") && deny_line.contains("preopen"),
+            "{grant_flag} {grant}: deny line must name the class and action, got: {deny_line}"
+        );
+        assert!(
+            deny_line.contains(reason),
+            "{grant_flag} {grant}: deny line must say `{reason}`, got: {deny_line}"
+        );
+    }
+}
+
 /// `resolve_ask`'s `emit_cap_decision` call is the third decision point and
 /// the one `fs_decisions_reach_the_audit_trail` above cannot reach: that
 /// test only runs under `allowlist`, and `Decision::Ask` — the only way

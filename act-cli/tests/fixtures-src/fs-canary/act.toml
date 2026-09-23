@@ -1,7 +1,7 @@
 [std]
 name = "fs-canary"
 version = "0.1.0"
-description = "Canary component for wasi:filesystem host integration tests. Its single tool reads a path given in its arguments, so the host's fs capability gate always fires."
+description = "Canary component for wasi:filesystem host integration tests. Its `read` tool reads a path given in its arguments, so the host's fs capability gate always fires; `p3-preopens` reports what wasip3 preopens returns."
 default-language = "en"
 
 [std.capabilities."wasi:filesystem"]

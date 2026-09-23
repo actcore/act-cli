@@ -231,10 +231,11 @@ pub struct PolicyFilesystemCtxView<'a> {
     pub table: &'a mut ResourceTable,
     pub ceiling: &'a Arc<dyn CompiledCeiling>,
     pub fd_paths: &'a mut FdPathMap,
-    /// Configured mode; drives the p3 preopens kill-switch. p3 path-taking
+    /// Effective mode; drives the p3 preopens kill-switch. p3 path-taking
     /// ops can't be gated (upstream `Dir::open_at` is `pub(crate)`), so when
     /// mode is anything but `Open` we return zero preopens from p3 and p3
-    /// guests can't acquire a `Descriptor::Dir` handle at all.
+    /// guests can't acquire a `Descriptor::Dir` handle at all. The effective
+    /// filesystem mode is never `Open`, so that is every run.
     pub mode: PolicyMode,
     /// Interactive-consent prompter, consulted when the ceiling returns
     /// `Decision::Ask`. Shared across the store.
@@ -723,8 +724,38 @@ impl HostDescriptor for PolicyFilesystemCtxView<'_> {
 // Instead we gate at preopens: if fs mode is anything other than `Open`,
 // p3 `get_directories` returns an empty vec. A p3 guest with an empty
 // preopen list can't construct a `Descriptor::Dir` resource, so every
-// p3 path op fails before it reaches cap-std. Components that genuinely
-// need p3 filesystem access must run under `policy.filesystem = "open"`.
+// p3 path op fails before it reaches cap-std.
+//
+// In practice that is every run. `self.mode` is the *effective* mode, and
+// `act_policy::effective` clamps a user's `open` to `allowlist` over the
+// component's declared ceiling (an undeclared class is `deny`), so the
+// filesystem never reaches here as `Open`. A p3 guest gets no filesystem
+// under any grant until p3 path ops can be checked one by one.
+
+/// The audit record for a p3 guest handed an empty preopen list.
+///
+/// There is no path — the guest never got far enough to name one — so the
+/// key is empty and the action is `preopen`. The reason tells the two cases
+/// apart: under `deny` the guest got exactly what was granted, while under
+/// `allowlist` or `ask` it got less than the grant says, because p3 path
+/// operations cannot be checked against it. The reason does not point at a
+/// mode that would help: none does (see the comment above).
+fn p3_preopens_withheld(mode: PolicyMode) -> CapDecisionRecord {
+    let reason = if mode == PolicyMode::Deny {
+        "not granted"
+    } else {
+        "p3 filesystem unsupported: its paths cannot be checked against the grant"
+    };
+    CapDecisionRecord::statik_with_reason(
+        act_types::constants::CAP_FILESYSTEM,
+        "",
+        "preopen",
+        Decision4::Deny,
+        &mode.to_string(),
+        None,
+        Some(reason),
+    )
+}
 
 impl wasmtime_wasi::p3::bindings::filesystem::preopens::Host for PolicyFilesystemCtxView<'_> {
     fn get_directories(
@@ -740,6 +771,10 @@ impl wasmtime_wasi::p3::bindings::filesystem::preopens::Host for PolicyFilesyste
                 mode = ?self.mode,
                 "p3 wasi:filesystem/preopens: returning empty; p3 path ops can't be matcher-gated",
             );
+            // The operator has to be able to see this in the audit trail, not
+            // only in `RUST_LOG`: under `allowlist` or `ask` the grant they
+            // wrote is not what a p3 guest gets, and nothing else says so.
+            emit_cap_decision(&p3_preopens_withheld(self.mode));
             return Ok(vec![]);
         }
         let mut inner = WasiFilesystemCtxView {

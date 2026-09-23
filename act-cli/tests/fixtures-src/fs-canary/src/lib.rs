@@ -1,7 +1,8 @@
 //! Canary component for `wasi:filesystem` host integration.
 //!
-//! It declares `wasi:filesystem` (ceiling `**`, rw) and its single tool,
-//! `read`, reads the path given in its arguments via plain `std::fs`. The
+//! It declares `wasi:filesystem` (ceiling `**`, rw). Its `read` tool reads
+//! the path given in its arguments via plain `std::fs` (wasip2); its
+//! `p3-preopens` tool reports how many directories wasip3 preopens returns. The
 //! declared ceiling is deliberately as wide as possible so a test's `--grant`
 //! is what actually narrows access — this fixture exists to exercise the
 //! host's per-op capability decisions (`fs_policy.rs`), not to test the
@@ -65,6 +66,18 @@ impl tool_exports::Guest for FsCanary {
                     "std:read-only".to_string(),
                     to_cbor(&serde_json::json!(true)),
                 )],
+            },
+            tool_types::ToolDefinition {
+                name: "p3-preopens".to_string(),
+                description: core_types::LocalizedString::Plain(
+                    "Return how many directories wasi:filesystem@0.3 preopens hands this guest."
+                        .to_string(),
+                ),
+                parameters_schema: r#"{"type":"object","additionalProperties":false}"#.to_string(),
+                metadata: vec![(
+                    "std:read-only".to_string(),
+                    to_cbor(&serde_json::json!(true)),
+                )],
             }],
         })
     }
@@ -74,6 +87,13 @@ impl tool_exports::Guest for FsCanary {
         arguments: Vec<u8>,
         _metadata: Vec<(String, Vec<u8>)>,
     ) -> tool_exports::ToolResult {
+        if name == "p3-preopens" {
+            // The p3 counterpart of `read`: the host cannot gate p3 path
+            // operations one by one, so it withholds p3 preopens outside
+            // `open` mode. The count is what the test asserts on.
+            let dirs = wasip3::filesystem::preopens::get_directories();
+            return tool_exports::ToolResult::Immediate(vec![text_event(dirs.len().to_string())]);
+        }
         if name != "read" {
             return tool_exports::ToolResult::Immediate(vec![tool_types::ToolEvent::Error(
                 make_error("std:not-found", &format!("Unknown tool: {name}")),

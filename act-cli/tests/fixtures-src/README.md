@@ -52,12 +52,16 @@ cp target/wasm32-wasip2/release/ask_canary.wasm ../../fixtures/ask-canary.wasm
 
 Filesystem canary. Exports `act:tools/tool-provider` only, declares
 `wasi:filesystem` with the widest possible ceiling (`**`, rw) so a test's
-`--grant` is what actually narrows access. Its single tool, `read`, reads the
-`path` given in its arguments via plain `std::fs::read_to_string` — so every
-call drives the host's per-op capability decision in `runtime/fs_policy.rs`.
-Used by `tests/audit_cli.rs` to assert the audit trail's `fs:` rollup clause
-and immediate deny line against a real component, not just against
-`CapDecisionRecord`'s constructors directly.
+`--grant` is what actually narrows access. Its `read` tool reads the `path`
+given in its arguments via plain `std::fs::read_to_string` — so every call
+drives the host's per-op capability decision in `runtime/fs_policy.rs`.
+Its `p3-preopens` tool returns how many directories `wasi:filesystem@0.3`
+preopens hands it (through the `wasip3` crate), which is how a test sees the
+host withholding the p3 filesystem. The component imports both filesystem
+versions for that reason.
+Used by `tests/audit_cli.rs` to assert the audit trail's `fs:` rollup clause,
+immediate deny line and p3 preopen refusal against a real component, not just
+against `CapDecisionRecord`'s constructors directly.
 
 ### Rebuild
 
