@@ -695,6 +695,10 @@ pub fn spawn_component_actor(
                     // time, so a capability gate firing below always resolves
                     // to the caller that is waiting for this reply.
                     current_consent.set(consent);
+                    // A new call: a cache scoped to calls forgets the answers
+                    // the last one got. Here, because this is where one call
+                    // ends and the next begins — the actor runs them in turn.
+                    store.data().consent_cache.begin_call();
                     let provider = tool_provider.clone();
 
                     let started = std::time::Instant::now();
@@ -821,6 +825,7 @@ pub fn spawn_component_actor(
                     consent,
                 } => {
                     current_consent.set(consent);
+                    store.data().consent_cache.begin_call();
                     let response = match &session_provider {
                         Some(sp) => {
                             let sp = sp.clone();

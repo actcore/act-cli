@@ -49,16 +49,46 @@ impl ConsentPrompter for DenyPrompter {
     }
 }
 
-/// Per-session memory of granted/denied (`cap_id`, key) decisions.
+/// Memory of granted/denied (`cap_id`, key) decisions — what "once" means.
+///
+/// Two scopes, because two hosts mean different things by it. A terminal
+/// session has one person at one prompt, and "once" there means for this run
+/// ([`Self::new`], the default). A toolserver shares one component instance
+/// between every agent that connects, and an answer given to one agent's call
+/// must not quietly go on answering another's; there "once" means for this
+/// call ([`Self::per_call`]), and the host marks each call's start with
+/// [`Self::begin_call`]. Answers that outlive both are the host's standing
+/// grants, which are not kept here.
 #[derive(Default)]
 pub struct DecisionCache {
     seen: Mutex<HashMap<(String, String), bool>>,
+    per_call: bool,
 }
 
 impl DecisionCache {
+    /// Answers kept for the life of the run.
     pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Answers kept until the next call begins. Within a call they still
+    /// hold: one call can touch the same path several times, and asking a
+    /// person twice about one request is not what they agreed to.
+    pub fn per_call() -> Self {
         Self {
-            seen: Mutex::new(HashMap::new()),
+            per_call: true,
+            ..Self::default()
+        }
+    }
+
+    /// A new call is about to run. A per-call cache forgets what it was told;
+    /// a run-scoped one keeps it.
+    pub fn begin_call(&self) {
+        if self.per_call {
+            self.seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear();
         }
     }
 
@@ -113,6 +143,50 @@ mod tests {
         assert_eq!(p.calls.load(Ordering::SeqCst), 1);
         assert!(cache.decide_cached(&p, ask("/b")).await); // different key → prompts
         assert_eq!(p.calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// "Once" is a promise to the person answering. A cache scoped to calls
+    /// keeps an answer for the rest of the call that asked — one call can
+    /// touch the same path more than once — and forgets it when the next
+    /// call begins, whoever makes it.
+    #[tokio::test]
+    async fn a_per_call_cache_forgets_its_answers_when_a_new_call_begins() {
+        let cache = DecisionCache::per_call();
+        let p = CountingPrompter {
+            allow: true,
+            calls: AtomicUsize::new(0),
+        };
+        cache.begin_call();
+        assert!(cache.decide_cached(&p, ask("/a")).await);
+        assert!(cache.decide_cached(&p, ask("/a")).await);
+        assert_eq!(
+            p.calls.load(Ordering::SeqCst),
+            1,
+            "asked once within a call"
+        );
+
+        cache.begin_call();
+        assert!(cache.decide_cached(&p, ask("/a")).await);
+        assert_eq!(
+            p.calls.load(Ordering::SeqCst),
+            2,
+            "asked again in the next call"
+        );
+    }
+
+    /// The default keeps answers for the run, which is what a terminal
+    /// session means by "once" — so beginning a call must not touch it.
+    #[tokio::test]
+    async fn a_run_scoped_cache_is_untouched_by_calls() {
+        let cache = DecisionCache::new();
+        let p = CountingPrompter {
+            allow: true,
+            calls: AtomicUsize::new(0),
+        };
+        assert!(cache.decide_cached(&p, ask("/a")).await);
+        cache.begin_call();
+        assert!(cache.decide_cached(&p, ask("/a")).await);
+        assert_eq!(p.calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
