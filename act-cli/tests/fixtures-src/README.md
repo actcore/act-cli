@@ -55,13 +55,14 @@ Filesystem canary. Exports `act:tools/tool-provider` only, declares
 `--grant` is what actually narrows access. Its `read` tool reads the `path`
 given in its arguments via plain `std::fs::read_to_string` — so every call
 drives the host's per-op capability decision in `runtime/fs_policy.rs`.
-Its `p3-preopens` tool returns how many directories `wasi:filesystem@0.3`
-preopens hands it (through the `wasip3` crate), which is how a test sees the
-host withholding the p3 filesystem. The component imports both filesystem
-versions for that reason.
+Its `p3-read` and `p3-write` tools do the same through `wasi:filesystem@0.3`
+(the `wasip3` crate: `open-at`, then `read-via-stream` / `write-via-stream`),
+so one fixture drives both the p2 and the p3 policy wrapper. The component
+imports both filesystem versions for that reason.
 Used by `tests/audit_cli.rs` to assert the audit trail's `fs:` rollup clause,
-immediate deny line and p3 preopen refusal against a real component, not just
-against `CapDecisionRecord`'s constructors directly.
+immediate deny line and `ask` resolution for p2 and p3 alike, and that p3
+writes follow the grant's `ro`/`rw` mode, against a real component rather than
+`CapDecisionRecord`'s constructors directly.
 
 ### Rebuild
 

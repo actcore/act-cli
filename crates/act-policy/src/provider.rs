@@ -66,7 +66,8 @@ pub trait CompiledCeiling: Send + Sync {
     }
     fn declared(&self) -> bool;
     /// Effective policy mode for this ceiling. Used by hosts that need to
-    /// know the mode for non-classify decisions (e.g. p3 preopens kill-switch).
+    /// know the mode for non-classify decisions (e.g. the mode an audit record
+    /// reports alongside a decision).
     fn effective_mode(&self) -> crate::grant::PolicyMode {
         crate::grant::PolicyMode::Deny
     }

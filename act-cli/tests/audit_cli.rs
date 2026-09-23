@@ -5,7 +5,7 @@
 //! survives every log-level knob a user can reach for.
 
 mod common;
-use common::{act_cmd as act_bin, deny_line, fixture, fs_grant_rw, rollup_line};
+use common::{act_cmd as act_bin, deny_line, fixture, fs_grant, fs_grant_rw, rollup_line};
 
 use std::process::Command;
 
@@ -230,6 +230,18 @@ fn a_guest_tool_error_is_audited_as_tool_error_not_ok() {
 /// process: a granted read and an out-of-ceiling read.
 #[test]
 fn fs_decisions_reach_the_audit_trail() {
+    assert_fs_decisions_reach_the_audit_trail("read");
+}
+
+/// The same two decision points, reached from a wasip3 guest: `p3-read` goes
+/// through `wasi:filesystem@0.3` `open-at`, which `fs_policy.rs`'s p3 wrapper
+/// checks with the same `check_path_sync` before delegating to wasmtime-wasi.
+#[test]
+fn p3_fs_decisions_reach_the_audit_trail() {
+    assert_fs_decisions_reach_the_audit_trail("p3-read");
+}
+
+fn assert_fs_decisions_reach_the_audit_trail(tool: &str) {
     let fixture = fixture("fs-canary.wasm");
 
     let dir = tempfile::TempDir::new().expect("tempdir");
@@ -244,7 +256,7 @@ fn fs_decisions_reach_the_audit_trail() {
         .args([
             "call",
             fixture.to_str().expect("fixture path is utf-8"),
-            "read",
+            tool,
             "--args",
             &format!(r#"{{"path":"{}"}}"#, allowed.display()),
             "--grant",
@@ -271,7 +283,7 @@ fn fs_decisions_reach_the_audit_trail() {
         .args([
             "call",
             fixture.to_str().expect("fixture path is utf-8"),
-            "read",
+            tool,
             "--args",
             &format!(r#"{{"path":"{}"}}"#, outside.display()),
             "--grant",
@@ -295,54 +307,73 @@ fn fs_decisions_reach_the_audit_trail() {
     );
 }
 
-/// A p3 guest never gets a filesystem: its path operations cannot be checked
-/// against a grant, so `fs_policy.rs` hands it an empty preopen list instead.
-/// That refusal has to reach the audit trail, not just `RUST_LOG` — under an
-/// `allowlist` grant the operator granted something and the guest got nothing,
-/// and the audit line is the only place that says why. `fs-canary`'s
-/// `p3-preopens` tool reports the count the guest actually received.
+/// A wasip3 guest's writes are held to the grant's `ro`/`rw` mode exactly as
+/// a wasip2 guest's are. `p3-write` opens with `create | truncate` and the
+/// `write` flag, which `fs_policy.rs`'s p3 `open_at` classifies as a write,
+/// then streams the content through `write-via-stream` — the delegated,
+/// stream-returning half of the wrapper. Under `ro` the open is refused with a
+/// deny line; under `rw` the bytes land on disk.
 #[test]
-fn p3_preopens_withheld_reaches_the_audit_trail() {
+fn p3_writes_follow_the_grant_mode() {
     let fixture = fixture("fs-canary.wasm");
     let dir = tempfile::TempDir::new().expect("tempdir");
+    let target = dir.path().join("written.txt");
+    let rule = format!("{}/**", dir.path().display());
+    let args = format!(r#"{{"path":"{}","content":"from p3"}}"#, target.display());
 
-    for (grant_flag, grant, reason) in [
-        (
+    let out = act_bin()
+        .args([
+            "call",
+            fixture.to_str().expect("fixture path is utf-8"),
+            "p3-write",
+            "--args",
+            &args,
             "--grant",
-            fs_grant_rw(dir.path()),
-            "p3 filesystem unsupported",
-        ),
-        ("--deny", "wasi:filesystem".to_string(), "not granted"),
-    ] {
-        let out = act_bin()
-            .args([
-                "call",
-                fixture.to_str().expect("fixture path is utf-8"),
-                "p3-preopens",
-                "--args",
-                "{}",
-                grant_flag,
-                &grant,
-            ])
-            .output()
-            .expect("ran act");
-        assert!(out.status.success(), "p3-preopens must run: {out:?}");
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout).trim(),
-            "0",
-            "{grant_flag} {grant}: a p3 guest must get no preopens"
-        );
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let deny_line = deny_line(&stderr);
-        assert!(
-            deny_line.contains("wasi:filesystem") && deny_line.contains("preopen"),
-            "{grant_flag} {grant}: deny line must name the class and action, got: {deny_line}"
-        );
-        assert!(
-            deny_line.contains(reason),
-            "{grant_flag} {grant}: deny line must say `{reason}`, got: {deny_line}"
-        );
-    }
+            &fs_grant(&rule, "ro"),
+        ])
+        .output()
+        .expect("ran act");
+    assert!(
+        !out.status.success(),
+        "a p3 write under ro must be denied: {out:?}"
+    );
+    assert!(
+        !target.exists(),
+        "a denied p3 write must not create the file"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let deny_line = deny_line(&stderr);
+    assert!(
+        deny_line.contains("wasi:filesystem") && deny_line.contains("write"),
+        "deny line must name the class and the write, got: {deny_line}"
+    );
+
+    let out = act_bin()
+        .args([
+            "call",
+            fixture.to_str().expect("fixture path is utf-8"),
+            "p3-write",
+            "--args",
+            &args,
+            "--grant",
+            &fs_grant(&rule, "rw"),
+        ])
+        .output()
+        .expect("ran act");
+    assert!(
+        out.status.success(),
+        "a p3 write under rw must succeed: {out:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("p3 write created the file"),
+        "from p3"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let rollup = rollup_line(&stderr);
+    assert!(
+        rollup.contains("write") && rollup.contains(&format!("under {rule}")),
+        "rollup must record the write under the rule, got: {rollup}"
+    );
 }
 
 /// `resolve_ask`'s `emit_cap_decision` call is the third decision point and
@@ -359,6 +390,16 @@ fn p3_preopens_withheld_reaches_the_audit_trail() {
 /// `resolve_ask` still *runs* to produce that verdict, it isn't skipped.
 #[test]
 fn fs_ask_resolution_reaches_the_audit_trail() {
+    assert_fs_ask_resolution_reaches_the_audit_trail("read");
+}
+
+/// `ask` from a wasip3 guest resolves through the same `resolve_ask`.
+#[test]
+fn p3_fs_ask_resolution_reaches_the_audit_trail() {
+    assert_fs_ask_resolution_reaches_the_audit_trail("p3-read");
+}
+
+fn assert_fs_ask_resolution_reaches_the_audit_trail(tool: &str) {
     let fixture = fixture("fs-canary.wasm");
 
     let dir = tempfile::TempDir::new().expect("tempdir");
@@ -374,7 +415,7 @@ fn fs_ask_resolution_reaches_the_audit_trail() {
         .args([
             "call",
             fixture.to_str().expect("fixture path is utf-8"),
-            "read",
+            tool,
             "--args",
             &format!(r#"{{"path":"{}"}}"#, target.display()),
             "--grant",

@@ -10,6 +10,10 @@
 //!   `fd → absolute host path`. It implements `preopens::Host`, `types::Host`,
 //!   `HostDescriptor`, and `HostDirectoryEntryStream`, mostly by delegating
 //!   to a temp `WasiFilesystemCtxView` constructed from the same fields.
+//! - The same view serves `wasi:filesystem@0.3`: `PolicyFilesystem` implements
+//!   p3 `HostDescriptorWithStore`, checking path-taking ops with the same
+//!   `check_path_sync` and delegating to wasmtime-wasi through a re-projected
+//!   store accessor (see the p3 section).
 //! - Path-taking methods (`open_at`, `stat_at`, `readlink_at`,
 //!   `create_directory_at`, `remove_directory_at`, `unlink_file_at`,
 //!   `rename_at`, `link_at`, `symlink_at`, `metadata_hash_at`,
@@ -231,12 +235,6 @@ pub struct PolicyFilesystemCtxView<'a> {
     pub table: &'a mut ResourceTable,
     pub ceiling: &'a Arc<dyn CompiledCeiling>,
     pub fd_paths: &'a mut FdPathMap,
-    /// Effective mode; drives the p3 preopens kill-switch. p3 path-taking
-    /// ops can't be gated (upstream `Dir::open_at` is `pub(crate)`), so when
-    /// mode is anything but `Open` we return zero preopens from p3 and p3
-    /// guests can't acquire a `Descriptor::Dir` handle at all. The effective
-    /// filesystem mode is never `Open`, so that is every run.
-    pub mode: PolicyMode,
     /// Interactive-consent prompter, consulted when the ceiling returns
     /// `Decision::Ask`. Shared across the store.
     pub prompter: Arc<dyn ConsentPrompter>,
@@ -252,6 +250,11 @@ pub struct FdPathMap {
     pub preopens: Vec<(String, PathBuf)>,
     pub by_rep: HashMap<u32, PathBuf>,
 }
+
+/// A path op the policy refused. Carries no error code: p2 and p3 each map it
+/// to their own `ErrorCode::NotPermitted`, so one decision path serves both.
+#[derive(Debug)]
+struct PathDenied;
 
 /// Sync matcher outcome for one path op. `Deny` is folded into the `Err` arm
 /// of `check_path_sync`; `Ask` carries owned `Arc` clones so the async prompt
@@ -272,7 +275,7 @@ async fn resolve_ask(
     cache: Arc<DecisionCache>,
     prompter: Arc<dyn ConsentPrompter>,
     canonical: PathBuf,
-) -> FsResult<PathBuf> {
+) -> Result<PathBuf, PathDenied> {
     let path = canonical.display().to_string();
     let has_channel = prompter.has_channel();
     let allowed = cache
@@ -294,7 +297,22 @@ async fn resolve_ask(
     if allowed {
         Ok(canonical)
     } else {
-        Err(ErrorCode::NotPermitted.into())
+        Err(PathDenied)
+    }
+}
+
+impl PathDecision {
+    /// Finish a decision: `Allow` is already final, `Ask` prompts (cached per
+    /// path). Consumes only owned data, so the future is `Send + 'static`.
+    async fn resolve(self) -> Result<PathBuf, PathDenied> {
+        match self {
+            PathDecision::Allow(canonical) => Ok(canonical),
+            PathDecision::Ask {
+                canonical,
+                cache,
+                prompter,
+            } => resolve_ask(cache, prompter, canonical).await,
+        }
     }
 }
 
@@ -304,10 +322,6 @@ impl PolicyFilesystemCtxView<'_> {
             ctx: self.ctx,
             table: self.table,
         }
-    }
-
-    fn parent_path(&self, fd: &Resource<types::Descriptor>) -> Option<PathBuf> {
-        self.fd_paths.by_rep.get(&fd.rep()).cloned()
     }
 
     /// Resolve `(parent_fd, rel_path)` to an absolute canonical host path and
@@ -329,32 +343,33 @@ impl PolicyFilesystemCtxView<'_> {
         rel: &str,
         access: FsAccess,
     ) -> impl Future<Output = FsResult<PathBuf>> + Send + 'static {
-        let decision = self.check_path_sync(parent_fd, rel, access);
+        let decision = self.check_path_sync(parent_fd.rep(), rel, access);
         async move {
-            match decision? {
-                PathDecision::Allow(canonical) => Ok(canonical),
-                PathDecision::Ask {
-                    canonical,
-                    cache,
-                    prompter,
-                } => resolve_ask(cache, prompter, canonical).await,
+            match decision {
+                Ok(decision) => decision.resolve().await,
+                Err(PathDenied) => Err(PathDenied),
             }
+            .map_err(|PathDenied| ErrorCode::NotPermitted.into())
         }
     }
 
     /// Synchronous part of `check_path`: resolve + matcher decision. Borrows
     /// `self` but never awaits, so the borrow ends before `check_path`'s await.
+    ///
+    /// Takes the parent descriptor's resource rep rather than a typed
+    /// `Resource`, because p2 and p3 each have their own `Descriptor` binding
+    /// over the same table — this is the one decision path both go through.
     fn check_path_sync(
         &self,
-        parent_fd: &Resource<types::Descriptor>,
+        parent_rep: u32,
         rel: &str,
         access: FsAccess,
-    ) -> FsResult<PathDecision> {
-        let Some(parent) = self.parent_path(parent_fd) else {
+    ) -> Result<PathDecision, PathDenied> {
+        let Some(parent) = self.fd_paths.by_rep.get(&parent_rep).cloned() else {
             // Parent fd has no tracked path — belongs to an unknown preopen
             // or was never witnessed. Deny conservatively.
-            tracing::warn!(fd = parent_fd.rep(), "fs policy: untracked parent fd");
-            return Err(ErrorCode::NotPermitted.into());
+            tracing::warn!(fd = parent_rep, "fs policy: untracked parent fd");
+            return Err(PathDenied);
         };
         let canonical = parent.join(rel).clean();
         let op = ResourceOp {
@@ -390,7 +405,7 @@ impl PolicyFilesystemCtxView<'_> {
                     &mode,
                     explained.rule,
                 ));
-                Err(ErrorCode::NotPermitted.into())
+                Err(PathDenied)
             }
             // Deliberately silent: `ask` has not resolved yet. The record is
             // emitted in `resolve_ask` once the verdict exists.
@@ -404,9 +419,11 @@ impl PolicyFilesystemCtxView<'_> {
 
     /// Called from `get_directories` on first use to align Resource reps with
     /// the host paths we configured at preopen time.
-    fn populate_preopens(&mut self, entries: &[(Resource<types::Descriptor>, String)]) {
-        for (res, guest_path) in entries {
-            if self.fd_paths.by_rep.contains_key(&res.rep()) {
+    ///
+    /// Takes `(rep, guest path)` pairs so p2 and p3 preopens share it.
+    fn populate_preopens<'e>(&mut self, entries: impl IntoIterator<Item = (u32, &'e str)>) {
+        for (rep, guest_path) in entries {
+            if self.fd_paths.by_rep.contains_key(&rep) {
                 continue;
             }
             let Some(host) = self
@@ -418,7 +435,7 @@ impl PolicyFilesystemCtxView<'_> {
             else {
                 continue;
             };
-            self.fd_paths.by_rep.insert(res.rep(), host);
+            self.fd_paths.by_rep.insert(rep, host);
         }
     }
 }
@@ -428,7 +445,7 @@ impl PolicyFilesystemCtxView<'_> {
 impl preopens::Host for PolicyFilesystemCtxView<'_> {
     fn get_directories(&mut self) -> wasmtime::Result<Vec<(Resource<types::Descriptor>, String)>> {
         let entries = self.inner().get_directories()?;
-        self.populate_preopens(&entries);
+        self.populate_preopens(entries.iter().map(|(r, g)| (r.rep(), g.as_str())));
         Ok(entries)
     }
 }
@@ -713,75 +730,422 @@ impl HostDescriptor for PolicyFilesystemCtxView<'_> {
     }
 }
 
-// ── p3 preopens kill-switch ───────────────────────────────────────────────
+// ── p3 (wasi:filesystem@0.3) ──────────────────────────────────────────────
 //
-// We can't mirror the full p2 matcher on p3 because `Dir::open_at` and
-// friends are `pub(crate)` in wasmtime-wasi — shadowing `HostDescriptorWithStore`
-// would need to reproject the Accessor via a `U: WasiFilesystemView` bound
-// that the trait doesn't permit, and the sibling methods we'd need to call
-// directly (`dir.open_at`, `dir.as_dir`) are gated.
+// The same wrapper as p2: every path-taking op is checked by
+// `check_path_sync` (+ `PathDecision::resolve` for `ask`), then delegated to
+// wasmtime-wasi's own implementation; every other op is delegated untouched.
 //
-// Instead we gate at preopens: if fs mode is anything other than `Open`,
-// p3 `get_directories` returns an empty vec. A p3 guest with an empty
-// preopen list can't construct a `Descriptor::Dir` resource, so every
-// p3 path op fails before it reaches cap-std.
-//
-// In practice that is every run. `self.mode` is the *effective* mode, and
-// `act_policy::effective` clamps a user's `open` to `allowlist` over the
-// component's declared ceiling (an undeclared class is `deny`), so the
-// filesystem never reaches here as `Open`. A p3 guest gets no filesystem
-// under any grant until p3 path ops can be checked one by one.
+// Delegation works by re-projecting the store accessor. wasmtime-wasi's p3
+// host is `impl<U> HostDescriptorWithStore<U> for WasiFilesystem`, whose
+// methods take an `Accessor<U, WasiFilesystem>` (or an `Access` for the sync
+// stream-returning ones). `Accessor::with_getter` and `Access::new` build one
+// of those from ours by swapping the data getter for
+// `HostState::wasi_fs_view` — same store, same resource table, same
+// descriptors. p2 and p3 share that table, so `fd_paths` (keyed by resource
+// rep) serves both.
 
-/// The audit record for a p3 guest handed an empty preopen list.
-///
-/// There is no path — the guest never got far enough to name one — so the
-/// key is empty and the action is `preopen`. The reason tells the two cases
-/// apart: under `deny` the guest got exactly what was granted, while under
-/// `allowlist` or `ask` it got less than the grant says, because p3 path
-/// operations cannot be checked against it. The reason does not point at a
-/// mode that would help: none does (see the comment above).
-fn p3_preopens_withheld(mode: PolicyMode) -> CapDecisionRecord {
-    let reason = if mode == PolicyMode::Deny {
-        "not granted"
-    } else {
-        "p3 filesystem unsupported: its paths cannot be checked against the grant"
-    };
-    CapDecisionRecord::statik_with_reason(
-        act_types::constants::CAP_FILESYSTEM,
-        "",
-        "preopen",
-        Decision4::Deny,
-        &mode.to_string(),
-        None,
-        Some(reason),
-    )
+use wasmtime::AsContextMut;
+use wasmtime::component::{Access, Accessor, FutureReader, StreamReader};
+use wasmtime_wasi::filesystem::WasiFilesystem;
+use wasmtime_wasi::p3::bindings::filesystem::preopens as p3_preopens;
+use wasmtime_wasi::p3::bindings::filesystem::types as p3;
+use wasmtime_wasi::p3::filesystem::{FilesystemError, FilesystemResult};
+
+use crate::store::HostState;
+
+type P3Store = Accessor<HostState, PolicyFilesystem>;
+
+/// The accessor wasmtime-wasi's own p3 filesystem host expects.
+fn p3_inner(store: &P3Store) -> Accessor<HostState, WasiFilesystem> {
+    store.with_getter::<WasiFilesystem>(HostState::wasi_fs_view)
 }
 
-impl wasmtime_wasi::p3::bindings::filesystem::preopens::Host for PolicyFilesystemCtxView<'_> {
-    fn get_directories(
-        &mut self,
-    ) -> wasmtime::Result<
-        Vec<(
-            Resource<wasmtime_wasi::p3::bindings::filesystem::types::Descriptor>,
-            String,
-        )>,
-    > {
-        if self.mode != PolicyMode::Open {
-            tracing::warn!(
-                mode = ?self.mode,
-                "p3 wasi:filesystem/preopens: returning empty; p3 path ops can't be matcher-gated",
-            );
-            // The operator has to be able to see this in the audit trail, not
-            // only in `RUST_LOG`: under `allowlist` or `ask` the grant they
-            // wrote is not what a p3 guest gets, and nothing else says so.
-            emit_cap_decision(&p3_preopens_withheld(self.mode));
-            return Ok(vec![]);
-        }
-        let mut inner = WasiFilesystemCtxView {
-            ctx: self.ctx,
-            table: self.table,
+/// `check_path` for p3: the sync decision runs inside `Accessor::with`, the
+/// `ask` prompt (if any) after it, so no store borrow is held across an await.
+async fn p3_check_path(
+    store: &P3Store,
+    fd: &Resource<p3::Descriptor>,
+    rel: &str,
+    access: FsAccess,
+) -> FilesystemResult<PathBuf> {
+    let rep = fd.rep();
+    let decision = store.with(|mut view| view.get().check_path_sync(rep, rel, access));
+    match decision {
+        Ok(decision) => decision.resolve().await,
+        Err(PathDenied) => Err(PathDenied),
+    }
+    .map_err(|PathDenied| FilesystemError::from(p3::ErrorCode::NotPermitted))
+}
+
+impl p3::HostDescriptorWithStore<HostState> for PolicyFilesystem {
+    fn read_via_stream(
+        mut store: Access<HostState, Self>,
+        fd: Resource<p3::Descriptor>,
+        offset: p3::Filesize,
+    ) -> wasmtime::Result<(StreamReader<u8>, FutureReader<Result<(), p3::ErrorCode>>)> {
+        let inner =
+            Access::<_, WasiFilesystem>::new(store.as_context_mut(), HostState::wasi_fs_view);
+        <WasiFilesystem as p3::HostDescriptorWithStore<HostState>>::read_via_stream(
+            inner, fd, offset,
+        )
+    }
+
+    fn write_via_stream(
+        mut store: Access<'_, HostState, Self>,
+        fd: Resource<p3::Descriptor>,
+        data: StreamReader<u8>,
+        offset: p3::Filesize,
+    ) -> wasmtime::Result<FutureReader<Result<(), p3::ErrorCode>>> {
+        let inner =
+            Access::<_, WasiFilesystem>::new(store.as_context_mut(), HostState::wasi_fs_view);
+        <WasiFilesystem as p3::HostDescriptorWithStore<HostState>>::write_via_stream(
+            inner, fd, data, offset,
+        )
+    }
+
+    fn append_via_stream(
+        mut store: Access<'_, HostState, Self>,
+        fd: Resource<p3::Descriptor>,
+        data: StreamReader<u8>,
+    ) -> wasmtime::Result<FutureReader<Result<(), p3::ErrorCode>>> {
+        let inner =
+            Access::<_, WasiFilesystem>::new(store.as_context_mut(), HostState::wasi_fs_view);
+        <WasiFilesystem as p3::HostDescriptorWithStore<HostState>>::append_via_stream(
+            inner, fd, data,
+        )
+    }
+
+    async fn advise(
+        store: &P3Store,
+        fd: Resource<p3::Descriptor>,
+        offset: p3::Filesize,
+        length: p3::Filesize,
+        advice: p3::Advice,
+    ) -> FilesystemResult<()> {
+        <WasiFilesystem as p3::HostDescriptorWithStore<HostState>>::advise(
+            &p3_inner(store),
+            fd,
+            offset,
+            length,
+            advice,
+        )
+        .await
+    }
+
+    async fn sync_data(store: &P3Store, fd: Resource<p3::Descriptor>) -> FilesystemResult<()> {
+        <WasiFilesystem as p3::HostDescriptorWithStore<HostState>>::sync_data(&p3_inner(store), fd)
+            .await
+    }
+
+    async fn get_flags(
+        store: &P3Store,
+        fd: Resource<p3::Descriptor>,
+    ) -> FilesystemResult<p3::DescriptorFlags> {
+        <WasiFilesystem as p3::HostDescriptorWithStore<HostState>>::get_flags(&p3_inner(store), fd)
+            .await
+    }
+
+    async fn get_type(
+        store: &P3Store,
+        fd: Resource<p3::Descriptor>,
+    ) -> FilesystemResult<p3::DescriptorType> {
+        <WasiFilesystem as p3::HostDescriptorWithStore<HostState>>::get_type(&p3_inner(store), fd)
+            .await
+    }
+
+    async fn set_size(
+        store: &P3Store,
+        fd: Resource<p3::Descriptor>,
+        size: p3::Filesize,
+    ) -> FilesystemResult<()> {
+        <WasiFilesystem as p3::HostDescriptorWithStore<HostState>>::set_size(
+            &p3_inner(store),
+            fd,
+            size,
+        )
+        .await
+    }
+
+    async fn set_times(
+        store: &P3Store,
+        fd: Resource<p3::Descriptor>,
+        data_access_timestamp: p3::NewTimestamp,
+        data_modification_timestamp: p3::NewTimestamp,
+    ) -> FilesystemResult<()> {
+        <WasiFilesystem as p3::HostDescriptorWithStore<HostState>>::set_times(
+            &p3_inner(store),
+            fd,
+            data_access_timestamp,
+            data_modification_timestamp,
+        )
+        .await
+    }
+
+    fn read_directory(
+        mut store: Access<'_, HostState, Self>,
+        fd: Resource<p3::Descriptor>,
+    ) -> wasmtime::Result<(
+        StreamReader<p3::DirectoryEntry>,
+        FutureReader<Result<(), p3::ErrorCode>>,
+    )> {
+        let inner =
+            Access::<_, WasiFilesystem>::new(store.as_context_mut(), HostState::wasi_fs_view);
+        <WasiFilesystem as p3::HostDescriptorWithStore<HostState>>::read_directory(inner, fd)
+    }
+
+    async fn sync(store: &P3Store, fd: Resource<p3::Descriptor>) -> FilesystemResult<()> {
+        <WasiFilesystem as p3::HostDescriptorWithStore<HostState>>::sync(&p3_inner(store), fd).await
+    }
+
+    async fn create_directory_at(
+        store: &P3Store,
+        fd: Resource<p3::Descriptor>,
+        path: String,
+    ) -> FilesystemResult<()> {
+        p3_check_path(store, &fd, &path, FsAccess::Write).await?;
+        <WasiFilesystem as p3::HostDescriptorWithStore<HostState>>::create_directory_at(
+            &p3_inner(store),
+            fd,
+            path,
+        )
+        .await
+    }
+
+    async fn stat(
+        store: &P3Store,
+        fd: Resource<p3::Descriptor>,
+    ) -> FilesystemResult<p3::DescriptorStat> {
+        <WasiFilesystem as p3::HostDescriptorWithStore<HostState>>::stat(&p3_inner(store), fd).await
+    }
+
+    async fn stat_at(
+        store: &P3Store,
+        fd: Resource<p3::Descriptor>,
+        path_flags: p3::PathFlags,
+        path: String,
+    ) -> FilesystemResult<p3::DescriptorStat> {
+        p3_check_path(store, &fd, &path, FsAccess::Read).await?;
+        <WasiFilesystem as p3::HostDescriptorWithStore<HostState>>::stat_at(
+            &p3_inner(store),
+            fd,
+            path_flags,
+            path,
+        )
+        .await
+    }
+
+    async fn set_times_at(
+        store: &P3Store,
+        fd: Resource<p3::Descriptor>,
+        path_flags: p3::PathFlags,
+        path: String,
+        data_access_timestamp: p3::NewTimestamp,
+        data_modification_timestamp: p3::NewTimestamp,
+    ) -> FilesystemResult<()> {
+        p3_check_path(store, &fd, &path, FsAccess::Write).await?;
+        <WasiFilesystem as p3::HostDescriptorWithStore<HostState>>::set_times_at(
+            &p3_inner(store),
+            fd,
+            path_flags,
+            path,
+            data_access_timestamp,
+            data_modification_timestamp,
+        )
+        .await
+    }
+
+    async fn link_at(
+        store: &P3Store,
+        fd: Resource<p3::Descriptor>,
+        old_path_flags: p3::PathFlags,
+        old_path: String,
+        new_fd: Resource<p3::Descriptor>,
+        new_path: String,
+    ) -> FilesystemResult<()> {
+        p3_check_path(store, &fd, &old_path, FsAccess::Read).await?;
+        p3_check_path(store, &new_fd, &new_path, FsAccess::Write).await?;
+        <WasiFilesystem as p3::HostDescriptorWithStore<HostState>>::link_at(
+            &p3_inner(store),
+            fd,
+            old_path_flags,
+            old_path,
+            new_fd,
+            new_path,
+        )
+        .await
+    }
+
+    async fn open_at(
+        store: &P3Store,
+        fd: Resource<p3::Descriptor>,
+        path_flags: p3::PathFlags,
+        path: String,
+        open_flags: p3::OpenFlags,
+        flags: p3::DescriptorFlags,
+    ) -> FilesystemResult<Resource<p3::Descriptor>> {
+        // Same classification as p2's `open_at`.
+        let access = if flags.contains(p3::DescriptorFlags::WRITE)
+            || flags.contains(p3::DescriptorFlags::MUTATE_DIRECTORY)
+            || open_flags.contains(p3::OpenFlags::CREATE)
+            || open_flags.contains(p3::OpenFlags::TRUNCATE)
+            || open_flags.contains(p3::OpenFlags::EXCLUSIVE)
+        {
+            FsAccess::Write
+        } else {
+            FsAccess::Read
         };
-        <WasiFilesystemCtxView as wasmtime_wasi::p3::bindings::filesystem::preopens::Host>::get_directories(&mut inner)
+        let canonical = p3_check_path(store, &fd, &path, access).await?;
+        let new_fd = <WasiFilesystem as p3::HostDescriptorWithStore<HostState>>::open_at(
+            &p3_inner(store),
+            fd,
+            path_flags,
+            path,
+            open_flags,
+            flags,
+        )
+        .await?;
+        let rep = new_fd.rep();
+        store.with(|mut view| view.get().fd_paths.by_rep.insert(rep, canonical));
+        Ok(new_fd)
+    }
+
+    async fn readlink_at(
+        store: &P3Store,
+        fd: Resource<p3::Descriptor>,
+        path: String,
+    ) -> FilesystemResult<String> {
+        p3_check_path(store, &fd, &path, FsAccess::Read).await?;
+        <WasiFilesystem as p3::HostDescriptorWithStore<HostState>>::readlink_at(
+            &p3_inner(store),
+            fd,
+            path,
+        )
+        .await
+    }
+
+    async fn remove_directory_at(
+        store: &P3Store,
+        fd: Resource<p3::Descriptor>,
+        path: String,
+    ) -> FilesystemResult<()> {
+        p3_check_path(store, &fd, &path, FsAccess::Write).await?;
+        <WasiFilesystem as p3::HostDescriptorWithStore<HostState>>::remove_directory_at(
+            &p3_inner(store),
+            fd,
+            path,
+        )
+        .await
+    }
+
+    async fn rename_at(
+        store: &P3Store,
+        fd: Resource<p3::Descriptor>,
+        old_path: String,
+        new_fd: Resource<p3::Descriptor>,
+        new_path: String,
+    ) -> FilesystemResult<()> {
+        p3_check_path(store, &fd, &old_path, FsAccess::Write).await?;
+        p3_check_path(store, &new_fd, &new_path, FsAccess::Write).await?;
+        <WasiFilesystem as p3::HostDescriptorWithStore<HostState>>::rename_at(
+            &p3_inner(store),
+            fd,
+            old_path,
+            new_fd,
+            new_path,
+        )
+        .await
+    }
+
+    async fn symlink_at(
+        store: &P3Store,
+        fd: Resource<p3::Descriptor>,
+        old_path: String,
+        new_path: String,
+    ) -> FilesystemResult<()> {
+        p3_check_path(store, &fd, &new_path, FsAccess::Write).await?;
+        <WasiFilesystem as p3::HostDescriptorWithStore<HostState>>::symlink_at(
+            &p3_inner(store),
+            fd,
+            old_path,
+            new_path,
+        )
+        .await
+    }
+
+    async fn unlink_file_at(
+        store: &P3Store,
+        fd: Resource<p3::Descriptor>,
+        path: String,
+    ) -> FilesystemResult<()> {
+        p3_check_path(store, &fd, &path, FsAccess::Write).await?;
+        <WasiFilesystem as p3::HostDescriptorWithStore<HostState>>::unlink_file_at(
+            &p3_inner(store),
+            fd,
+            path,
+        )
+        .await
+    }
+
+    async fn is_same_object(
+        store: &P3Store,
+        fd: Resource<p3::Descriptor>,
+        other: Resource<p3::Descriptor>,
+    ) -> wasmtime::Result<bool> {
+        <WasiFilesystem as p3::HostDescriptorWithStore<HostState>>::is_same_object(
+            &p3_inner(store),
+            fd,
+            other,
+        )
+        .await
+    }
+
+    async fn metadata_hash(
+        store: &P3Store,
+        fd: Resource<p3::Descriptor>,
+    ) -> FilesystemResult<p3::MetadataHashValue> {
+        <WasiFilesystem as p3::HostDescriptorWithStore<HostState>>::metadata_hash(
+            &p3_inner(store),
+            fd,
+        )
+        .await
+    }
+
+    async fn metadata_hash_at(
+        store: &P3Store,
+        fd: Resource<p3::Descriptor>,
+        path_flags: p3::PathFlags,
+        path: String,
+    ) -> FilesystemResult<p3::MetadataHashValue> {
+        p3_check_path(store, &fd, &path, FsAccess::Read).await?;
+        <WasiFilesystem as p3::HostDescriptorWithStore<HostState>>::metadata_hash_at(
+            &p3_inner(store),
+            fd,
+            path_flags,
+            path,
+        )
+        .await
+    }
+}
+
+impl p3::HostDescriptor for PolicyFilesystemCtxView<'_> {
+    fn drop(&mut self, fd: Resource<p3::Descriptor>) -> wasmtime::Result<()> {
+        self.fd_paths.by_rep.remove(&fd.rep());
+        p3::HostDescriptor::drop(&mut self.inner(), fd)
+    }
+}
+
+impl p3::Host for PolicyFilesystemCtxView<'_> {
+    fn convert_error_code(&mut self, error: FilesystemError) -> wasmtime::Result<p3::ErrorCode> {
+        p3::Host::convert_error_code(&mut self.inner(), error)
+    }
+}
+
+impl p3_preopens::Host for PolicyFilesystemCtxView<'_> {
+    fn get_directories(&mut self) -> wasmtime::Result<Vec<(Resource<p3::Descriptor>, String)>> {
+        let entries = p3_preopens::Host::get_directories(&mut self.inner())?;
+        self.populate_preopens(entries.iter().map(|(r, g)| (r.rep(), g.as_str())));
+        Ok(entries)
     }
 }
 

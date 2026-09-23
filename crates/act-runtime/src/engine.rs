@@ -61,12 +61,15 @@ pub fn create_linker(engine: &Engine) -> Result<Linker<HostState>> {
     // Add P3 bindings on top
     wasmtime_wasi::p3::add_to_linker(&mut linker)
         .map_err(|e| anyhow::anyhow!("failed to add WASI P3 to linker: {e}"))?;
-    // Shadow only the p3 preopens interface. When fs mode ≠ Open, our impl
-    // returns zero preopens → p3 guests can't obtain a Descriptor::Dir and
-    // every path op fails. Matcher-level gating on individual p3 path ops
-    // isn't possible with current wasmtime-wasi public API (Dir::open_at
-    // is `pub(crate)`).
+    // Shadow the p3 wasi:filesystem bindings the same way: `fs_policy`'s p3
+    // wrapper checks every path op and delegates to wasmtime-wasi's own
+    // implementation (see the p3 section there).
     linker.allow_shadowing(true);
+    wasmtime_wasi::p3::bindings::filesystem::types::add_to_linker::<
+        HostState,
+        fs_policy::PolicyFilesystem,
+    >(&mut linker, super::store::HostState::policy_fs_view)
+    .map_err(|e| anyhow::anyhow!("failed to add policy wasi:filesystem/types (p3): {e}"))?;
     wasmtime_wasi::p3::bindings::filesystem::preopens::add_to_linker::<
         HostState,
         fs_policy::PolicyFilesystem,

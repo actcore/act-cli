@@ -22,7 +22,6 @@ pub struct HostState {
     #[allow(dead_code)] // retained for Task 10 DNS resolver hook access
     pub(crate) http_client: Arc<http_client::ActHttpClient>,
     pub(crate) fs_ceiling: Arc<dyn act_policy::provider::CompiledCeiling>,
-    pub(crate) fs_effective_mode: act_policy::grant::PolicyMode,
     pub(crate) fd_paths: fs_policy::FdPathMap,
     /// Interactive-consent prompter + per-session decision cache, shared by
     /// every `ask`-mode decision point (fs / http / sockets).
@@ -60,13 +59,21 @@ pub struct HostState {
 }
 impl HostState {
     /// Build a policy-aware filesystem view.
+    /// wasmtime-wasi's own filesystem view over the same ctx and table. The p3
+    /// policy wrapper re-projects its store accessor onto this to delegate.
+    pub(crate) fn wasi_fs_view(&mut self) -> wasmtime_wasi::filesystem::WasiFilesystemCtxView<'_> {
+        wasmtime_wasi::filesystem::WasiFilesystemCtxView {
+            ctx: self.wasi.filesystem(),
+            table: &mut self.table,
+        }
+    }
+
     pub(crate) fn policy_fs_view(&mut self) -> fs_policy::PolicyFilesystemCtxView<'_> {
         fs_policy::PolicyFilesystemCtxView {
             ctx: self.wasi.filesystem(),
             table: &mut self.table,
             ceiling: &self.fs_ceiling,
             fd_paths: &mut self.fd_paths,
-            mode: self.fs_effective_mode,
             prompter: self.consent_prompter.clone(),
             cache: self.consent_cache.clone(),
         }
@@ -283,7 +290,6 @@ pub async fn create_store(
             .ok_or_else(|| anyhow::anyhow!("no resolved ceiling for always-resolved class {id}"))
     };
     let fs_ceiling = take(act_types::constants::CAP_FILESYSTEM)?;
-    let fs_effective_mode = fs_ceiling.effective_mode();
     let http_ceiling = take(act_types::constants::CAP_HTTP)?;
     let sockets_ceiling = take(act_types::constants::CAP_SOCKETS)?;
     let sockets_effective_mode = sockets_ceiling.effective_mode();
@@ -462,7 +468,6 @@ pub async fn create_store(
         ),
         http_client,
         fs_ceiling,
-        fs_effective_mode,
         fd_paths: fs_policy::FdPathMap {
             preopens: preopen_pairs,
             by_rep: Default::default(),
