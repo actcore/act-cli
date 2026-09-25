@@ -403,6 +403,47 @@ mod tests {
         assert_eq!((h.alias, h.placeholder), (Some("http"), "<host>"));
     }
 
+    /// The provider decides on the host exactly as the runtime writes it into
+    /// the op key (`Uri::host()`), so alternate spellings of a denied
+    /// destination must be caught here, not only in `net`.
+    #[tokio::test]
+    async fn host_deny_holds_against_alternate_spellings() {
+        let declared = vec![json!({"host":"*"})];
+        let grant = CapabilityGrant {
+            mode: PolicyMode::Open,
+            allow: vec![],
+            deny: vec![
+                json!({"host":"127.0.0.1"}),
+                json!({"host":"metadata.internal"}),
+                json!({"host":"[::1]"}),
+            ],
+        };
+        let c = HttpProvider
+            .resolve("wasi:http", Some(&declared), &grant)
+            .await
+            .unwrap();
+        let op = |key: &str| ResourceOp {
+            cap_id: "wasi:http".into(),
+            key: key.into(),
+            action: "GET".into(),
+            attrs: json!({"scheme":"http"}),
+        };
+        for key in [
+            "127.1:80",
+            "2130706433:80",
+            "0x7f.0.0.1:80",
+            "METADATA.internal.:80",
+            "[0:0::1]:80",
+        ] {
+            assert_eq!(
+                c.classify(&op(key)),
+                Decision::Deny,
+                "{key} slipped past the deny"
+            );
+        }
+        assert_eq!(c.classify(&op("api.example.com:80")), Decision::Allow);
+    }
+
     #[tokio::test]
     async fn http_shorthand_is_equivalent_to_json() {
         // Declared ceilings take hosts only (`HttpAllow`); CIDRs appear in grants.

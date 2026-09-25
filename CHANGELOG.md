@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **A host rule can no longer be sidestepped by respelling the host.** Hosts
+  were compared as strings, so a deny on `127.0.0.1` let `127.1`,
+  `2130706433`, `0x7f.0.0.1` and `0177.0.0.1` through (the system resolver
+  reads all of them as `127.0.0.1`), a deny on `evil.com` let `evil.com.`
+  through, and `[0:0::1]` slipped past `[::1]`. Both sides of every host
+  comparison — `wasi:http` and `wasi:sockets`, allow and deny, and the IP
+  literal a CIDR rule is checked against — are now canonicalised first:
+  names lowercased without a trailing dot, IPv4 in any `inet_aton` form
+  written as a dotted quad, IPv6 in its canonical text.
+
 ## [0.14.2] - 2026-09-26
 
 **Upgrade from 0.14.1: it ships a DNS parser with a known vulnerability.**

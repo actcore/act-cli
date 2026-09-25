@@ -50,6 +50,73 @@ pub fn cidr_contains(cidr: &str, ip: IpAddr) -> bool {
     cidr.parse::<cidr::IpCidr>().is_ok_and(|c| c.contains(&ip))
 }
 
+/// One spelling per destination, so a rule cannot be sidestepped by writing
+/// the same host differently. Applied to both sides of every comparison.
+///
+/// - names: ASCII-lowercased, one trailing `.` removed (`Evil.COM.` → `evil.com`);
+/// - IPv4 literals in any form the system resolver accepts (`inet_aton`:
+///   1–4 parts, each decimal, `0`-prefixed octal or `0x` hex — `127.1`,
+///   `2130706433`, `0x7f.0.0.1`, `0177.0.0.1`) → dotted quad;
+/// - IPv6 literals → their canonical text, brackets kept if present.
+///
+/// Anything that is not a valid literal is treated as a name. That is
+/// fail-safe: a string the resolver would not read as an IP is looked up as a
+/// name, and the DNS-resolved-IP filter still applies to it.
+pub fn canonical_host(h: &str) -> String {
+    if let Some(inner) = h.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+        return match inner.parse::<std::net::Ipv6Addr>() {
+            Ok(ip) => format!("[{ip}]"),
+            Err(_) => h.to_ascii_lowercase(),
+        };
+    }
+    if h.contains(':') {
+        return match h.parse::<std::net::Ipv6Addr>() {
+            Ok(ip) => ip.to_string(),
+            Err(_) => h.to_ascii_lowercase(),
+        };
+    }
+    let lower = h.to_ascii_lowercase();
+    let name = lower.strip_suffix('.').unwrap_or(&lower);
+    match inet_aton(name) {
+        Some(ip) => ip.to_string(),
+        None => name.to_string(),
+    }
+}
+
+/// `inet_aton(3)` semantics: what glibc's resolver reads as an IPv4 address.
+fn inet_aton(s: &str) -> Option<std::net::Ipv4Addr> {
+    fn part(p: &str) -> Option<u32> {
+        if p.is_empty() {
+            return None;
+        }
+        if let Some(hex) = p.strip_prefix("0x") {
+            return if hex.is_empty() {
+                None
+            } else {
+                u32::from_str_radix(hex, 16).ok()
+            };
+        }
+        if p.len() > 1 && p.starts_with('0') {
+            return u32::from_str_radix(&p[1..], 8).ok();
+        }
+        p.parse::<u32>().ok()
+    }
+    let parts: Vec<u32> = s.split('.').map(part).collect::<Option<_>>()?;
+    let (last, head) = parts.split_last()?;
+    if head.len() > 3 || head.iter().any(|&b| b > 255) {
+        return None;
+    }
+    let last_bits = 8 * (4 - head.len() as u32);
+    if last_bits < 32 && *last >= (1u32 << last_bits) {
+        return None;
+    }
+    let mut v: u32 = 0;
+    for (i, b) in head.iter().enumerate() {
+        v |= b << (24 - 8 * i as u32);
+    }
+    Some(std::net::Ipv4Addr::from(v | last))
+}
+
 /// Host-pattern match. Supports exact match (case-insensitive), `*.suffix`
 /// wildcards, and the bare `*` any-host wildcard.
 ///
@@ -57,17 +124,19 @@ pub fn cidr_contains(cidr: &str, ip: IpAddr) -> bool {
 ///   caller's responsibility).
 /// - `*.example.com` matches both `example.com` and any subdomain
 ///   `foo.example.com` / `a.b.example.com`.
+///
+/// Both sides go through [`canonical_host`] first, so `evil.com.`, `127.1`
+/// and `[0:0::1]` meet a rule written as `evil.com`, `127.0.0.1`, `[::1]`.
 pub fn host_matches(pattern: &str, host: &str) -> bool {
     if pattern == "*" {
         return true;
     }
+    let host = canonical_host(host);
     if let Some(suffix) = pattern.strip_prefix("*.") {
-        return host.eq_ignore_ascii_case(suffix)
-            || host
-                .to_ascii_lowercase()
-                .ends_with(&format!(".{}", suffix.to_ascii_lowercase()));
+        let suffix = canonical_host(suffix);
+        return host == suffix || host.ends_with(&format!(".{suffix}"));
     }
-    host.eq_ignore_ascii_case(pattern)
+    host == canonical_host(pattern)
 }
 
 // ── Rule checker ─────────────────────────────────────────────────────────
@@ -117,8 +186,10 @@ impl<'a> NetworkCheck<'a> {
 pub fn rule_matches(rule: &NetworkRule, check: &NetworkCheck) -> bool {
     // Either a CIDR or a host anchor — at least one must be present and match.
     if let Some(cidr_spec) = rule.cidr.as_deref() {
-        let ip_literal_match = check
-            .host
+        let host = canonical_host(check.host);
+        let ip_literal_match = host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
             .parse::<IpAddr>()
             .is_ok_and(|ip| cidr_contains(cidr_spec, ip));
         let resolved_match = check
@@ -302,6 +373,74 @@ mod tests {
             cidr: cidr.map(String::from),
             except_ports,
         }
+    }
+
+    // ── Canonical hosts: one spelling per destination ──
+
+    #[test]
+    fn canonical_host_forms() {
+        for (raw, want) in [
+            ("Evil.COM", "evil.com"),
+            ("evil.com.", "evil.com"),
+            ("127.0.0.1", "127.0.0.1"),
+            ("127.1", "127.0.0.1"),
+            ("127.0.1", "127.0.0.1"),
+            ("2130706433", "127.0.0.1"),
+            ("0x7f.0.0.1", "127.0.0.1"),
+            ("0x7F000001", "127.0.0.1"),
+            ("0177.0.0.1", "127.0.0.1"),
+            ("[0:0::1]", "[::1]"),
+            ("[::FFFF:127.0.0.1]", "[::ffff:127.0.0.1]"),
+            ("0:0::1", "::1"),
+            ("api.example.com", "api.example.com"),
+            // Not a number in any base the resolver accepts: a name, untouched.
+            ("08.0.0.1", "08.0.0.1"),
+            ("1.2.3.4.5", "1.2.3.4.5"),
+            ("256.0.0.1", "256.0.0.1"),
+        ] {
+            assert_eq!(canonical_host(raw), want, "canonical_host({raw})");
+        }
+    }
+
+    /// A host deny must not be sidestepped by another spelling of the same
+    /// destination — the resolver treats `127.1` as `127.0.0.1`.
+    #[test]
+    fn host_deny_catches_alternate_spellings() {
+        let deny_ip = rule(Some("127.0.0.1"), None, None, None);
+        for host in ["127.1", "2130706433", "0x7f.0.0.1", "0177.0.0.1"] {
+            assert!(
+                rule_matches(&deny_ip, &NetworkCheck::new(host, 80)),
+                "{host}"
+            );
+        }
+        let deny_name = rule(Some("evil.com"), None, None, None);
+        assert!(rule_matches(
+            &deny_name,
+            &NetworkCheck::new("evil.com.", 443)
+        ));
+        assert!(rule_matches(
+            &deny_name,
+            &NetworkCheck::new("EVIL.com.", 443)
+        ));
+        let deny_sub = rule(Some("*.evil.com"), None, None, None);
+        assert!(rule_matches(
+            &deny_sub,
+            &NetworkCheck::new("a.evil.com.", 443)
+        ));
+        let deny_v6 = rule(Some("[::1]"), None, None, None);
+        assert!(rule_matches(&deny_v6, &NetworkCheck::new("[0:0::1]", 80)));
+    }
+
+    #[test]
+    fn cidr_deny_catches_alternate_ip_spellings() {
+        let loopback = rule(None, None, Some("127.0.0.0/8"), None);
+        assert!(rule_matches(&loopback, &NetworkCheck::new("127.1", 80)));
+        assert!(rule_matches(
+            &loopback,
+            &NetworkCheck::new("2130706433", 80)
+        ));
+        let v6 = rule(None, None, Some("::1/128"), None);
+        assert!(rule_matches(&v6, &NetworkCheck::new("[0:0::1]", 80)));
     }
 
     #[test]
