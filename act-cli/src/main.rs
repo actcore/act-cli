@@ -14,7 +14,7 @@ use resolve::ComponentRef;
 use secret_cmd::SecretCmd;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -36,10 +36,12 @@ struct CommonOpts {
     /// Repeatable / merged. For CI; interactive runs resolve grants by prompt (ask, later).
     #[arg(long = "grant")]
     grant: Vec<String>,
-    /// Open a capability class by id (full declared ceiling), e.g. `--allow wasi:http`. Repeatable.
+    /// Allow a class, whole ceiling (`--allow http`) or one rule
+    /// (`--allow 'fs=/data/**'`). Repeatable. See "Capability classes" in --help.
     #[arg(long = "allow")]
     allow: Vec<String>,
-    /// Deny a capability class by id, e.g. `--deny db:drop-database`. Repeatable.
+    /// Deny a class (`--deny http`) or one rule (`--deny 'fs=/data/secret/**'`).
+    /// Repeatable.
     #[arg(long = "deny")]
     deny: Vec<String>,
 
@@ -337,6 +339,43 @@ fn credential_store_root(backend: Option<&str>) -> Option<std::path::PathBuf> {
     Some(act_runtime::credentials::backend_root(&choice).to_path_buf())
 }
 
+/// The "Capability classes" section of `run`/`call`/`info --help`, built from
+/// the provider registry so it cannot drift from what the host accepts.
+fn capability_classes_help() -> String {
+    let mut out = String::from("Capability classes (for --allow, --deny, --grant):\n");
+    for (id, h) in act_policy::provider::ProviderRegistry::with_builtins().builtins() {
+        let Some(h) = h else { continue };
+        let alias = h.alias.unwrap_or("");
+        let syntax = if h.syntax.is_empty() {
+            "(no constraint)".to_string()
+        } else {
+            format!("{alias}={}", h.syntax)
+        };
+        out.push_str(&format!(
+            "  {alias:<8} {id:<17} {syntax:<32} {}\n",
+            h.examples.join("   ")
+        ));
+    }
+    out.push_str(
+        "\n  Without \"=…\", --allow opens the class's whole declared ceiling.\n  \
+         Semantic classes (e.g. db:drop) are defined by each component —\n  \
+         `act info <ref>` lists the ones it declares. Shorthand: <class>=<key-glob>.\n",
+    );
+    out
+}
+
+/// `Cli::parse()`, with the capability-class listing attached to the
+/// subcommands that take `--allow` / `--deny`.
+fn parse_cli() -> Cli {
+    let help = capability_classes_help();
+    let cmd = ["run", "call", "info"]
+        .into_iter()
+        .fold(Cli::command(), |cmd, name| {
+            cmd.mut_subcommand(name, |c| c.after_long_help(help.clone()))
+        });
+    Cli::from_arg_matches(&cmd.get_matches()).unwrap_or_else(|e| e.exit())
+}
+
 /// The `fmt` layer's filter: the caller-configured `env_filter`, with the
 /// audit-only targets carved out.
 ///
@@ -355,7 +394,7 @@ fn credential_store_root(backend: Option<&str>) -> Option<std::path::PathBuf> {
 /// that must never be rendered as though the host authored it.
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = parse_cli();
 
     // Subcommands that carry `CommonOpts` (the ones that instantiate a guest);
     // others get the flags' absent/false defaults. Extracted once here rather
