@@ -31,6 +31,21 @@ pub struct CredentialsCeiling {
 
 #[async_trait::async_trait]
 impl CapabilityProvider for CredentialsProvider {
+    fn shorthand_help(&self) -> Option<crate::shorthand::ShorthandHelp> {
+        Some(crate::shorthand::ShorthandHelp {
+            alias: Some("creds"),
+            syntax: "",
+            examples: &["--allow creds"],
+            placeholder: "",
+        })
+    }
+
+    fn parse_shorthand(&self, cap_id: &str, _s: &str) -> Result<serde_json::Value, PolicyError> {
+        Err(PolicyError::Shorthand(format!(
+            "{cap_id} takes no constraint; use --allow creds"
+        )))
+    }
+
     async fn resolve(
         &self,
         _cap_id: &str,
@@ -92,6 +107,18 @@ impl CompiledCeiling for CredentialsCeiling {
 mod tests {
     use super::*;
     use crate::grant::PolicyMode;
+
+    #[test]
+    fn creds_alias_and_no_shorthand() {
+        let p = CredentialsProvider;
+        assert_eq!(p.shorthand_help().unwrap().alias, Some("creds"));
+        assert_eq!(
+            p.parse_shorthand("act:credentials", "x")
+                .unwrap_err()
+                .to_string(),
+            "act:credentials takes no constraint; use --allow creds"
+        );
+    }
 
     fn grant(mode: PolicyMode) -> CapabilityGrant {
         CapabilityGrant {

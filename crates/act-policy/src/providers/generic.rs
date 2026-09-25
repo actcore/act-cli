@@ -31,6 +31,17 @@ pub struct GenericProvider;
 
 #[async_trait::async_trait]
 impl CapabilityProvider for GenericProvider {
+    /// `<class>=<glob>` constrains the `key` dimension; any other dimension
+    /// takes `--grant`.
+    fn parse_shorthand(&self, _cap_id: &str, s: &str) -> Result<serde_json::Value, PolicyError> {
+        if s.is_empty() {
+            return Err(PolicyError::Shorthand("empty constraint".into()));
+        }
+        globset::Glob::new(s)
+            .map_err(|e| PolicyError::Shorthand(format!("invalid glob `{s}`: {e}")))?;
+        Ok(serde_json::json!({ KEY_DIMENSION: s }))
+    }
+
     async fn resolve(
         &self,
         _cap_id: &str,
@@ -248,6 +259,45 @@ mod tests {
     use crate::Decision;
     use crate::grant::{CapabilityGrant, PolicyMode};
     use crate::provider::{CapabilityProvider, ResourceOp};
+
+    #[test]
+    fn generic_shorthand_is_a_key_glob() {
+        let p = GenericProvider;
+        assert_eq!(
+            p.parse_shorthand("db:drop", "test_*").unwrap(),
+            serde_json::json!({"key":"test_*"})
+        );
+        assert_eq!(
+            p.parse_shorthand("db:drop", "").unwrap_err().to_string(),
+            "empty constraint"
+        );
+        assert!(
+            p.parse_shorthand("db:drop", "a[")
+                .unwrap_err()
+                .to_string()
+                .starts_with("invalid glob `a[`")
+        );
+    }
+
+    #[tokio::test]
+    async fn generic_shorthand_is_equivalent_to_json() {
+        let declared = vec![serde_json::json!({"key":"*"})];
+        let op = |k: &str| ResourceOp {
+            cap_id: "db:drop".into(),
+            key: k.into(),
+            action: String::new(),
+            attrs: serde_json::json!({}),
+        };
+        crate::shorthand::assert_equivalent(
+            &GenericProvider,
+            "db:drop",
+            &declared,
+            "test_*",
+            serde_json::json!({"key":"test_*"}),
+            &[op("test_events"), op("production")],
+        )
+        .await;
+    }
 
     #[tokio::test]
     async fn generic_provider_globs_args() {
