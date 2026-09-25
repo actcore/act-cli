@@ -107,7 +107,7 @@ struct Cli {
 
 #[derive(clap::Subcommand)]
 enum Command {
-    /// Load a .wasm component and serve it (HTTP or MCP)
+    /// Load a .wasm component and serve it over MCP (stdio, or Streamable HTTP with `--http`)
     Run {
         /// Component reference (path, URL, OCI ref, or name)
         component: ComponentRef,
