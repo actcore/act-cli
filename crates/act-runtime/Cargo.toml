@@ -17,9 +17,9 @@ workspace = true
 
 [dependencies]
 act-types.workspace = true
-act-store = { version = "0.14.2", path = "../act-store" }
-act-policy = { version = "0.14.2", path = "../act-policy" }
-act-credentials = { version = "0.14.2", path = "../act-credentials" }
+act-store = { version = "0.14.3", path = "../act-store" }
+act-policy = { version = "0.14.3", path = "../act-policy" }
+act-credentials = { version = "0.14.3", path = "../act-credentials" }
 wasmparser.workspace = true
 wasmtime = "49"
 wasmtime-wasi = { version = "49", default-features = false, features = ["p2", "p3"] }

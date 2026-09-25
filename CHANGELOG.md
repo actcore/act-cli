@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.3] - 2026-09-26
+
+A security fix for the capability policy: upgrade if you grant or deny
+network access by host.
+
 ### Security
 - **A host rule can no longer be sidestepped by respelling the host.** Hosts
   were compared as strings, so a deny on `127.0.0.1` let `127.1`,
