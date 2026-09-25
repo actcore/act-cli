@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-09-25
+
+**This patch release changes the public API of two library crates.**
+`act-policy`'s `PendingConsent` gains a field (`asked_by`), `act-runtime`'s
+`ConsentRequest` gains one (`ask`), and `act-runtime`'s
+`PolicyFilesystemCtxView` loses one (`mode`). Code that builds either of the
+first two with a struct literal, or reads the third, stops compiling on
+`cargo update`; pin `=0.14.0` to stay where you are. The `act` and
+`act-build` binaries are unaffected.
+
+### Added
+- **wasip3 components get a filesystem, held to the grant.** In 0.14.0 a
+  component built for `wasm32-wasip3` got no filesystem under any grant — not
+  even `--allow wasi:filesystem`. Now every p3 path operation (`open-at`,
+  `stat-at`, `rename-at`, `link-at`, …) is checked exactly as for wasip2: the
+  grant's allow rules and `ro`/`rw` modes, `ask` prompting, and a decision in
+  the audit trail for each. Reads and writes stream through
+  `read-via-stream` / `write-via-stream` as usual.
+- **Consent for hosts serving many agents** (`act-policy`, `act-runtime`).
+  `ConsentQueue::changes()` announces when the set of waiting questions
+  changes, so a window can redraw instead of polling. A question can name the
+  agent that asked (`ConsentQueue::ask_for`, `PendingConsent::asked_by`), shown
+  to the person deciding and never used for the decision.
+  `DecisionCache::per_call()` keeps an "allow once" answer for one call rather
+  than the whole run. `act` itself keeps the run-scoped cache and its prompts
+  are unchanged.
+
+### Changed (library API)
+- `ConsentRequest` carries the structured `ask` beside the rendered line, and
+  the `*_servicing_consent` answer callback receives it.
+- `PolicyFilesystemCtxView` no longer has a `mode` field; it only drove the
+  removed p3 preopen kill-switch.
+
 ## [0.14.0] - 2026-09-23
 
 One HTTP stack instead of two. `act` and `act-build` now talk to OCI
