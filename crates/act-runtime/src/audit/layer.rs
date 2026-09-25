@@ -76,7 +76,11 @@ impl AuditWriter for StderrWriter {
 
 /// Host-supplied text for the line under "declared but not granted": given a
 /// capability id, the flag (or other action) that would grant it.
-pub type GrantHint = std::sync::Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+///
+/// `RefUnwindSafe` keeps `AuditLayer` itself `UnwindSafe`, as it was before
+/// the callback existed; a plain `fn` satisfies it.
+pub type GrantHint =
+    std::sync::Arc<dyn Fn(&str) -> Option<String> + Send + Sync + std::panic::RefUnwindSafe>;
 
 pub struct AuditLayer<W> {
     writer: W,
@@ -1055,6 +1059,14 @@ mod tests {
         assert_eq!(out.len(), 3, "header + warning + hint, got {out:?}");
         assert!(out[1].contains("not granted"), "got {}", out[1]);
         assert_eq!(out[2], "audit:   hint: hint for wasi:http");
+    }
+
+    /// `AuditLayer` was `UnwindSafe` before the hint callback existed; the
+    /// callback must not take that away from embedders (a semver break).
+    #[test]
+    fn audit_layer_stays_unwind_safe() {
+        fn assert_unwind_safe<T: std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
+        assert_unwind_safe::<AuditLayer<StderrWriter>>();
     }
 
     #[test]
