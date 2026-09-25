@@ -29,7 +29,7 @@ http.workspace = true
 ciborium.workspace = true
 dirs.workspace = true
 json-patch = "4"
-act-store = { version = "0.14.1", path = "../crates/act-store" }
+act-store = { version = "0.14.2", path = "../crates/act-store" }
 oci-spec = "0.10.0"
 # Canonical-JSON formatter: sorted keys, no insignificant whitespace, which is
 # manifests on push, so our computed digest equals the registry's stored one.

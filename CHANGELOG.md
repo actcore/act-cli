@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-09-26
+
+**Upgrade from 0.14.1: it ships a DNS parser with a known vulnerability.**
+This patch release also adds one variant to a public enum in `act-policy`
+(`PolicyError::Shorthand`): code that `match`es `PolicyError` exhaustively
+stops compiling on `cargo update`; pin `=0.14.1` of the library crates to stay
+where you are. The `act` and `act-build` binaries are unaffected.
+
+### Security
+- **`domain` 0.12.3 (RUSTSEC-2026-0310).** `act` parses the SVCB/HTTPS DNS
+  answers it looks up before connecting with the `domain` crate; 0.12.2 could
+  panic or exhaust CPU and memory on a malicious DNS response. Every 0.14.1
+  binary is affected.
+
 ### Added
 - **`--allow` / `--deny` take a short rule**: `--allow 'fs=/data/**'`,
   `--allow 'http=https://api.example.com'`, `--allow 'sockets=db.local:5432/tcp'`,
@@ -24,6 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `run`/`call`/`info --help` list the capability classes and their shorthand.
 - The audit's "declared but not granted" warning is followed by the flag that
   would grant the class.
+
+### Changed (library API)
+- `act-policy`: `PolicyError` gains a `Shorthand` variant, and
+  `CapabilityProvider` gains `shorthand_help`, `parse_shorthand` and
+  `parse_shorthand_rule` (all with defaults). `act-runtime`: `AuditLayer`
+  gains `with_grant_hint`.
 
 ## [0.14.1] - 2026-09-25
 
