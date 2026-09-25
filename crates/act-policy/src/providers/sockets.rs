@@ -14,6 +14,32 @@ pub struct SocketsProvider;
 
 #[async_trait::async_trait]
 impl CapabilityProvider for SocketsProvider {
+    fn shorthand_help(&self) -> Option<crate::shorthand::ShorthandHelp> {
+        Some(crate::shorthand::ShorthandHelp {
+            alias: Some("sockets"),
+            syntax: "host[:port][/tcp|/udp]",
+            examples: &["sockets=db.local:5432/tcp"],
+            placeholder: "<host:port>",
+        })
+    }
+
+    fn parse_shorthand(&self, _cap_id: &str, s: &str) -> Result<serde_json::Value, PolicyError> {
+        let (target, proto) = if let Some(t) = s.strip_suffix("/tcp") {
+            (t, Some("tcp"))
+        } else if let Some(t) = s.strip_suffix("/udp") {
+            (t, Some("udp"))
+        } else {
+            (s, None)
+        };
+        let mut m = crate::shorthand::parse_net_target(target)
+            .map_err(PolicyError::Shorthand)?
+            .into_json();
+        if let Some(p) = proto {
+            m.insert("protocols".into(), serde_json::json!([p]));
+        }
+        Ok(serde_json::Value::Object(m))
+    }
+
     async fn resolve(
         &self,
         cap_id: &str,
@@ -257,6 +283,87 @@ mod tests {
     use crate::grant::{CapabilityGrant, PolicyMode};
     use crate::provider::{CapabilityProvider, ResourceOp};
     use serde_json::json;
+
+    fn so_sh(s: &str) -> Result<serde_json::Value, String> {
+        SocketsProvider
+            .parse_shorthand("wasi:sockets", s)
+            .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn sockets_shorthand_forms_and_errors() {
+        assert_eq!(
+            so_sh("db.local:5432/tcp").unwrap(),
+            json!({"host":"db.local","ports":[5432],"protocols":["tcp"]})
+        );
+        assert_eq!(
+            so_sh("[fd00::1]:53/udp").unwrap(),
+            json!({"cidr":"fd00::1/128","ports":[53],"protocols":["udp"]})
+        );
+        assert_eq!(
+            so_sh("10.0.0.0/8/tcp").unwrap(),
+            json!({"cidr":"10.0.0.0/8","protocols":["tcp"]})
+        );
+        assert_eq!(so_sh("10.0.0.0/8").unwrap(), json!({"cidr":"10.0.0.0/8"}));
+        assert_eq!(
+            so_sh("db.local:5432").unwrap(),
+            json!({"host":"db.local","ports":[5432]})
+        );
+        assert_eq!(
+            so_sh("db.local/sctp").unwrap_err(),
+            "`db.local/sctp` is not a valid CIDR"
+        );
+    }
+
+    #[test]
+    fn sockets_shorthand_help() {
+        let h = SocketsProvider.shorthand_help().unwrap();
+        assert_eq!((h.alias, h.placeholder), (Some("sockets"), "<host:port>"));
+    }
+
+    #[tokio::test]
+    async fn sockets_shorthand_is_equivalent_to_json() {
+        let declared = vec![
+            json!({"cidr":"10.0.0.0/8"}),
+            json!({"cidr":"192.168.0.0/16"}),
+            // Exact: the sockets intersection keeps a user CIDR only when an
+            // identical one is declared (a wider declared range does not
+            // cover it — a separate, pre-existing limitation).
+            json!({"cidr":"fd00::1/128"}),
+        ];
+        let op = |key: &str, proto: &str| ResourceOp {
+            cap_id: "wasi:sockets".into(),
+            key: key.into(),
+            action: String::new(),
+            attrs: json!({"protocol": proto}),
+        };
+        let ops = [
+            op("10.1.2.3:5432", "tcp"),
+            op("10.1.2.3:5432", "udp"),
+            op("192.168.1.1:5432", "tcp"),
+            // The host writes socket keys as `ip:port`, IPv6 unbracketed.
+            op("fd00::1:53", "udp"),
+            op("fd00::2:53", "udp"),
+        ];
+        crate::shorthand::assert_equivalent(
+            &SocketsProvider,
+            "wasi:sockets",
+            &declared,
+            "[fd00::1]:53/udp",
+            json!({"cidr":"fd00::1/128","ports":[53],"protocols":["udp"]}),
+            &ops,
+        )
+        .await;
+        crate::shorthand::assert_equivalent(
+            &SocketsProvider,
+            "wasi:sockets",
+            &declared,
+            "10.0.0.0/8/tcp",
+            json!({"cidr":"10.0.0.0/8","protocols":["tcp"]}),
+            &ops,
+        )
+        .await;
+    }
 
     // IP-literal rule (no DNS) → exercises host/port/protocol matching.
     #[tokio::test]

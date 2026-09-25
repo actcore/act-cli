@@ -14,6 +14,68 @@ pub struct HttpProvider;
 
 #[async_trait::async_trait]
 impl CapabilityProvider for HttpProvider {
+    fn shorthand_help(&self) -> Option<crate::shorthand::ShorthandHelp> {
+        Some(crate::shorthand::ShorthandHelp {
+            alias: Some("http"),
+            syntax: "[scheme://]host[:port]",
+            examples: &["http=api.example.com", "http=https://*.github.com"],
+            placeholder: "<host>",
+        })
+    }
+
+    fn parse_shorthand(&self, _cap_id: &str, s: &str) -> Result<serde_json::Value, PolicyError> {
+        let (scheme, rest) = match s.split_once("://") {
+            Some((sc, r)) if sc == "http" || sc == "https" => (Some(sc), r),
+            Some((sc, _)) => {
+                return Err(PolicyError::Shorthand(format!(
+                    "unknown scheme `{sc}` (expected `http` or `https`)"
+                )));
+            }
+            None => (None, s),
+        };
+        // A path after the authority makes this a URL, not a grant. A CIDR
+        // also contains `/`, so only a non-CIDR tail counts as a path.
+        let search_from = if rest.starts_with('[') {
+            rest.find(']').unwrap_or(0)
+        } else {
+            0
+        };
+        if let Some(i) = rest[search_from..].find('/').map(|i| i + search_from)
+            && rest.parse::<cidr::IpCidr>().is_err()
+        {
+            return Err(PolicyError::Shorthand(format!(
+                "a path is not part of an http grant; drop `{}`",
+                &rest[i..]
+            )));
+        }
+        let target = crate::shorthand::parse_net_target(rest).map_err(PolicyError::Shorthand)?;
+        // An http allow rule without a host never survives the ceiling
+        // intersection (declared http rules are hosts), so a CIDR would grant
+        // nothing. Refuse it rather than hand out a grant that does not work.
+        if target.host.is_none() && !rest.starts_with('[') {
+            return Err(PolicyError::Shorthand(
+                "wasi:http grants are matched against hosts; a CIDR range would grant nothing — name a host".into(),
+            ));
+        }
+        // `Uri::host()` keeps IPv6 brackets, and hosts are compared as
+        // strings, so a bracketed address stays a bracketed host.
+        let mut m = if rest.starts_with('[') {
+            let bracketed = &rest[..=rest.find(']').unwrap_or(0)];
+            let mut m = serde_json::Map::new();
+            m.insert("host".into(), bracketed.into());
+            if let Some(p) = target.port {
+                m.insert("ports".into(), serde_json::json!([p]));
+            }
+            m
+        } else {
+            target.into_json()
+        };
+        if let Some(sc) = scheme {
+            m.insert("scheme".into(), sc.into());
+        }
+        Ok(serde_json::Value::Object(m))
+    }
+
     async fn resolve(
         &self,
         cap_id: &str,
@@ -269,6 +331,95 @@ mod tests {
     use crate::grant::{CapabilityGrant, PolicyMode};
     use crate::provider::{CapabilityProvider, ResourceOp};
     use serde_json::json;
+
+    fn http_sh(s: &str) -> Result<serde_json::Value, String> {
+        HttpProvider
+            .parse_shorthand("wasi:http", s)
+            .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn http_shorthand_forms_and_errors() {
+        assert_eq!(
+            http_sh("api.example.com").unwrap(),
+            json!({"host":"api.example.com"})
+        );
+        assert_eq!(
+            http_sh("https://api.example.com").unwrap(),
+            json!({"host":"api.example.com","scheme":"https"})
+        );
+        // IPv6 stays bracketed: `Uri::host()` yields `[::1]`, and the host
+        // matcher compares that string.
+        assert_eq!(
+            http_sh("http://[::1]:8080").unwrap(),
+            json!({"host":"[::1]","ports":[8080],"scheme":"http"})
+        );
+        assert_eq!(
+            http_sh("127.0.0.1:8080").unwrap(),
+            json!({"host":"127.0.0.1","ports":[8080]})
+        );
+        // An http allow rule without a host is dropped by the ceiling
+        // intersection, so a CIDR here would grant nothing: refuse it.
+        assert_eq!(
+            http_sh("10.0.0.0/8").unwrap_err(),
+            "wasi:http grants are matched against hosts; a CIDR range would grant nothing — name a host"
+        );
+        assert_eq!(
+            http_sh("ftp://x.com").unwrap_err(),
+            "unknown scheme `ftp` (expected `http` or `https`)"
+        );
+        assert_eq!(
+            http_sh("https://api.example.com/v1").unwrap_err(),
+            "a path is not part of an http grant; drop `/v1`"
+        );
+    }
+
+    #[test]
+    fn http_shorthand_help() {
+        let h = HttpProvider.shorthand_help().unwrap();
+        assert_eq!((h.alias, h.placeholder), (Some("http"), "<host>"));
+    }
+
+    #[tokio::test]
+    async fn http_shorthand_is_equivalent_to_json() {
+        // Declared ceilings take hosts only (`HttpAllow`); CIDRs appear in grants.
+        let declared = vec![
+            json!({"host":"api.example.com"}),
+            json!({"host":"[::1]"}),
+            json!({"host":"[::2]"}),
+        ];
+        let op = |host: &str, port: u16, scheme: &str| ResourceOp {
+            cap_id: "wasi:http".into(),
+            key: format!("{host}:{port}"),
+            action: "GET".into(),
+            attrs: json!({"scheme": scheme}),
+        };
+        let ops = [
+            op("api.example.com", 443, "https"),
+            op("api.example.com", 80, "http"),
+            op("evil.example.net", 443, "https"),
+            op("[::1]", 8080, "http"),
+            op("[::2]", 8080, "http"),
+        ];
+        for (short, json_rule) in [
+            ("api.example.com", json!({"host":"api.example.com"})),
+            (
+                "https://api.example.com:443",
+                json!({"host":"api.example.com","ports":[443],"scheme":"https"}),
+            ),
+            ("[::1]:8080", json!({"host":"[::1]","ports":[8080]})),
+        ] {
+            crate::shorthand::assert_equivalent(
+                &HttpProvider,
+                "wasi:http",
+                &declared,
+                short,
+                json_rule,
+                &ops,
+            )
+            .await;
+        }
+    }
 
     #[tokio::test]
     async fn http_provider_matches_host_and_method() {
