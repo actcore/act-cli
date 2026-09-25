@@ -23,6 +23,10 @@ pub enum PolicyError {
         #[source]
         source: globset::Error,
     },
+    /// A `--allow` / `--deny` shorthand the provider could not read. The
+    /// message is complete; the CLI prefixes the flag and token.
+    #[error("{0}")]
+    Shorthand(String),
     #[error("capability {cap}: {source}")]
     Capability {
         cap: String,

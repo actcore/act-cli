@@ -12,6 +12,7 @@ pub mod grant;
 pub mod net;
 pub mod provider;
 pub mod providers;
+pub mod shorthand;
 
 #[cfg(feature = "host")]
 pub mod consent;

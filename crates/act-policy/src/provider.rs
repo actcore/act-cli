@@ -41,6 +41,21 @@ pub trait CapabilityProvider: Send + Sync {
         declared: Option<&[serde_json::Value]>,
         grant: &CapabilityGrant,
     ) -> Result<Box<dyn CompiledCeiling>, PolicyError>;
+
+    /// Help for this class's `--allow`/`--deny` shorthand and its alias.
+    /// `None` = no alias, no shorthand.
+    fn shorthand_help(&self) -> Option<crate::shorthand::ShorthandHelp> {
+        None
+    }
+
+    /// Parse the part after `=` in `--allow <class>=<s>` into the one JSON
+    /// constraint object `--grant` accepts for this class. Must not invent
+    /// semantics: the result goes through the ordinary grant path.
+    fn parse_shorthand(&self, cap_id: &str, _s: &str) -> Result<serde_json::Value, PolicyError> {
+        Err(PolicyError::Shorthand(format!(
+            "{cap_id} has no shorthand; use --grant"
+        )))
+    }
 }
 
 /// A decision plus, when the provider can attribute one, the ceiling rule
@@ -93,6 +108,43 @@ impl ProviderRegistry {
 
     pub fn register(&mut self, pattern: &str, provider: Arc<dyn CapabilityProvider>) {
         self.entries.push((pattern.to_string(), provider));
+    }
+
+    /// Exact (non-pattern) registered ids with their shorthand help, in
+    /// registration order. This is the "built-in classes" list for `--help`.
+    pub fn builtins(&self) -> Vec<(String, Option<crate::shorthand::ShorthandHelp>)> {
+        self.entries
+            .iter()
+            .filter(|(k, _)| !k.ends_with('*'))
+            .map(|(k, p)| (k.clone(), p.shorthand_help()))
+            .collect()
+    }
+
+    /// Resolve an alias to its full id. Anything that is not an alias —
+    /// including every `ns:name` id — is returned unchanged.
+    pub fn canonical_id(&self, s: &str) -> String {
+        self.entries
+            .iter()
+            .filter(|(k, _)| !k.ends_with('*'))
+            .find(|(_, p)| p.shorthand_help().and_then(|h| h.alias) == Some(s))
+            .map_or_else(|| s.to_string(), |(k, _)| k.clone())
+    }
+
+    /// The alias of an exact registered id, if its provider declares one.
+    pub fn alias_of(&self, cap_id: &str) -> Option<&'static str> {
+        self.entries
+            .iter()
+            .find(|(k, _)| k == cap_id)
+            .and_then(|(_, p)| p.shorthand_help())
+            .and_then(|h| h.alias)
+    }
+
+    /// Every alias the registry knows, in registration order.
+    pub fn known_aliases(&self) -> Vec<&'static str> {
+        self.builtins()
+            .into_iter()
+            .filter_map(|(_, h)| h.and_then(|h| h.alias))
+            .collect()
     }
 
     /// Priority: exact id > longest matching `*`-prefix > generic fallback.
@@ -150,6 +202,53 @@ mod tests {
             Ok(Box::new(TagCeiling(self.0)))
         }
     }
+    #[test]
+    fn default_parse_shorthand_errors_and_help_is_none() {
+        let p = Tagged("x");
+        assert!(p.shorthand_help().is_none());
+        let err = p
+            .parse_shorthand("acme:thing", "v")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, "acme:thing has no shorthand; use --grant");
+    }
+
+    struct Aliased;
+    #[async_trait::async_trait]
+    impl CapabilityProvider for Aliased {
+        async fn resolve(
+            &self,
+            _: &str,
+            _: Option<&[serde_json::Value]>,
+            _: &crate::grant::CapabilityGrant,
+        ) -> Result<Box<dyn CompiledCeiling>, crate::grant::PolicyError> {
+            unreachable!()
+        }
+        fn shorthand_help(&self) -> Option<crate::shorthand::ShorthandHelp> {
+            Some(crate::shorthand::ShorthandHelp {
+                alias: Some("ex"),
+                syntax: "<v>",
+                examples: &["ex=1"],
+                placeholder: "<v>",
+            })
+        }
+    }
+
+    #[test]
+    fn registry_aliases_come_from_providers() {
+        let mut r = ProviderRegistry::new(Arc::new(Tagged("generic")));
+        r.register("acme:example", Arc::new(Aliased));
+        r.register("db:*", Arc::new(Tagged("db")));
+        assert_eq!(r.canonical_id("ex"), "acme:example");
+        assert_eq!(r.canonical_id("acme:example"), "acme:example");
+        assert_eq!(r.canonical_id("db:drop"), "db:drop");
+        assert_eq!(r.alias_of("acme:example"), Some("ex"));
+        assert_eq!(r.alias_of("db:drop"), None);
+        assert_eq!(r.known_aliases(), vec!["ex"]);
+        let ids: Vec<String> = r.builtins().into_iter().map(|(id, _)| id).collect();
+        assert_eq!(ids, vec!["acme:example".to_string()]); // `db:*` is a pattern, not listed
+    }
+
     struct TagCeiling(&'static str);
     impl CompiledCeiling for TagCeiling {
         fn classify(&self, _op: &ResourceOp) -> crate::Decision {
