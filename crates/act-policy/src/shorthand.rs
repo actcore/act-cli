@@ -16,6 +16,14 @@ pub struct ShorthandHelp {
     pub placeholder: &'static str,
 }
 
+/// Which list a shorthand rule is going into. Some forms are only useful on
+/// one side — an http CIDR can be denied but never granted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleSide {
+    Allow,
+    Deny,
+}
+
 /// Host part of a network shorthand, before the class adds scheme/protocol.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct NetTarget {

@@ -13,7 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--deny 'fs=/data/secret/**'`. Each is exactly one `--grant` rule, parsed by
   the capability's provider; filesystem rules are read-write unless `:ro` is
   given, and never exceed what the component declared. A constrained `--deny`
-  narrows whatever the other layers granted and never grants.
+  narrows whatever the other layers granted and never grants; a constrained
+  `--allow` keeps the deny rules the profile or config set for that class.
+  `--deny 'http=169.254.0.0/16'` blocks a range; `--allow` on http takes hosts
+  only, since a range there would grant nothing. A rule on a pattern id
+  (`db:*=…`), a mistyped fs mode (`:RO`, `:r`) and stray whitespace are errors
+  rather than rules that never match.
 - **Class aliases** `fs`, `http`, `sockets`, `creds`, accepted in flags, in
   `--grant` keys and in `[policy]`. Output always shows the full id.
 - `run`/`call`/`info --help` list the capability classes and their shorthand.

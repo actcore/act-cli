@@ -23,6 +23,25 @@ impl CapabilityProvider for HttpProvider {
         })
     }
 
+    /// An http allow rule without a host never survives the intersection
+    /// with the component's ceiling (declared http rules are hosts), so a
+    /// CIDR there would grant nothing. As a deny it works — the resolver
+    /// filter and IP literals honour it — so only the allow side refuses it.
+    fn parse_shorthand_rule(
+        &self,
+        cap_id: &str,
+        s: &str,
+        side: crate::shorthand::RuleSide,
+    ) -> Result<serde_json::Value, PolicyError> {
+        let rule = self.parse_shorthand(cap_id, s)?;
+        if side == crate::shorthand::RuleSide::Allow && rule.get("host").is_none() {
+            return Err(PolicyError::Shorthand(
+                "an http allow rule is matched against hosts; a CIDR range would grant nothing — name a host (a range can be denied)".into(),
+            ));
+        }
+        Ok(rule)
+    }
+
     fn parse_shorthand(&self, _cap_id: &str, s: &str) -> Result<serde_json::Value, PolicyError> {
         let (scheme, rest) = match s.split_once("://") {
             Some((sc, r)) if sc == "http" || sc == "https" => (Some(sc), r),
@@ -49,14 +68,6 @@ impl CapabilityProvider for HttpProvider {
             )));
         }
         let target = crate::shorthand::parse_net_target(rest).map_err(PolicyError::Shorthand)?;
-        // An http allow rule without a host never survives the ceiling
-        // intersection (declared http rules are hosts), so a CIDR would grant
-        // nothing. Refuse it rather than hand out a grant that does not work.
-        if target.host.is_none() && !rest.starts_with('[') {
-            return Err(PolicyError::Shorthand(
-                "wasi:http grants are matched against hosts; a CIDR range would grant nothing — name a host".into(),
-            ));
-        }
         // `Uri::host()` keeps IPv6 brackets, and hosts are compared as
         // strings, so a bracketed address stays a bracketed host.
         let mut m = if rest.starts_with('[') {
@@ -330,6 +341,7 @@ mod tests {
     use crate::Decision;
     use crate::grant::{CapabilityGrant, PolicyMode};
     use crate::provider::{CapabilityProvider, ResourceOp};
+    use crate::shorthand::RuleSide;
     use serde_json::json;
 
     fn http_sh(s: &str) -> Result<serde_json::Value, String> {
@@ -361,8 +373,19 @@ mod tests {
         // An http allow rule without a host is dropped by the ceiling
         // intersection, so a CIDR here would grant nothing: refuse it.
         assert_eq!(
-            http_sh("10.0.0.0/8").unwrap_err(),
-            "wasi:http grants are matched against hosts; a CIDR range would grant nothing — name a host"
+            HttpProvider
+                .parse_shorthand_rule("wasi:http", "10.0.0.0/8", RuleSide::Allow)
+                .unwrap_err()
+                .to_string(),
+            "an http allow rule is matched against hosts; a CIDR range would grant nothing — name a host (a range can be denied)"
+        );
+        // A CIDR deny does work (the resolver filter and IP literals), and is
+        // the spelling-proof way to block e.g. the metadata service.
+        assert_eq!(
+            HttpProvider
+                .parse_shorthand_rule("wasi:http", "169.254.0.0/16", RuleSide::Deny)
+                .unwrap(),
+            json!({"cidr":"169.254.0.0/16"})
         );
         assert_eq!(
             http_sh("ftp://x.com").unwrap_err(),

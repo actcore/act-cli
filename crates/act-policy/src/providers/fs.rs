@@ -31,11 +31,12 @@ impl CapabilityProvider for FsProvider {
         } else if let Some(p) = s.strip_suffix(":rw") {
             (p, "rw")
         } else {
-            // `/data/**:wr` — a two-letter lowercase tail after the last `:`
-            // is almost certainly a mistyped mode, not part of a path.
+            // `/data/**:wr`, `:RO`, `:r` — a short all-letter tail after the
+            // last `:` is almost certainly a mistyped mode. Taken as part of
+            // the path it would make a --deny that never matches.
             if let Some((_, tail)) = s.rsplit_once(':')
-                && tail.len() == 2
-                && tail.bytes().all(|b| b.is_ascii_lowercase())
+                && (1..=3).contains(&tail.len())
+                && tail.bytes().all(|b| b.is_ascii_alphabetic())
             {
                 return Err(PolicyError::Shorthand(format!(
                     "unknown mode `{tail}` (expected `ro` or `rw`)"
@@ -233,6 +234,16 @@ mod tests {
         assert_eq!(
             fs_sh("/data/**:wr").unwrap_err(),
             "unknown mode `wr` (expected `ro` or `rw`)"
+        );
+        // A mistyped mode must never silently become part of the glob: on a
+        // --deny that would be a rule that never matches.
+        assert_eq!(
+            fs_sh("/data/**:RO").unwrap_err(),
+            "unknown mode `RO` (expected `ro` or `rw`)"
+        );
+        assert_eq!(
+            fs_sh("/data/**:r").unwrap_err(),
+            "unknown mode `r` (expected `ro` or `rw`)"
         );
     }
 

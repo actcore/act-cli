@@ -56,6 +56,18 @@ pub trait CapabilityProvider: Send + Sync {
             "{cap_id} has no shorthand; use --grant"
         )))
     }
+
+    /// `parse_shorthand` for a rule headed to a known side. Override when a
+    /// form is valid on only one side; the default ignores the side.
+    fn parse_shorthand_rule(
+        &self,
+        cap_id: &str,
+        s: &str,
+        side: crate::shorthand::RuleSide,
+    ) -> Result<serde_json::Value, PolicyError> {
+        let _ = side;
+        self.parse_shorthand(cap_id, s)
+    }
 }
 
 /// A decision plus, when the provider can attribute one, the ceiling rule

@@ -7,6 +7,7 @@
 //! resolved structs produced here.
 
 use act_policy::provider::ProviderRegistry;
+use act_policy::shorthand::RuleSide;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
@@ -196,6 +197,24 @@ fn parse_token<'a>(
         None => (raw, None),
     };
     let id = reg.canonical_id(class);
+    if let Some(c) = constraint {
+        if c.chars().any(char::is_control) {
+            anyhow::bail!(
+                "{flag} '{}': the rule contains a control character",
+                raw.escape_debug()
+            );
+        }
+        if c.trim() != c {
+            anyhow::bail!(
+                "{flag} '{raw}': the rule has leading or trailing whitespace, which would become part of it"
+            );
+        }
+        if class.ends_with('*') {
+            anyhow::bail!(
+                "{flag} '{raw}': `{class}` names a pattern, and a rule on it would not reach classes it matches that are granted by name — name one class"
+            );
+        }
+    }
     if id == class && !class.contains(':') {
         anyhow::bail!(
             "{flag} '{raw}': unknown class `{class}` (aliases: {}; or a full id such as wasi:filesystem or db:drop)",
@@ -229,12 +248,15 @@ fn canonical_keys<T>(
     Ok(out)
 }
 
-/// The CLI layer: per-class grants, plus constrained `--deny` rules that are
-/// added on top of whatever the lower layers resolved (never replacing them).
-type CliLayer = (
-    BTreeMap<String, CapabilityGrant>,
-    Vec<(String, serde_json::Value)>,
-);
+/// The CLI layer: per-class grants; constrained `--deny` rules, added on top
+/// of whatever the lower layers resolved (never replacing them); and the
+/// classes a constrained `--allow` created, which inherit the lower layers'
+/// deny rules — one narrow rule must not drop a profile's guardrails.
+struct CliLayer {
+    entries: BTreeMap<String, CapabilityGrant>,
+    deny_additions: Vec<(String, serde_json::Value)>,
+    inherit_deny: Vec<String>,
+}
 
 impl CliGrants {
     pub fn is_empty(&self) -> bool {
@@ -277,11 +299,12 @@ impl CliGrants {
                 }
             }
         }
-        let parse = |t: &Token| -> anyhow::Result<serde_json::Value> {
+        let parse = |t: &Token, side| -> anyhow::Result<serde_json::Value> {
             reg.lookup(&t.id)
-                .parse_shorthand(&t.id, t.constraint.unwrap_or_default())
+                .parse_shorthand_rule(&t.id, t.constraint.unwrap_or_default(), side)
                 .map_err(|e| anyhow::anyhow!("{} '{}': {e}", t.flag, t.raw))
         };
+        let mut inherit_deny = Vec::new();
         for t in &allow {
             if t.constraint.is_none() {
                 entries.insert(
@@ -292,7 +315,10 @@ impl CliGrants {
                     },
                 );
             } else {
-                let rule = parse(t)?;
+                let rule = parse(t, RuleSide::Allow)?;
+                if !entries.contains_key(&t.id) {
+                    inherit_deny.push(t.id.clone());
+                }
                 entries
                     .entry(t.id.clone())
                     .or_insert_with(|| CapabilityGrant {
@@ -314,10 +340,14 @@ impl CliGrants {
                     },
                 );
             } else {
-                deny_additions.push((t.id.clone(), parse(t)?));
+                deny_additions.push((t.id.clone(), parse(t, RuleSide::Deny)?));
             }
         }
-        Ok((entries, deny_additions))
+        Ok(CliLayer {
+            entries,
+            deny_additions,
+            inherit_deny,
+        })
     }
 }
 
@@ -355,9 +385,18 @@ pub fn build_grant_policy(
     }
     let mut deny_additions = Vec::new();
     if !cli.is_empty() {
-        let (e, extra) = cli.layer(&reg)?;
-        apply(None, e); // the CLI never sets a global default
-        deny_additions = extra;
+        let layer = cli.layer(&reg)?;
+        let lower = gp.clone();
+        let mut entries = layer.entries;
+        for id in &layer.inherit_deny {
+            if let Some(e) = entries.get_mut(id) {
+                e.deny.extend(lower.resolve(id).deny);
+            }
+        }
+        for (k, v) in entries {
+            gp.entries.insert(k, v); // the CLI never sets a global default
+        }
+        deny_additions = layer.deny_additions;
     }
     // A constrained --deny narrows what the layers above resolved: it keeps
     // their mode and allow rules and only adds the deny rule.
@@ -829,6 +868,67 @@ deny = [{ cidr = "127.0.0.0/8", ports = [5900], "except-ports" = [5901] }]
         assert_eq!(
             g.allow,
             vec![serde_json::json!({"path":"/data/**","mode":"rw"})]
+        );
+        assert_eq!(
+            g.deny,
+            vec![serde_json::json!({"path":"/data/secret/**","mode":"rw"})]
+        );
+    }
+
+    #[test]
+    fn constrained_rule_on_a_pattern_id_is_an_error() {
+        let e = gp(&cli(&[], &["db:*=prod_*"], &[]))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("names a pattern"), "{e}");
+        let e = gp(&cli(&["db:*=test_*"], &[], &[]))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("names a pattern"), "{e}");
+    }
+
+    #[test]
+    fn surrounding_whitespace_or_control_chars_are_an_error() {
+        let e = gp(&cli(&[], &["http=evil.com "], &[]))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("whitespace"), "{e}");
+        let e = gp(&cli(&["fs=/data/**\n"], &[], &[]))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("control"), "{e}");
+        // Interior spaces are legitimate in paths.
+        assert!(gp(&cli(&["fs=/data/My Files/**"], &[], &[])).is_ok());
+    }
+
+    #[test]
+    fn http_cidr_deny_is_accepted_but_allow_is_not() {
+        assert!(gp(&cli(&[], &["http=169.254.0.0/16"], &[])).is_ok());
+        let e = gp(&cli(&["http=10.0.0.0/8"], &[], &[]))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("would grant nothing"), "{e}");
+    }
+
+    /// A constrained --allow is one narrow rule: it must not drop the
+    /// guardrails (deny rules) a profile put on the same class.
+    #[test]
+    fn constrained_allow_keeps_profile_deny_rules() {
+        let cfg: ConfigFile = toml::from_str(
+            r#"
+            [profile.p.policy."wasi:filesystem"]
+            mode = "allowlist"
+            allow = [{ path = "/data/**", mode = "rw" }]
+            deny = [{ path = "/data/secret/**", mode = "rw" }]
+        "#,
+        )
+        .unwrap();
+        let prof = get_profile(&cfg, "p").unwrap();
+        let p = build_grant_policy(&cfg, Some(prof), &cli(&["fs=/data/**:ro"], &[], &[])).unwrap();
+        let g = p.resolve("wasi:filesystem");
+        assert_eq!(
+            g.allow,
+            vec![serde_json::json!({"path":"/data/**","mode":"ro"})]
         );
         assert_eq!(
             g.deny,
