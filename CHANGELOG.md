@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`--allow` / `--deny` take a short rule**: `--allow 'fs=/data/**'`,
+  `--allow 'http=https://api.example.com'`, `--allow 'sockets=db.local:5432/tcp'`,
+  `--deny 'fs=/data/secret/**'`. Each is exactly one `--grant` rule, parsed by
+  the capability's provider; filesystem rules are read-write unless `:ro` is
+  given, and never exceed what the component declared. A constrained `--deny`
+  narrows whatever the other layers granted and never grants.
+- **Class aliases** `fs`, `http`, `sockets`, `creds`, accepted in flags, in
+  `--grant` keys and in `[policy]`. Output always shows the full id.
+- `run`/`call`/`info --help` list the capability classes and their shorthand.
+- The audit's "declared but not granted" warning is followed by the flag that
+  would grant the class.
+
 ## [0.14.1] - 2026-09-25
 
 **This patch release changes the public API of two library crates.**

@@ -30,17 +30,17 @@ Pre-built binaries available on [GitHub Releases](https://github.com/actcore/act
 act info --tools actpkg.dev/library/sqlite
 
 # Call a tool. sqlite is session-based: --session-args opens a session for
-# this one call. The grant lets it touch /data and nothing else.
+# this one call. --allow lets it touch /data and nothing else.
 act call actpkg.dev/library/sqlite query \
   --args '{"sql":"SELECT sqlite_version()"}' \
   --session-args '{"database_path":"/data/app.db"}' \
-  --grant '{"wasi:filesystem":{"mode":"allowlist","allow":[{"path":"/data/**","mode":"rw"}]}}'
+  --allow 'fs=/data/**'
 
 # Serve over MCP stdio
-act run --mcp actpkg.dev/library/sqlite --allow wasi:filesystem
+act run --mcp actpkg.dev/library/sqlite --allow 'fs=/data/**'
 
 # Serve over MCP Streamable HTTP, at http://[::1]:3000/mcp
-act run --mcp --http -l '[::1]:3000' actpkg.dev/library/sqlite --allow wasi:filesystem
+act run --mcp --http -l '[::1]:3000' actpkg.dev/library/sqlite --allow 'fs=/data/**'
 ```
 
 Components can be referenced as:
@@ -65,9 +65,25 @@ Remote components are cached in `~/.cache/act/components/`.
 | `secret`  | Store credentials a component declares (there is no `get`) |
 | `login`   | Provision a declared credential by prompting |
 
-Capabilities are granted with `--allow <id>`, `--deny <id>` and `--grant '<json>'`,
-or per profile in `~/.config/act/config.toml`. The default mode is `ask`: an
-interactive run prompts, a headless one denies.
+### Granting capabilities
+
+The default mode is `ask`: an interactive run prompts, a headless one denies.
+Grants come from flags, or per profile in `~/.config/act/config.toml`.
+
+| Flag | Effect |
+|---|---|
+| `--allow fs` | the whole declared ceiling of `wasi:filesystem` |
+| `--allow 'fs=/data/**'` | only `/data/**`, read-write (`fs=/data/**:ro` for read-only) |
+| `--allow 'http=https://api.example.com'` | one host (and scheme) |
+| `--allow 'sockets=db.local:5432/tcp'` | one host, port and protocol |
+| `--allow 'db:drop=test_*'` | a component-defined class, narrowed by key |
+| `--deny 'fs=/data/secret/**'` | carve a rule out of whatever else was granted |
+| `--grant '<json>'` | the full form, for anything the shorthand doesn't cover |
+
+Aliases: `fs` = `wasi:filesystem`, `http` = `wasi:http`, `sockets` = `wasi:sockets`,
+`creds` = `act:credentials`; output always shows the full id. IPv6 goes in
+brackets (`http=[::1]:8080`). A rule never exceeds what the component declared.
+`act run --help` lists every class and its shorthand.
 
 ### Audit trail
 
