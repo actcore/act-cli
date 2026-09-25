@@ -14,6 +14,41 @@ pub struct FsProvider;
 
 #[async_trait::async_trait]
 impl CapabilityProvider for FsProvider {
+    fn shorthand_help(&self) -> Option<crate::shorthand::ShorthandHelp> {
+        Some(crate::shorthand::ShorthandHelp {
+            alias: Some("fs"),
+            syntax: "<glob>[:ro|:rw]",
+            examples: &["fs=/data/**", "fs=~/notes/**:ro"],
+            placeholder: "<path>",
+        })
+    }
+
+    fn parse_shorthand(&self, _cap_id: &str, s: &str) -> Result<serde_json::Value, PolicyError> {
+        // Only a trailing `:ro` / `:rw` is a mode; every other `:` belongs to
+        // the path (Windows drive letters, odd file names).
+        let (path, mode) = if let Some(p) = s.strip_suffix(":ro") {
+            (p, "ro")
+        } else if let Some(p) = s.strip_suffix(":rw") {
+            (p, "rw")
+        } else {
+            // `/data/**:wr` — a two-letter lowercase tail after the last `:`
+            // is almost certainly a mistyped mode, not part of a path.
+            if let Some((_, tail)) = s.rsplit_once(':')
+                && tail.len() == 2
+                && tail.bytes().all(|b| b.is_ascii_lowercase())
+            {
+                return Err(PolicyError::Shorthand(format!(
+                    "unknown mode `{tail}` (expected `ro` or `rw`)"
+                )));
+            }
+            (s, "rw")
+        };
+        if path.is_empty() {
+            return Err(PolicyError::Shorthand("empty path".into()));
+        }
+        Ok(serde_json::json!({ "path": path, "mode": mode }))
+    }
+
     async fn resolve(
         &self,
         cap_id: &str,
@@ -150,6 +185,116 @@ mod tests {
     use crate::grant::{CapabilityGrant, PolicyMode};
     use crate::provider::{CapabilityProvider, ResourceOp};
     use serde_json::json;
+
+    fn fs_sh(s: &str) -> Result<serde_json::Value, String> {
+        FsProvider
+            .parse_shorthand("wasi:filesystem", s)
+            .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn fs_shorthand_forms() {
+        assert_eq!(
+            fs_sh("/data/**").unwrap(),
+            json!({"path":"/data/**","mode":"rw"})
+        );
+        assert_eq!(
+            fs_sh("/data/**:ro").unwrap(),
+            json!({"path":"/data/**","mode":"ro"})
+        );
+        assert_eq!(
+            fs_sh("/data/**:rw").unwrap(),
+            json!({"path":"/data/**","mode":"rw"})
+        );
+        assert_eq!(
+            fs_sh("~/notes/**:ro").unwrap(),
+            json!({"path":"~/notes/**","mode":"ro"})
+        );
+        // Windows drive letter: the colon is part of the path.
+        assert_eq!(
+            fs_sh(r"C:\data\**:rw").unwrap(),
+            json!({"path":r"C:\data\**","mode":"rw"})
+        );
+        assert_eq!(
+            fs_sh(r"C:\data\**").unwrap(),
+            json!({"path":r"C:\data\**","mode":"rw"})
+        );
+        // A path that really ends in ":ro" is written with an explicit mode.
+        assert_eq!(
+            fs_sh("/odd/name:ro:rw").unwrap(),
+            json!({"path":"/odd/name:ro","mode":"rw"})
+        );
+    }
+
+    #[test]
+    fn fs_shorthand_errors() {
+        assert_eq!(fs_sh("").unwrap_err(), "empty path");
+        assert_eq!(fs_sh(":ro").unwrap_err(), "empty path");
+        assert_eq!(
+            fs_sh("/data/**:wr").unwrap_err(),
+            "unknown mode `wr` (expected `ro` or `rw`)"
+        );
+    }
+
+    #[test]
+    fn fs_shorthand_help() {
+        let h = FsProvider.shorthand_help().unwrap();
+        assert_eq!(h.alias, Some("fs"));
+        assert_eq!(h.syntax, "<glob>[:ro|:rw]");
+        assert_eq!(h.placeholder, "<path>");
+    }
+
+    /// The shorthand must produce the same decisions as the JSON it stands for.
+    #[tokio::test]
+    async fn fs_shorthand_is_equivalent_to_json() {
+        let declared = vec![json!({"path":"/data/**","mode":"rw"})];
+        let op = |key: &str, action: &str| ResourceOp {
+            cap_id: "wasi:filesystem".into(),
+            key: key.into(),
+            action: action.into(),
+            attrs: serde_json::Value::Null,
+        };
+        let ops = [
+            op("/data/a", "read"),
+            op("/data/a", "write"),
+            op("/data/sub/b", "write"),
+            op("/etc/passwd", "read"),
+        ];
+        for (short, json_rule) in [
+            ("/data/**", json!({"path":"/data/**","mode":"rw"})),
+            ("/data/**:ro", json!({"path":"/data/**","mode":"ro"})),
+        ] {
+            let from_short = CapabilityGrant {
+                mode: PolicyMode::Allowlist,
+                allow: vec![
+                    FsProvider
+                        .parse_shorthand("wasi:filesystem", short)
+                        .unwrap(),
+                ],
+                deny: vec![],
+            };
+            let from_json = CapabilityGrant {
+                mode: PolicyMode::Allowlist,
+                allow: vec![json_rule],
+                deny: vec![],
+            };
+            let a = FsProvider
+                .resolve("wasi:filesystem", Some(&declared), &from_short)
+                .await
+                .unwrap();
+            let b = FsProvider
+                .resolve("wasi:filesystem", Some(&declared), &from_json)
+                .await
+                .unwrap();
+            let da: Vec<_> = ops.iter().map(|o| a.classify(o)).collect();
+            let db: Vec<_> = ops.iter().map(|o| b.classify(o)).collect();
+            assert_eq!(da, db, "shorthand {short} diverges from its JSON");
+            assert!(
+                da.contains(&Decision::Allow) && da.contains(&Decision::Deny),
+                "op set must exercise both outcomes for {short}: {da:?}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn fs_provider_enforces_ro_write_deny() {
