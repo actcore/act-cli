@@ -661,8 +661,8 @@ fn resolve_opts(opts: &CommonOpts) -> Result<ResolvedOpts> {
     };
     let cli_grants = config::CliGrants {
         grant_json: opts.grant.clone(),
-        allow_ids: opts.allow.clone(),
-        deny_ids: opts.deny.clone(),
+        allow: opts.allow.clone(),
+        deny: opts.deny.clone(),
     };
     let grant_policy = config::build_grant_policy(&config_file, profile, &cli_grants)?;
     let cli_metadata = parse_cli_metadata(

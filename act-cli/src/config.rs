@@ -6,6 +6,7 @@
 //! enforcement (custom WASI impls) lives in `runtime.rs` and consumes the
 //! resolved structs produced here.
 
+use act_policy::provider::ProviderRegistry;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
@@ -86,11 +87,15 @@ impl GrantToml {
 impl PolicyConfig {
     /// Returns the explicit default (None if unset) and per-id entries for
     /// layer-aware merging. Only a `Some` default should override the lower layer.
-    fn layer(&self) -> anyhow::Result<(Option<PolicyMode>, BTreeMap<String, CapabilityGrant>)> {
+    fn layer(
+        &self,
+        reg: &ProviderRegistry,
+    ) -> anyhow::Result<(Option<PolicyMode>, BTreeMap<String, CapabilityGrant>)> {
         let default = self.default.as_deref().map(PolicyMode::parse).transpose()?;
         let mut entries = BTreeMap::new();
-        for (id, g) in &self.entries {
-            entries.insert(id.clone(), g.to_grant()?);
+        let keyed = self.entries.iter().map(|(k, v)| (k.clone(), v));
+        for (id, g) in canonical_keys(reg, "[policy]", keyed)? {
+            entries.insert(id, g.to_grant()?);
         }
         Ok((default, entries))
     }
@@ -99,7 +104,7 @@ impl PolicyConfig {
     /// Used in tests for single-layer assertions.
     #[cfg(test)]
     fn to_grant_policy(&self) -> anyhow::Result<GrantPolicy> {
-        let (default, entries) = self.layer()?;
+        let (default, entries) = self.layer(&ProviderRegistry::with_builtins())?;
         Ok(GrantPolicy {
             default: default.unwrap_or(PolicyMode::Deny),
             entries,
@@ -161,52 +166,158 @@ pub fn get_profile<'a>(config: &'a ConfigFile, name: &str) -> Result<&'a Profile
 
 // ── Resolution ──
 
-/// CLI-supplied grants (from --grant / --allow / --deny).
+/// CLI-supplied grants: raw `--grant` JSON and raw `--allow` / `--deny` tokens
+/// (`<class>` or `<class>=<shorthand>`, the class by full id or alias).
 #[derive(Debug, Default)]
 pub struct CliGrants {
     /// Raw `--grant '<json>'` values (each a JSON object: id -> mode-string | {mode,allow,deny}).
     pub grant_json: Vec<String>,
-    /// `--allow <id>` → that id at mode=open.
-    pub allow_ids: Vec<String>,
-    /// `--deny <id>` → that id at mode=deny.
-    pub deny_ids: Vec<String>,
+    /// Raw `--allow` tokens.
+    pub allow: Vec<String>,
+    /// Raw `--deny` tokens.
+    pub deny: Vec<String>,
 }
+
+/// One parsed `--allow` / `--deny` token.
+struct Token<'a> {
+    flag: &'static str,
+    raw: &'a str,
+    id: String,
+    constraint: Option<&'a str>,
+}
+
+fn parse_token<'a>(
+    reg: &ProviderRegistry,
+    flag: &'static str,
+    raw: &'a str,
+) -> anyhow::Result<Token<'a>> {
+    let (class, constraint) = match raw.split_once('=') {
+        Some((c, s)) => (c, Some(s)),
+        None => (raw, None),
+    };
+    let id = reg.canonical_id(class);
+    if id == class && !class.contains(':') {
+        anyhow::bail!(
+            "{flag} '{raw}': unknown class `{class}` (aliases: {}; or a full id such as wasi:filesystem or db:drop)",
+            reg.known_aliases().join(", ")
+        );
+    }
+    Ok(Token {
+        flag,
+        raw,
+        id,
+        constraint,
+    })
+}
+
+/// Canonicalise the keys of one source (a `--grant` object or a `[policy]`
+/// table), rejecting two keys that name the same class.
+fn canonical_keys<T>(
+    reg: &ProviderRegistry,
+    source: &str,
+    entries: impl IntoIterator<Item = (String, T)>,
+) -> anyhow::Result<BTreeMap<String, T>> {
+    let mut out = BTreeMap::new();
+    let mut seen: BTreeMap<String, String> = BTreeMap::new();
+    for (k, v) in entries {
+        let id = reg.canonical_id(&k);
+        if let Some(prev) = seen.insert(id.clone(), k.clone()) {
+            anyhow::bail!("{source}: `{prev}` and `{k}` both name {id}");
+        }
+        out.insert(id, v);
+    }
+    Ok(out)
+}
+
+/// The CLI layer: per-class grants, plus constrained `--deny` rules that are
+/// added on top of whatever the lower layers resolved (never replacing them).
+type CliLayer = (
+    BTreeMap<String, CapabilityGrant>,
+    Vec<(String, serde_json::Value)>,
+);
 
 impl CliGrants {
     pub fn is_empty(&self) -> bool {
-        self.grant_json.is_empty() && self.allow_ids.is_empty() && self.deny_ids.is_empty()
+        self.grant_json.is_empty() && self.allow.is_empty() && self.deny.is_empty()
     }
 
-    /// Returns `(None, entries)`: CLI grants never set a global default; the
-    /// lower layer's default is always inherited.
-    fn layer(&self) -> anyhow::Result<(Option<PolicyMode>, BTreeMap<String, CapabilityGrant>)> {
-        let mut entries = BTreeMap::new();
+    fn layer(&self, reg: &ProviderRegistry) -> anyhow::Result<CliLayer> {
+        let mut entries: BTreeMap<String, CapabilityGrant> = BTreeMap::new();
         for raw in &self.grant_json {
             let map: BTreeMap<String, GrantToml> = serde_json::from_str(raw)
                 .context("--grant must be a JSON object: {\"id\": mode|{...}}")?;
-            for (id, g) in map {
+            for (id, g) in canonical_keys(reg, "--grant", map)? {
                 entries.insert(id, g.to_grant()?);
             }
         }
-        for id in &self.allow_ids {
-            entries.insert(
-                id.clone(),
-                CapabilityGrant {
-                    mode: PolicyMode::Open,
-                    ..Default::default()
-                },
-            );
+        let allow = self
+            .allow
+            .iter()
+            .map(|t| parse_token(reg, "--allow", t))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let deny = self
+            .deny
+            .iter()
+            .map(|t| parse_token(reg, "--deny", t))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        // "Whole ceiling" and "only this rule" for one class contradict each
+        // other; guessing which was meant is not acceptable here.
+        for toks in [&allow, &deny] {
+            for bare in toks.iter().filter(|t| t.constraint.is_none()) {
+                if let Some(c) = toks
+                    .iter()
+                    .find(|t| t.id == bare.id && t.constraint.is_some())
+                {
+                    anyhow::bail!(
+                        "{f} '{}' and {f} '{}' both given: the first opens the whole ceiling, the second only one rule — pick one",
+                        bare.raw,
+                        c.raw,
+                        f = bare.flag
+                    );
+                }
+            }
         }
-        for id in &self.deny_ids {
-            entries.insert(
-                id.clone(),
-                CapabilityGrant {
-                    mode: PolicyMode::Deny,
-                    ..Default::default()
-                },
-            );
+        let parse = |t: &Token| -> anyhow::Result<serde_json::Value> {
+            reg.lookup(&t.id)
+                .parse_shorthand(&t.id, t.constraint.unwrap_or_default())
+                .map_err(|e| anyhow::anyhow!("{} '{}': {e}", t.flag, t.raw))
+        };
+        for t in &allow {
+            if t.constraint.is_none() {
+                entries.insert(
+                    t.id.clone(),
+                    CapabilityGrant {
+                        mode: PolicyMode::Open,
+                        ..Default::default()
+                    },
+                );
+            } else {
+                let rule = parse(t)?;
+                entries
+                    .entry(t.id.clone())
+                    .or_insert_with(|| CapabilityGrant {
+                        mode: PolicyMode::Allowlist,
+                        ..Default::default()
+                    })
+                    .allow
+                    .push(rule);
+            }
         }
-        Ok((None, entries))
+        let mut deny_additions = Vec::new();
+        for t in &deny {
+            if t.constraint.is_none() {
+                entries.insert(
+                    t.id.clone(),
+                    CapabilityGrant {
+                        mode: PolicyMode::Deny,
+                        ..Default::default()
+                    },
+                );
+            } else {
+                deny_additions.push((t.id.clone(), parse(t)?));
+            }
+        }
+        Ok((entries, deny_additions))
     }
 }
 
@@ -219,6 +330,7 @@ pub fn build_grant_policy(
     profile: Option<&ProfileConfig>,
     cli: &CliGrants,
 ) -> anyhow::Result<GrantPolicy> {
+    let reg = ProviderRegistry::with_builtins();
     let mut gp = GrantPolicy::default(); // default = Ask, empty entries
 
     // Helper: apply one layer onto gp — only update default when Some.
@@ -232,18 +344,27 @@ pub fn build_grant_policy(
     };
 
     if let Some(p) = &config.policy {
-        let (d, e) = p.layer()?;
+        let (d, e) = p.layer(&reg)?;
         apply(d, e);
     }
     if let Some(prof) = profile
         && let Some(p) = &prof.policy
     {
-        let (d, e) = p.layer()?;
+        let (d, e) = p.layer(&reg)?;
         apply(d, e);
     }
+    let mut deny_additions = Vec::new();
     if !cli.is_empty() {
-        let (d, e) = cli.layer()?;
-        apply(d, e); // d is always None for CLI
+        let (e, extra) = cli.layer(&reg)?;
+        apply(None, e); // the CLI never sets a global default
+        deny_additions = extra;
+    }
+    // A constrained --deny narrows what the layers above resolved: it keeps
+    // their mode and allow rules and only adds the deny rule.
+    for (id, rule) in deny_additions {
+        let mut g = gp.resolve(&id);
+        g.deny.push(rule);
+        gp.entries.insert(id, g);
     }
 
     Ok(gp)
@@ -596,5 +717,139 @@ deny = [{ cidr = "127.0.0.0/8", ports = [5900], "except-ports" = [5901] }]
         assert_eq!(s.allow[0].net.host.as_deref(), Some("vnc.example.com"));
         assert_eq!(s.deny[0].net.cidr.as_deref(), Some("127.0.0.0/8"));
         assert_eq!(s.deny[0].net.except_ports.as_deref(), Some(&[5901u16][..]));
+    }
+
+    // ── --allow / --deny shorthand and aliases ──
+
+    fn cli(allow: &[&str], deny: &[&str], grant: &[&str]) -> CliGrants {
+        CliGrants {
+            grant_json: grant.iter().map(|s| s.to_string()).collect(),
+            allow: allow.iter().map(|s| s.to_string()).collect(),
+            deny: deny.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn gp(c: &CliGrants) -> anyhow::Result<GrantPolicy> {
+        build_grant_policy(&ConfigFile::default(), None, c)
+    }
+
+    #[test]
+    fn shorthand_allow_becomes_allowlist_rule() {
+        let p = gp(&cli(&["fs=/data/**"], &[], &[])).unwrap();
+        let g = p.resolve("wasi:filesystem");
+        assert_eq!(g.mode, PolicyMode::Allowlist);
+        assert_eq!(
+            g.allow,
+            vec![serde_json::json!({"path":"/data/**","mode":"rw"})]
+        );
+    }
+
+    #[test]
+    fn repeated_shorthand_accumulates_and_merges_with_grant() {
+        let p = gp(&cli(
+            &["fs=/a/**", "wasi:filesystem=/b/**:ro"],
+            &[],
+            &[r#"{"fs":{"mode":"allowlist","allow":[{"path":"/c/**","mode":"rw"}]}}"#],
+        ))
+        .unwrap();
+        let g = p.resolve("wasi:filesystem");
+        assert_eq!(g.allow.len(), 3, "{:?}", g.allow);
+    }
+
+    #[test]
+    fn bare_alias_allow_is_open() {
+        let p = gp(&cli(&["http"], &[], &[])).unwrap();
+        assert_eq!(p.resolve("wasi:http").mode, PolicyMode::Open);
+        assert!(
+            !p.entries.contains_key("http"),
+            "alias must not leak as a key"
+        );
+    }
+
+    #[test]
+    fn bare_and_constrained_for_one_class_is_an_error() {
+        let e = gp(&cli(&["fs", "fs=/data/**"], &[], &[]))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("both given"), "{e}");
+        let e = gp(&cli(&[], &["http", "http=a.com"], &[]))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("both given"), "{e}");
+    }
+
+    #[test]
+    fn alias_and_full_id_in_one_grant_object_is_an_error() {
+        let e = gp(&cli(
+            &[],
+            &[],
+            &[r#"{"fs":"open","wasi:filesystem":"deny"}"#],
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("both name wasi:filesystem"), "{e}");
+    }
+
+    #[test]
+    fn unknown_bare_word_is_an_error_but_ns_ids_pass() {
+        let e = gp(&cli(&["fss=/data/**"], &[], &[]))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("unknown class `fss`"), "{e}");
+        assert!(gp(&cli(&["db:drop=test_*"], &[], &[])).is_ok());
+    }
+
+    #[test]
+    fn shorthand_parse_error_names_flag_and_token() {
+        let e = gp(&cli(&["fs=/data/**:wr"], &[], &[]))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            e,
+            "--allow 'fs=/data/**:wr': unknown mode `wr` (expected `ro` or `rw`)"
+        );
+    }
+
+    /// A constrained --deny narrows a profile grant, never replaces it.
+    #[test]
+    fn constrained_deny_keeps_profile_allow_and_mode() {
+        let cfg: ConfigFile = toml::from_str(
+            r#"
+            [profile.p.policy."wasi:filesystem"]
+            mode = "allowlist"
+            allow = [{ path = "/data/**", mode = "rw" }]
+        "#,
+        )
+        .unwrap();
+        let prof = get_profile(&cfg, "p").unwrap();
+        let p =
+            build_grant_policy(&cfg, Some(prof), &cli(&[], &["fs=/data/secret/**"], &[])).unwrap();
+        let g = p.resolve("wasi:filesystem");
+        assert_eq!(g.mode, PolicyMode::Allowlist);
+        assert_eq!(
+            g.allow,
+            vec![serde_json::json!({"path":"/data/**","mode":"rw"})]
+        );
+        assert_eq!(
+            g.deny,
+            vec![serde_json::json!({"path":"/data/secret/**","mode":"rw"})]
+        );
+    }
+
+    #[test]
+    fn config_policy_accepts_aliases() {
+        let cfg: ConfigFile = toml::from_str("[policy]\nhttp = \"deny\"\n").unwrap();
+        let p = build_grant_policy(&cfg, None, &CliGrants::default()).unwrap();
+        assert_eq!(p.resolve("wasi:http").mode, PolicyMode::Deny);
+    }
+
+    #[test]
+    fn config_policy_alias_and_full_id_is_an_error() {
+        let cfg: ConfigFile =
+            toml::from_str("[policy]\nhttp = \"deny\"\n\"wasi:http\" = \"open\"\n").unwrap();
+        let e = build_grant_policy(&cfg, None, &CliGrants::default())
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("both name wasi:http"), "{e}");
     }
 }
