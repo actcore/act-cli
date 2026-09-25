@@ -1,0 +1,6 @@
+---
+source: crates/act-runtime/src/audit/render.rs
+assertion_line: 450
+expression: "render_grant_hint(\"grant it with --allow fs (whole ceiling) or --allow 'fs=<path>'\")"
+---
+audit:   hint: grant it with --allow fs (whole ceiling) or --allow 'fs=<path>'

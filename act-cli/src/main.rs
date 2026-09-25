@@ -364,6 +364,24 @@ fn capability_classes_help() -> String {
     out
 }
 
+/// The flag that would grant `cap_id`, for the line under the audit's
+/// "declared but not granted" warning.
+fn grant_hint(cap_id: &str) -> Option<String> {
+    let reg = act_policy::provider::ProviderRegistry::with_builtins();
+    let name = reg.alias_of(cap_id).unwrap_or(cap_id);
+    let placeholder = match reg.lookup(cap_id).shorthand_help() {
+        Some(h) if h.placeholder.is_empty() => {
+            return Some(format!("grant it with --allow {name}"));
+        }
+        Some(h) => h.placeholder,
+        // The generic provider serves semantic classes: a key glob.
+        None => "<key-glob>",
+    };
+    Some(format!(
+        "grant it with --allow {name} (whole ceiling) or --allow '{name}={placeholder}'"
+    ))
+}
+
 /// `Cli::parse()`, with the capability-class listing attached to the
 /// subcommands that take `--allow` / `--deny`.
 fn parse_cli() -> Cli {
@@ -468,12 +486,12 @@ async fn main() -> Result<()> {
     // This is what makes the trail unreachable from RUST_LOG / -v / log-level:
     // those only ever configure `env_filter` above.
     let audit_layer = audit_enabled.then(|| {
-        crate::audit::AuditLayer::stderr(audit_detail).with_filter(
-            tracing_subscriber::filter::Targets::new().with_target(
+        crate::audit::AuditLayer::stderr(audit_detail)
+            .with_grant_hint(std::sync::Arc::new(grant_hint))
+            .with_filter(tracing_subscriber::filter::Targets::new().with_target(
                 crate::audit::TARGET_AUDIT,
                 tracing::level_filters::LevelFilter::INFO,
-            ),
-        )
+            ))
     });
 
     tracing_subscriber::registry()
@@ -1446,6 +1464,22 @@ fn source_ref(p: &act_store::Provenance) -> &str {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn grant_hint_uses_alias_and_placeholder() {
+        assert_eq!(
+            grant_hint("wasi:filesystem").unwrap(),
+            "grant it with --allow fs (whole ceiling) or --allow 'fs=<path>'"
+        );
+        assert_eq!(
+            grant_hint("act:credentials").unwrap(),
+            "grant it with --allow creds"
+        );
+        assert_eq!(
+            grant_hint("db:drop").unwrap(),
+            "grant it with --allow db:drop (whole ceiling) or --allow 'db:drop=<key-glob>'"
+        );
+    }
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;

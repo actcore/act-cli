@@ -214,6 +214,13 @@ pub fn render_declared_ungranted_warning(ids: &[String]) -> String {
     )
 }
 
+/// A hint printed under `declared but not granted`, naming a flag that
+/// would grant the class. The text comes from the host, because it names
+/// that host's flags; this module only frames and escapes it.
+pub fn render_grant_hint(text: &str) -> String {
+    format!("{PREFIX}  hint: {}", escape_audit_field(text))
+}
+
 /// A sibling warning for a declared class configured as `ask` when this run
 /// has no interactive prompt channel at all (headless / ACT-HTTP). The
 /// header still shows the configured mode (`ask`) unchanged — that really is
@@ -435,6 +442,13 @@ mod tests {
                     ("wasi:filesystem".to_string(), "allowlist".to_string()),
                     ("wasi:http".to_string(), "ask".to_string()),
                 ],
+            ));
+        }
+
+        #[test]
+        fn grant_hint() {
+            insta::assert_snapshot!(render_grant_hint(
+                "grant it with --allow fs (whole ceiling) or --allow 'fs=<path>'"
             ));
         }
 

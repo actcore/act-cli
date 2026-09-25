@@ -23,7 +23,8 @@ use crate::audit::record::{
 };
 use crate::audit::render::{
     Rollup, SpanFields, render_credential_issue, render_declared_ask_blocked_warning,
-    render_declared_ungranted_warning, render_exception, render_header, render_rollup,
+    render_declared_ungranted_warning, render_exception, render_grant_hint, render_header,
+    render_rollup,
 };
 
 /// Name of the tool-call envelope span, set by `emit::tool_call_span`.
@@ -73,10 +74,15 @@ impl AuditWriter for StderrWriter {
     }
 }
 
+/// Host-supplied text for the line under "declared but not granted": given a
+/// capability id, the flag (or other action) that would grant it.
+pub type GrantHint = std::sync::Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
 pub struct AuditLayer<W> {
     writer: W,
     detail: Detail,
     rollup_cap: usize,
+    grant_hint: Option<GrantHint>,
 }
 
 impl AuditLayer<StderrWriter> {
@@ -91,7 +97,16 @@ impl<W: AuditWriter> AuditLayer<W> {
             writer,
             detail,
             rollup_cap: DEFAULT_ROLLUP_CAP,
+            grant_hint: None,
         }
+    }
+
+    /// Print a hint under the "declared but not granted" warning. The layer
+    /// has no idea what flags its host has; the host supplies the text.
+    #[must_use]
+    pub fn with_grant_hint(mut self, hint: GrantHint) -> Self {
+        self.grant_hint = Some(hint);
+        self
     }
 
     /// Never let a rendering or writing fault escape into enforcement.
@@ -450,6 +465,13 @@ where
             .collect();
         if !ungranted.is_empty() {
             self.emit(|| render_declared_ungranted_warning(&ungranted));
+            if let Some(hint) = &self.grant_hint {
+                for id in &ungranted {
+                    if let Some(text) = hint(id) {
+                        self.emit(|| render_grant_hint(&text));
+                    }
+                }
+            }
         }
         // A declared class configured as `ask` is not actually reachable
         // when this run has no prompt channel at all (headless / ACT-HTTP):
@@ -1006,6 +1028,40 @@ mod tests {
         assert_eq!(out.len(), 2, "header + warning, got {out:?}");
         assert!(out[1].contains("wasi:http"));
         assert!(out[1].contains("not granted"), "got {}", out[1]);
+    }
+
+    fn denied_http_class() {
+        let span = instantiation_span("c@1", "abcdef01");
+        let _g = span.enter();
+        emit_ceiling_class(&CeilingClassRecord {
+            cap_id: "wasi:http".into(),
+            mode: "deny".into(),
+            declared: true,
+            has_prompt_channel: true,
+        });
+    }
+
+    #[test]
+    fn a_grant_hint_follows_the_warning_when_the_host_supplies_one() {
+        let w = TestWriter::default();
+        let sink = w.clone();
+        let layer =
+            AuditLayer::new(w, Detail::Rollup).with_grant_hint(std::sync::Arc::new(|id: &str| {
+                Some(format!("hint for {id}"))
+            }));
+        let sub = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(sub, denied_http_class);
+        let out = sink.0.lock().unwrap().clone();
+        assert_eq!(out.len(), 3, "header + warning + hint, got {out:?}");
+        assert!(out[1].contains("not granted"), "got {}", out[1]);
+        assert_eq!(out[2], "audit:   hint: hint for wasi:http");
+    }
+
+    #[test]
+    fn no_grant_hint_without_a_host_callback() {
+        let out = run(denied_http_class);
+        assert_eq!(out.len(), 2, "header + warning only, got {out:?}");
+        assert!(!out.iter().any(|l| l.contains("hint:")), "got {out:?}");
     }
 
     #[test]
