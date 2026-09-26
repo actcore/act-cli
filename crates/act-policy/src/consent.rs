@@ -16,9 +16,38 @@ pub struct ConsentAsk {
     pub summary: String,
 }
 
+/// Who settled a consent question.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecidedBy {
+    /// A person, asked now.
+    Person,
+    /// An answer the host kept from an earlier question — the toolserver's
+    /// standing grants — named by the rule it was kept for. Nobody was asked
+    /// this time, and an audit record that said otherwise would lie about who
+    /// decided.
+    Kept { rule: String },
+}
+
+/// A consent answer and who gave it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Verdict {
+    pub allowed: bool,
+    pub by: DecidedBy,
+}
+
 #[async_trait::async_trait]
 pub trait ConsentPrompter: Send + Sync {
     async fn decide(&self, ask: &ConsentAsk) -> bool;
+
+    /// [`Self::decide`], saying who decided. The default says a person did,
+    /// which is true of any prompter that only asks; a prompter that can
+    /// answer from something it kept overrides this and says so.
+    async fn decide_verdict(&self, ask: &ConsentAsk) -> Verdict {
+        Verdict {
+            allowed: self.decide(ask).await,
+            by: DecidedBy::Person,
+        }
+    }
 
     /// Whether this prompter can actually reach a human at all. `true` for
     /// every interactive prompter (a real TTY, an MCP client offering
@@ -61,7 +90,7 @@ impl ConsentPrompter for DenyPrompter {
 /// grants, which are not kept here.
 #[derive(Default)]
 pub struct DecisionCache {
-    seen: Mutex<HashMap<(String, String), bool>>,
+    seen: Mutex<HashMap<(String, String), Verdict>>,
     per_call: bool,
 }
 
@@ -95,12 +124,23 @@ impl DecisionCache {
     /// Return the remembered decision for `(cap_id, key)`, or prompt once via
     /// `prompter`, store, and return it.
     pub async fn decide_cached(&self, prompter: &dyn ConsentPrompter, ask: ConsentAsk) -> bool {
+        self.decide_cached_verdict(prompter, ask).await.allowed
+    }
+
+    /// [`Self::decide_cached`], keeping who decided. A repeat from the cache
+    /// carries the original author: an answer kept in a grant is still that,
+    /// the second time the call touches the same path.
+    pub async fn decide_cached_verdict(
+        &self,
+        prompter: &dyn ConsentPrompter,
+        ask: ConsentAsk,
+    ) -> Verdict {
         let k = (ask.cap_id.clone(), ask.key.clone());
-        if let Some(v) = self.seen.lock().unwrap().get(&k).copied() {
+        if let Some(v) = self.seen.lock().unwrap().get(&k).cloned() {
             return v;
         }
-        let v = prompter.decide(&ask).await;
-        self.seen.lock().unwrap().insert(k, v);
+        let v = prompter.decide_verdict(&ask).await;
+        self.seen.lock().unwrap().insert(k, v.clone());
         v
     }
 }
@@ -187,6 +227,68 @@ mod tests {
         cache.begin_call();
         assert!(cache.decide_cached(&p, ask("/a")).await);
         assert_eq!(p.calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// A prompter that says nothing about who decided is taken to have asked
+    /// a person — true of every prompter that existed before verdicts did.
+    #[tokio::test]
+    async fn a_plain_prompter_s_verdict_is_a_person_s() {
+        let p = CountingPrompter {
+            allow: true,
+            calls: AtomicUsize::new(0),
+        };
+        let v = p.decide_verdict(&ask("/a")).await;
+        assert_eq!(
+            v,
+            Verdict {
+                allowed: true,
+                by: DecidedBy::Person
+            }
+        );
+    }
+
+    /// Answers a host kept from an earlier question, told apart from a person
+    /// answering now — and still told apart when the cache repeats them.
+    struct KeptPrompter;
+
+    #[async_trait::async_trait]
+    impl ConsentPrompter for KeptPrompter {
+        async fn decide(&self, ask: &ConsentAsk) -> bool {
+            self.decide_verdict(ask).await.allowed
+        }
+        async fn decide_verdict(&self, _ask: &ConsentAsk) -> Verdict {
+            Verdict {
+                allowed: false,
+                by: DecidedBy::Kept {
+                    rule: "/data/**".into(),
+                },
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_cache_remembers_who_decided_not_only_what() {
+        let cache = DecisionCache::new();
+        let kept = Verdict {
+            allowed: false,
+            by: DecidedBy::Kept {
+                rule: "/data/**".into(),
+            },
+        };
+        assert_eq!(
+            cache
+                .decide_cached_verdict(&KeptPrompter, ask("/data/a"))
+                .await,
+            kept
+        );
+        assert_eq!(
+            cache
+                .decide_cached_verdict(&KeptPrompter, ask("/data/a"))
+                .await,
+            kept,
+            "a repeat from the cache keeps its author"
+        );
+        assert!(!cache.decide_cached(&KeptPrompter, ask("/data/a")).await);
     }
 
     #[tokio::test]

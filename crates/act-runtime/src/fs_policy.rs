@@ -278,8 +278,8 @@ async fn resolve_ask(
 ) -> Result<PathBuf, PathDenied> {
     let path = canonical.display().to_string();
     let has_channel = prompter.has_channel();
-    let allowed = cache
-        .decide_cached(
+    let verdict = cache
+        .decide_cached_verdict(
             &*prompter,
             ConsentAsk {
                 cap_id: act_types::constants::CAP_FILESYSTEM.to_string(),
@@ -288,13 +288,13 @@ async fn resolve_ask(
             },
         )
         .await;
-    emit_cap_decision(&CapDecisionRecord::answered(
+    emit_cap_decision(&CapDecisionRecord::answered_by(
         act_types::constants::CAP_FILESYSTEM,
         &path,
-        allowed,
+        &verdict,
         has_channel,
     ));
-    if allowed {
+    if verdict.allowed {
         Ok(canonical)
     } else {
         Err(PathDenied)

@@ -219,9 +219,9 @@ impl ConsentGate {
             // below, mirroring `fs_policy::resolve_ask`.
             act_policy::Decision::Ask => {
                 let has_channel = self.prompter.has_channel();
-                let allowed = self
+                let verdict = self
                     .cache
-                    .decide_cached(
+                    .decide_cached_verdict(
                         &*self.prompter,
                         act_policy::consent::ConsentAsk {
                             cap_id: class.to_string(),
@@ -235,13 +235,13 @@ impl ConsentGate {
                         },
                     )
                     .await;
-                emit_cap_decision(&mark_never_rollup(CapDecisionRecord::answered(
+                emit_cap_decision(&mark_never_rollup(CapDecisionRecord::answered_by(
                     class,
                     key,
-                    allowed,
+                    &verdict,
                     has_channel,
                 )));
-                if allowed {
+                if verdict.allowed {
                     Decision::Allow
                 } else {
                     Decision::Deny

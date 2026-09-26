@@ -137,14 +137,14 @@ async fn resolve_http_ask(
 ) -> bool {
     let key = ask.key.clone();
     let has_channel = prompter.has_channel();
-    let allowed = cache.decide_cached(&*prompter, ask).await;
-    emit_cap_decision(&CapDecisionRecord::answered(
+    let verdict = cache.decide_cached_verdict(&*prompter, ask).await;
+    emit_cap_decision(&CapDecisionRecord::answered_by(
         act_types::constants::CAP_HTTP,
         &key,
-        allowed,
+        &verdict,
         has_channel,
     ));
-    allowed
+    verdict.allowed
 }
 
 // ── the hook ──────────────────────────────────────────────────────────────

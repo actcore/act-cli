@@ -421,19 +421,21 @@ pub async fn create_store(
                             // failure would otherwise leave no way to tell
                             // "no channel" from "the task panicked".
                             let has_channel = prompter.has_channel();
-                            let allowed =
-                                tokio::spawn(
-                                    async move { cache.decide_cached(&*prompter, ask).await },
-                                )
-                                .await
-                                .unwrap_or(false);
-                            emit_cap_decision(&CapDecisionRecord::answered(
+                            let verdict = tokio::spawn(async move {
+                                cache.decide_cached_verdict(&*prompter, ask).await
+                            })
+                            .await
+                            .unwrap_or(act_policy::consent::Verdict {
+                                allowed: false,
+                                by: act_policy::consent::DecidedBy::Person,
+                            });
+                            emit_cap_decision(&CapDecisionRecord::answered_by(
                                 act_types::constants::CAP_SOCKETS,
                                 &key,
-                                allowed,
+                                &verdict,
                                 has_channel,
                             ));
-                            allowed
+                            verdict.allowed
                         }
                     }
                 })

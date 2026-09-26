@@ -188,7 +188,7 @@ pub struct ToolCallStart {
 }
 
 /// One capability decision, emitted as an event inside the tool-call span.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapDecisionRecord {
     pub cap_id: String,
     pub key: String,
@@ -289,6 +289,43 @@ impl CapDecisionRecord {
     /// driven by `has_channel` alone, not inferred from `allowed`, so the
     /// record stays correct even if that pairing ever changes.
     pub fn answered(cap_id: &str, key: &str, allowed: bool, has_channel: bool) -> Self {
+        let verdict = act_policy::consent::Verdict {
+            allowed,
+            by: act_policy::consent::DecidedBy::Person,
+        };
+        Self::answered_by(cap_id, key, &verdict, has_channel)
+    }
+
+    /// [`Self::answered`], for a verdict that says who decided.
+    ///
+    /// An answer a host kept — a standing grant — is attributed to policy,
+    /// with the rule it was kept for: nobody was asked this time, and the same
+    /// principle that keeps a no-channel degrade from reading as a refusal
+    /// keeps a kept answer from reading as a person's.
+    pub fn answered_by(
+        cap_id: &str,
+        key: &str,
+        verdict: &act_policy::consent::Verdict,
+        has_channel: bool,
+    ) -> Self {
+        let allowed = verdict.allowed;
+        if let act_policy::consent::DecidedBy::Kept { rule } = &verdict.by {
+            return Self {
+                cap_id: cap_id.to_string(),
+                key: key.to_string(),
+                action: String::new(),
+                decision: if allowed {
+                    Decision4::AskAllow
+                } else {
+                    Decision4::AskDeny
+                },
+                mode: "ask".to_string(),
+                actor: Actor::Policy,
+                reason: Some("standing grant".to_string()),
+                rule: Some(rule.clone()),
+                never_rollup: false,
+            };
+        }
         let (actor, reason) = if has_channel {
             (
                 Actor::User,
@@ -475,6 +512,36 @@ mod tests {
             Some("should be dropped"),
         );
         assert!(allow_with_reason.reason.is_none());
+    }
+
+    /// An ask a host answered from a standing grant was not answered by a
+    /// person now, and the record must not say it was. It names the rule the
+    /// grant was kept for, which also lets a rollup group by it.
+    #[test]
+    fn an_ask_answered_from_a_kept_grant_is_attributed_to_policy_with_its_rule() {
+        let verdict = act_policy::consent::Verdict {
+            allowed: true,
+            by: act_policy::consent::DecidedBy::Kept {
+                rule: "/data/**".into(),
+            },
+        };
+        let r = CapDecisionRecord::answered_by("wasi:filesystem", "/data/a", &verdict, true);
+        assert_eq!(r.decision, Decision4::AskAllow, "it was still an ask");
+        assert_eq!(r.actor, Actor::Policy);
+        assert_eq!(r.reason.as_deref(), Some("standing grant"));
+        assert_eq!(r.rule.as_deref(), Some("/data/**"));
+    }
+
+    #[test]
+    fn a_person_s_verdict_records_like_answered() {
+        let verdict = act_policy::consent::Verdict {
+            allowed: false,
+            by: act_policy::consent::DecidedBy::Person,
+        };
+        assert_eq!(
+            CapDecisionRecord::answered_by("wasi:filesystem", "/k", &verdict, true),
+            CapDecisionRecord::answered("wasi:filesystem", "/k", false, true)
+        );
     }
 
     #[test]

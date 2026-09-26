@@ -531,9 +531,9 @@ impl GateContext {
             // emitted below, mirroring `fs_policy::resolve_ask`.
             act_policy::Decision::Ask => {
                 let has_channel = self.prompter.has_channel();
-                let allowed = self
+                let verdict = self
                     .cache
-                    .decide_cached(
+                    .decide_cached_verdict(
                         &*self.prompter,
                         act_policy::consent::ConsentAsk {
                             cap_id: CAP_CREDENTIALS.to_string(),
@@ -542,13 +542,13 @@ impl GateContext {
                         },
                     )
                     .await;
-                emit_cap_decision(&CapDecisionRecord::answered(
+                emit_cap_decision(&CapDecisionRecord::answered_by(
                     CAP_CREDENTIALS,
                     key,
-                    allowed,
+                    &verdict,
                     has_channel,
                 ));
-                allowed
+                verdict.allowed
             }
         }
     }
