@@ -1,8 +1,28 @@
-# ACT CLI & Build Tools
+# ACT — sandboxed, signed tools for AI agents
 
-Host and build [ACT](https://actcore.dev) (Agent Component Tools) WebAssembly components.
+Every agent tool you install today runs with your permissions: your files, your
+keys, the whole network. **ACT** packages a tool as one WebAssembly component
+that declares what it needs — this directory, these hosts — and the host
+enforces it: anything undeclared is denied, anything declared still waits for
+your grant, and every decision lands in an audit trail. The same `.wasm` is an
+MCP server, a CLI tool, and it runs in a browser tab.
 
-This repo contains two tools:
+**[Try it in your browser →](https://actcore.dev/python)** real pandas on your
+CSV, sandboxed to the one file you hand it. Nothing to install.
+
+![act: see what a tool can touch, grant it one directory, watch it ask when nothing was granted](.github/assets/act-terminal.gif)
+
+```bash
+mkdir -p /tmp/demo
+npx @actcore/act call actpkg.dev/library/sqlite query \
+  --args '{"sql":"SELECT sqlite_version()"}' \
+  --session-args '{"database_path":"/tmp/demo/app.db"}' \
+  --allow 'fs=/tmp/demo/**'
+```
+
+[Docs](https://actcore.dev/docs/) · [Components](https://actpkg.dev) · [Website](https://actcore.dev)
+
+## What's in this repo
 
 - **`act`** — run, call, inspect, and serve ACT components from local files, HTTP URLs, or OCI registries. Components built for `wasm32-wasip2` (with async) and `wasm32-wasip3` run the same way, under the same capability grants
 - **`act-build`** — post-process compiled WASM components: embed metadata, skills, and custom sections
