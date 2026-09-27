@@ -342,6 +342,55 @@ impl Store {
             .unwrap_or_default())
     }
 
+    /// Remove a component — and every referrer pointing at it, transitively —
+    /// from `index.json`, then reclaim the blobs only they referenced.
+    /// Returns whether the reference was in the store at all.
+    ///
+    /// The index edit and the sweep are two lock acquisitions rather than
+    /// one: `gc` takes the exclusive lock itself, and a second acquisition
+    /// under the first would wait on itself. Between them the index never
+    /// names the forgotten component, so a concurrent `resolve` sees it gone
+    /// a moment before its blobs do — the safe order.
+    pub fn forget(&self, reference: &str) -> Result<bool, StoreError> {
+        {
+            let _lock = StoreLock::exclusive(&self.root)?;
+            let idx = index::load(&self.root)?;
+            let Some(component) = index::find_by_ref(idx.manifests(), reference) else {
+                return Ok(false);
+            };
+            let mut manifests: Vec<_> = idx
+                .manifests()
+                .iter()
+                .filter(|d| index::digest_hex(d) != index::digest_hex(component))
+                .cloned()
+                .collect();
+
+            // A referrer lives only while its subject does; drop the chain
+            // until nothing dangles.
+            loop {
+                let alive: std::collections::HashSet<String> =
+                    manifests.iter().map(index::digest_hex).collect();
+                let before = manifests.len();
+                manifests.retain(|d| {
+                    match d
+                        .annotations()
+                        .as_ref()
+                        .and_then(|a| a.get(crate::referrer::K_SUBJECT))
+                    {
+                        Some(subject) => alive.contains(subject),
+                        None => true,
+                    }
+                });
+                if manifests.len() == before {
+                    break;
+                }
+            }
+            index::save(&self.root, &index::build_index(manifests))?;
+        }
+        self.gc()?;
+        Ok(true)
+    }
+
     /// Delete blobs not reachable from `index.json`. Returns the count
     /// removed. Holds the exclusive lock.
     pub fn gc(&self) -> Result<usize, StoreError> {
@@ -530,6 +579,80 @@ mod tests {
         assert_eq!(reclaimed, 1, "exactly one orphan blob removed");
         assert!(!crate::layout::has_blob(dir.path(), &orphan));
         assert!(store.resolve("oci://ghcr.io/x/keep:1").unwrap().is_some());
+    }
+
+    /// Forgetting a component takes its referrers with it, leaves the other
+    /// component alone, and reclaims the blobs; forgetting what is not there
+    /// simply says so.
+    #[test]
+    fn forget_removes_the_component_its_referrers_and_nothing_else() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+
+        let keeper_wasm = b"keep me".to_vec();
+        store
+            .put_component(
+                &keeper_wasm,
+                None,
+                &prov("oci://example.com/keeper:1", &keeper_wasm),
+            )
+            .unwrap();
+        let gone_wasm = b"forget me".to_vec();
+        let stored = store
+            .put_component(
+                &gone_wasm,
+                None,
+                &prov("oci://example.com/gone:1", &gone_wasm),
+            )
+            .unwrap();
+
+        // A signature referrer on the component about to be forgotten.
+        let sig = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.empty.v1+json","digest":"sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a","size":2},"layers":[]}"#.to_vec();
+        let cfg = b"{}".to_vec();
+        store
+            .put_referrer(
+                &sig,
+                &[(crate::layout::sha256_hex(&cfg), cfg)],
+                &stored.manifest_digest,
+                Some("application/vnd.dev.sigstore.bundle.v0.3+json"),
+            )
+            .unwrap();
+
+        let subject_hex = stored
+            .manifest_digest
+            .trim_start_matches("sha256:")
+            .to_string();
+        assert_eq!(
+            store.list_referrers_by_digest(&subject_hex).unwrap().len(),
+            1
+        );
+
+        assert!(store.forget("oci://example.com/gone:1").unwrap());
+        let left: Vec<String> = store
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|st| match st.provenance.source {
+                Source::Oci { reference } => reference,
+                Source::Http { url, .. } => url,
+                Source::Local { path } => path,
+            })
+            .collect();
+        assert_eq!(left, ["oci://example.com/keeper:1"]);
+        assert!(
+            store
+                .list_referrers_by_digest(&subject_hex)
+                .unwrap()
+                .is_empty(),
+            "the signature went with its component"
+        );
+        assert!(!store.forget("oci://example.com/gone:1").unwrap());
+
+        // The forgotten wasm blob is gone from the store; the keeper's is not.
+        let wasm_hex = crate::layout::sha256_hex(&gone_wasm);
+        assert!(!crate::layout::blob_path(dir.path(), &wasm_hex).is_file());
+        let keep_hex = crate::layout::sha256_hex(&keeper_wasm);
+        assert!(crate::layout::blob_path(dir.path(), &keep_hex).is_file());
     }
 
     #[test]
