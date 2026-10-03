@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.4] - 2026-10-03
+
+**Upgrade: the sandbox engine in 0.14.3 has twelve known vulnerabilities.**
+This release closes them all by moving to wasmtime 49.0.2. Two raise the
+declared minimum Rust to **1.99** (from 1.98); consumers pinning `rust-version`
+below that should stay on 0.14.3 until they can move.
+
+### Security
+- **wasmtime 49.0.0 → 49.0.2, closing RUSTSEC-2026-0313…0316 and 0320…0327** —
+  twelve advisories against the engine 0.14.3 shipped. The sharpest:
+  a native stack buffer overflow from an unvalidated async-lifted callback
+  result count (0327) — the component-model-async path every ACT tool runs on
+  — plus GC heap corruption via mis-typed tag imports and missing rooting
+  across `try_call` (0325/0326), a wasi:http panic on a zero timeout,
+  `poll_oneoff` fuel circumvention, host memory blowup when a guest has no
+  stdio, `fd_readdir` leaking uninitialised padding into guest memory, and a
+  host panic on wasip3 timestamps before the epoch.
+
+### Added
+- `act_store::Store::forget` — removes a component, its referrers and their
+  blobs from the local store.
+
+### Fixed
+- Consent asks answered by a standing grant are now attributed to `policy`,
+  not to the user — the audit trail no longer claims a person decided when a
+  standing grant did.
+
+### Changed
+- **Minimum Rust is now 1.99** (was 1.98). Nothing in CI verifies the floor;
+  it is the declared promise only.
+- Lint suppressions migrated from `#[allow]` to `#[expect]` across the
+  workspace — 28 stale suppressions surfaced and were removed instead.
+- README opens with what ACT is, the live in-browser demo and a terminal GIF.
+
 ## [0.14.3] - 2026-09-26
 
 A security fix for the capability policy: upgrade if you grant or deny
