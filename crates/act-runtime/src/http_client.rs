@@ -257,7 +257,7 @@ fn redirect_verdict(
     );
     // `Allow` and `Ask` produce the same verdict for different reasons, and
     // the comment on `Ask` is the reason. Merging the arms would delete it.
-    #[allow(clippy::match_same_arms)]
+    #[expect(clippy::match_same_arms)]
     match decision {
         act_policy::Decision::Allow => RedirectVerdict::follow(),
         // `Ask` gates the request itself, at `send`. This callback is sync and
@@ -430,7 +430,6 @@ impl ActHttpClient {
 }
 
 /// Split an outgoing request into the pieces the client takes.
-#[allow(clippy::type_complexity)]
 fn to_request_parts(
     request: http::Request<WasiBody>,
 ) -> Result<(http::Method, String, http::HeaderMap, hclient::RequestBody), HttpError> {

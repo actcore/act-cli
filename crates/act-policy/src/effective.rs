@@ -20,13 +20,11 @@ use crate::net::NetworkRule;
 /// `mode = Deny`; callers may still read other fields (they'll be
 /// ignored by the matchers in Deny mode).
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // wired in Task 4; module exists for tests now
 pub struct EffectivePolicy<T> {
     pub config: T,
     pub declared: bool,
 }
 
-#[allow(dead_code)] // wired in Task 4; module exists for tests now
 pub fn effective_fs(user: &FsConfig, caps: &Capabilities) -> EffectivePolicy<FsConfig> {
     let Some(req) = caps.get(CAP_FILESYSTEM) else {
         return EffectivePolicy {
@@ -95,7 +93,6 @@ pub fn effective_fs(user: &FsConfig, caps: &Capabilities) -> EffectivePolicy<FsC
     }
 }
 
-#[allow(dead_code)] // wired in Task 4; module exists for tests now
 pub fn effective_http(user: &HttpConfig, caps: &Capabilities) -> EffectivePolicy<HttpConfig> {
     let Some(req) = caps.get(CAP_HTTP) else {
         return EffectivePolicy {
@@ -152,7 +149,6 @@ pub fn effective_http(user: &HttpConfig, caps: &Capabilities) -> EffectivePolicy
     }
 }
 
-#[allow(dead_code)] // wired in Task 4
 fn rule_from_declaration(d: &HttpAllow) -> HttpRule {
     HttpRule {
         net: NetworkRule {
@@ -166,7 +162,6 @@ fn rule_from_declaration(d: &HttpAllow) -> HttpRule {
     }
 }
 
-#[allow(dead_code)] // wired in Task 5
 pub fn effective_sockets(
     user: &SocketsConfig,
     caps: &Capabilities,
@@ -226,7 +221,6 @@ pub fn effective_sockets(
     }
 }
 
-#[allow(dead_code)] // wired in Task 5
 fn sockets_rule_from_declaration(d: &act_types::SocketsAllow) -> SocketsRule {
     SocketsRule {
         net: NetworkRule {
@@ -242,7 +236,6 @@ fn sockets_rule_from_declaration(d: &act_types::SocketsAllow) -> SocketsRule {
 /// Declared rule D covers user rule U when every connection matching U
 /// would also match D. Host/CIDR/port/protocol — each user dimension must
 /// fit inside declared.
-#[allow(dead_code)] // wired in Task 5
 fn sockets_rule_covers(decl: &SocketsRule, user: &SocketsRule) -> bool {
     let host_or_cidr_covered = match (&decl.net.host, &decl.net.cidr) {
         (Some(decl_host), _) => match (&user.net.host, &user.net.cidr) {
@@ -295,7 +288,6 @@ fn min_mode(a: act_types::FsMode, b: act_types::FsMode) -> act_types::FsMode {
 /// glob compile step to be the authority on actual matches; this predicate
 /// is only used to decide which user-allow patterns survive the declaration
 /// filter.
-#[allow(dead_code)] // wired in Task 4
 fn globs_overlap(a: &str, b: &str) -> bool {
     // Normalise: strip trailing /** and /* so prefixes compare cleanly.
     // Also treat bare "**" as "everything".
@@ -315,7 +307,6 @@ fn globs_overlap(a: &str, b: &str) -> bool {
 /// equality or wildcard-superset, scheme equality or declared-wildcard,
 /// method-superset, port-superset. Declarations never carry cidr, so
 /// a user rule with cidr-only (no host) is never covered.
-#[allow(dead_code)] // wired in Task 4
 fn rule_covers(decl: &HttpRule, user: &HttpRule) -> bool {
     // Host: declared host must cover user host. Declarations always
     // have a host (required by HttpAllow); user rules may omit host
@@ -353,7 +344,6 @@ fn rule_covers(decl: &HttpRule, user: &HttpRule) -> bool {
     true
 }
 
-#[allow(dead_code)] // wired in Task 4
 fn host_covers(decl: &str, user: &str) -> bool {
     if decl == "*" {
         return true;

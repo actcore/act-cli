@@ -91,12 +91,10 @@ pub struct FsConfig {
     pub allow: Vec<FsAllow>,
     // Consumed by the per-op matcher in Layer 1 Phase C (custom WASI impl).
     // Kept in the public struct so config + CLI parsing is end-to-end now.
-    #[allow(dead_code)]
     pub deny: Vec<String>,
 }
 
 impl FsConfig {
-    #[allow(dead_code)]
     pub fn deny() -> Self {
         Self {
             mode: PolicyMode::Deny,
@@ -113,9 +111,7 @@ impl FsConfig {
 #[derive(Debug, Clone, Default)]
 pub struct HttpConfig {
     pub mode: PolicyMode,
-    #[allow(dead_code)]
     pub allow: Vec<HttpRule>,
-    #[allow(dead_code)]
     pub deny: Vec<HttpRule>,
 }
 
@@ -135,7 +131,6 @@ pub struct HttpRule {
 
 /// Resolved sockets policy for a component invocation.
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)] // consumed by sockets_policy + Task 5 wiring
 pub struct SocketsConfig {
     pub mode: PolicyMode,
     pub allow: Vec<SocketsRule>,

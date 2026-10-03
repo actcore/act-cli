@@ -300,7 +300,7 @@ enum SessionCommand {
 // `Tools` carries `CommonOpts` (it instantiates the component) while the other
 // leaves are read-only and tiny; clap subcommand enums can't box a flattened
 // field, so accept the size skew rather than box every variant's payload.
-#[allow(clippy::large_enum_variant)]
+#[expect(clippy::large_enum_variant)]
 #[derive(clap::Subcommand)]
 enum InspectCommand {
     /// Print the raw decoded `act:component` manifest (full `ComponentInfo`).
@@ -702,7 +702,7 @@ fn tty_or_deny_prompter() -> (Arc<dyn act_policy::consent::ConsentPrompter>, boo
 }
 
 struct ResolvedOpts {
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     config_file: config::ConfigFile,
     /// Resolved grant policy (uniform grants for all capability classes).
     grant_policy: config::GrantPolicy,

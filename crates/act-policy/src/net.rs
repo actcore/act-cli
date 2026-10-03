@@ -168,7 +168,6 @@ impl<'a> NetworkCheck<'a> {
     }
 
     /// Target with DNS-resolved peers already known.
-    #[allow(dead_code)] // used by upcoming DNS resolver hook in ActHttpClient (Task 10)
     pub fn with_resolved(host: &'a str, port: u16, resolved_ips: &'a [IpAddr]) -> Self {
         Self {
             host,
@@ -229,7 +228,6 @@ pub fn rule_matches(rule: &NetworkRule, check: &NetworkCheck) -> bool {
 ///
 /// HTTP policy doesn't call this directly (it interleaves scheme/method
 /// filters with network matching). Raw TCP/UDP policy will.
-#[allow(dead_code)] // used by upcoming raw TCP/UDP policy path
 pub fn decide(
     mode: PolicyMode,
     allow: &[NetworkRule],
@@ -263,7 +261,6 @@ pub fn decide(
 /// to treat that as "defer to downstream" or "deny"). `host` may be an IP
 /// literal, in which case the returned Vec contains exactly that IP.
 #[cfg(feature = "host")]
-#[allow(dead_code)] // used by upcoming DNS resolver hook in ActHttpClient (Task 10)
 pub async fn resolve_host(host: &str, port: u16) -> Vec<SocketAddr> {
     let target = format!("{host}:{port}");
     match tokio::net::lookup_host(&target).await {
@@ -277,7 +274,6 @@ pub async fn resolve_host(host: &str, port: u16) -> Vec<SocketAddr> {
 /// Returns `true` if any rule in `deny_rules` has a CIDR that matches `ip`
 /// (respecting `except_ports`). Used both at HTTP-layer after DNS resolution
 /// and by future raw-socket connect checks.
-#[allow(dead_code)] // used by upcoming DNS resolver hook in ActHttpClient (Task 10)
 pub fn any_deny_cidr_matches(deny_rules: &[NetworkRule], ip: IpAddr, port: u16) -> bool {
     let ips = [ip];
     let check = NetworkCheck::with_resolved("", port, &ips);
@@ -290,7 +286,6 @@ pub fn any_deny_cidr_matches(deny_rules: &[NetworkRule], ip: IpAddr, port: u16) 
 /// denied by any of the `deny_rules`, or `None` if no match / lookup fails
 /// / no rule uses CIDR.
 #[cfg(feature = "host")]
-#[allow(dead_code)] // used by upcoming DNS resolver hook in ActHttpClient (Task 10)
 pub async fn first_cidr_deny_hit(
     deny_rules: &[NetworkRule],
     host: &str,

@@ -70,7 +70,6 @@ impl CredentialRefresher for OAuthRefresher {
 
 /// Kept honest by construction: a `Registration` is what both the flow and this
 /// refresher speak, so there is no second shape to drift.
-#[allow(dead_code)]
 fn _assert_shared_shape(r: Registration) -> Registration {
     r
 }

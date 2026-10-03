@@ -219,7 +219,6 @@ fn effective_scopes(declared: &[String], resource: &[String], as_md: &AsMetadata
     as_md.scopes_supported.clone()
 }
 
-#[allow(clippy::too_many_arguments)]
 fn authorization_url(
     as_md: &AsMetadata,
     client_id: &str,

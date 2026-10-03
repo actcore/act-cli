@@ -202,7 +202,7 @@ mod tests {
         tokio::io::AsyncReadExt::read_to_end(&mut s, &mut buf)
             .await
             .unwrap();
-        String::from_utf8_lossy(&buf).into_owned()
+        String::from_utf8_lossy_owned(buf)
     }
 
     #[tokio::test]

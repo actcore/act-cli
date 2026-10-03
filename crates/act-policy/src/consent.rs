@@ -313,7 +313,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
+    #[expect(clippy::await_holding_lock)]
     async fn ask_allow_remembered_deny_blocked_and_degrade() {
         // Scripted: "/allow" → allow, "/deny" → deny.
         let p = ScriptedPrompter {

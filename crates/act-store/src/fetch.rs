@@ -648,7 +648,6 @@ mod tests {
 
     /// Build a single-layer OCI manifest, optionally annotated, plus the blob
     /// table `assemble_oci` reads through. Returns `(manifest, digest, blobs)`.
-    #[allow(clippy::type_complexity)]
     fn oci_fixture(
         annotations: &str,
     ) -> (Vec<u8>, String, std::collections::HashMap<String, Vec<u8>>) {

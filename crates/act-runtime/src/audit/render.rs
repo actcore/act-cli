@@ -90,12 +90,12 @@ impl Rollup {
 
     // Exercised by `rollup_collapses_past_the_cap` below, which asserts on
     // both to pin the cap/overflow behaviour — not dead, just test-only.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // not dead, just test-only
     pub fn groups(&self) -> usize {
         self.counts.len()
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code)] // not dead, just test-only
     pub fn overflow(&self) -> u64 {
         self.overflow
     }

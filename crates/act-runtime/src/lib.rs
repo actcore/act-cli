@@ -53,7 +53,6 @@ mod info;
 pub(crate) mod store;
 
 // Generated bindings from WIT — fully auto-generated, no manual patching.
-#[allow(unused_mut, unused_variables, dead_code)]
 mod bindings;
 pub use bindings::*;
 

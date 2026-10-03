@@ -23,7 +23,7 @@ pub use act_policy::grant::{CapabilityGrant, GrantPolicy, PolicyMode};
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ConfigFile {
     #[serde(default)]
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub listen: Option<String>,
     #[serde(rename = "log-level", default)]
     pub log_level: Option<String>,

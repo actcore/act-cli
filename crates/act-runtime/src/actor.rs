@@ -129,7 +129,7 @@ pub(crate) fn pack_visible_request_id(counter: u64, salt: u32) -> u32 {
     // Truncation is the operation, not a hazard: the mask below keeps only
     // `REQUEST_ID_COUNTER_BITS` anyway, so the discarded high bits were never
     // going to reach the result.
-    #[allow(clippy::cast_possible_truncation)]
+    #[expect(clippy::cast_possible_truncation)]
     let counter_field = (counter as u32) & ((1 << REQUEST_ID_COUNTER_BITS) - 1);
     let salt_field = salt & ((1 << REQUEST_ID_SALT_BITS) - 1);
     (counter_field << REQUEST_ID_SALT_BITS) | salt_field
@@ -546,7 +546,7 @@ pub use exports::act::tools::tool_provider::Guest as ToolProvider;
 ///
 /// Component info is read from custom sections (no instantiation needed
 /// for that).
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub async fn instantiate_component(
     engine: &Engine,
     component: &Component,

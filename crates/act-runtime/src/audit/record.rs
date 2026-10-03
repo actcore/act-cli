@@ -96,6 +96,7 @@ pub enum Outcome {
     /// unwinds on cancellation, but that path doesn't record this outcome
     /// yet. Kept — with its `Display` arm and the assertion below — to
     /// record the intent for when it is.
+    // target-dependent: constructed by a test below, dead in the lib build
     #[allow(dead_code)]
     Cancelled,
 }

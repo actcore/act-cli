@@ -46,7 +46,6 @@ pub enum FsAccess {
 
 /// Compiled glob sets ready to decide access for a given host path.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // wired in phase C1 part 2 (HostDescriptor wrapper)
 pub struct FsMatcher {
     mode: PolicyMode,
     /// All allow entries (read + write) — used for Read access.

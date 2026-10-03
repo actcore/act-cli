@@ -19,7 +19,7 @@ pub struct HostState {
     pub(crate) table: ResourceTable,
     pub(crate) http: WasiHttpCtx,
     pub(crate) http_hooks: http_policy::PolicyHttpHooks,
-    #[allow(dead_code)] // retained for Task 10 DNS resolver hook access
+    #[expect(dead_code)] // retained for Task 10 DNS resolver hook access
     pub(crate) http_client: Arc<http_client::ActHttpClient>,
     pub(crate) fs_ceiling: Arc<dyn act_policy::provider::CompiledCeiling>,
     pub(crate) fd_paths: fs_policy::FdPathMap,
@@ -238,7 +238,7 @@ pub(crate) fn warn_if_credentials_exfil_risk(
 /// parameter rather than a field of `info` on purpose: `info` is the guest's
 /// own manifest, and ACT-CONSENT.md §5 forbids attributing the question to a
 /// name the guest chose.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub async fn create_store(
     engine: &Engine,
     preopens: &[fs_policy::Preopen],
