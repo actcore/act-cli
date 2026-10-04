@@ -212,11 +212,11 @@ dependencies = [
 
 [[package]]
 name = "act-types"
-version = "0.14.1"
+version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "128915eec5705c684ad51aa91aa9dc452ba964cabaa89cc37c6e114d29d4621c"
+checksum = "b119bac625b5ee07982ede3482eda45b60d5416d1fffafbf8f6725e5ac28b1ae"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "ciborium",
  "serde",
  "serde_json",
@@ -3977,7 +3977,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
