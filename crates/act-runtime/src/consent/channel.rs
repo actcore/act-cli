@@ -86,12 +86,19 @@ impl CurrentConsentSink {
 /// one channel and not another, and so a capability class added later inherits it without
 /// having to know it exists.
 pub fn consent_line(ask: &ConsentAsk) -> String {
-    format!(
-        "ACT consent: {} — {} ({})",
-        escape_audit_field(&ask.cap_id),
-        escape_audit_field(&ask.summary),
-        escape_audit_field(&ask.key),
-    )
+    let cap = escape_audit_field(&ask.cap_id);
+    let summary = escape_audit_field(&ask.summary);
+    // The parens exist to name the subject when the summary doesn't. When the
+    // summary already carries it — filesystem asks embed the canonical path —
+    // repeating it reads like the tool asked for the whole disk.
+    if ask.key.is_empty() || ask.summary.contains(&ask.key) {
+        format!("ACT consent: {cap} — {summary}")
+    } else {
+        format!(
+            "ACT consent: {cap} — {summary} ({})",
+            escape_audit_field(&ask.key),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -149,13 +156,26 @@ mod tests {
 
     #[test]
     fn an_ordinary_prompt_is_left_exactly_as_written() {
+        // The summary already names the path, so the key is not repeated.
         assert_eq!(
             consent_line(&ask(
                 "wasi:filesystem",
                 "filesystem access: /data/x",
                 "/data/x"
             )),
-            "ACT consent: wasi:filesystem — filesystem access: /data/x (/data/x)"
+            "ACT consent: wasi:filesystem — filesystem access: /data/x"
+        );
+    }
+
+    #[test]
+    fn a_key_the_summary_does_not_mention_stays_in_parens() {
+        assert_eq!(
+            consent_line(&ask(
+                "wasi:http",
+                "HTTP GET https://api.example.com/v1",
+                "api.example.com:443"
+            )),
+            "ACT consent: wasi:http — HTTP GET https://api.example.com/v1 (api.example.com:443)"
         );
     }
 }
