@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.6] - 2026-10-08
+
+### Fixed
+
+- **Token expiry mid-upload** — a registry bearer token is a short lease
+  (zot's is five minutes), and a layer large enough to outlive it — servo's
+  120 MB is ~5 min from a CI runner — died with a `401` partway through the
+  chunked upload. Every request of a push now re-mints the token once on a
+  `401` and retries, and the refreshed lease covers the manifest PUT and
+  the extra tags that follow.
+
+### Added
+
+- **Plain-HTTP loopback registries** — pushes and pulls against `localhost`,
+  `127.*.*.*` and `[::1]` now speak `http://` (oras' rule, not Docker's
+  flag), which also makes the push path testable against a plain stub; a
+  wiremock regression test reproduces the expiry-mid-upload failure end to
+  end.
+
 ## [0.14.5] - 2026-10-07
 
 ### Added
