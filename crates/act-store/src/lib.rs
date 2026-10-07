@@ -23,7 +23,7 @@ pub use store::{Store, StoreError, Stored};
 /// Error type for store-location resolution.
 #[derive(Debug, thiserror::Error)]
 pub enum LocationError {
-    #[error("cannot determine a local data directory for the component store")]
+    #[error("cannot determine a local directory for act's on-disk state")]
     NoDataDir,
 }
 
@@ -42,6 +42,23 @@ pub fn store_dir() -> Result<PathBuf, LocationError> {
     Ok(base.join("act").join("store"))
 }
 
+/// Resolve the wasmtime compilation-cache directory.
+///
+/// Cranelift's compiled artifacts land here, so a component is compiled once
+/// per machine rather than once per process: every `act run`/`act call`
+/// otherwise repeats the same compilation. Regenerable bytes, so they live in
+/// the platform cache dir, not next to the store's data: priority
+/// `ACT_WASMTIME_CACHE_DIR` env var, else the platform cache dir under
+/// `act/wasmtime` (`~/.cache/act/wasmtime` on Linux, `~/Library/Caches` on
+/// macOS, `%LOCALAPPDATA%` on Windows).
+pub fn wasmtime_cache_dir() -> Result<PathBuf, LocationError> {
+    if let Some(dir) = std::env::var_os("ACT_WASMTIME_CACHE_DIR") {
+        return Ok(PathBuf::from(dir));
+    }
+    let base = dirs::cache_dir().ok_or(LocationError::NoDataDir)?;
+    Ok(base.join("act").join("wasmtime"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,5 +75,24 @@ mod tests {
             Some(v) => unsafe { std::env::set_var("ACT_STORE_DIR", v) },
             None => unsafe { std::env::remove_var("ACT_STORE_DIR") },
         }
+    }
+
+    #[test]
+    fn wasmtime_cache_dir_follows_the_store_shape() {
+        let prev = std::env::var_os("ACT_WASMTIME_CACHE_DIR");
+        unsafe { std::env::set_var("ACT_WASMTIME_CACHE_DIR", "/tmp/act-wasmtime-test-xyz") };
+        assert_eq!(
+            wasmtime_cache_dir().unwrap(),
+            std::path::PathBuf::from("/tmp/act-wasmtime-test-xyz")
+        );
+        match prev {
+            Some(v) => unsafe { std::env::set_var("ACT_WASMTIME_CACHE_DIR", v) },
+            None => unsafe { std::env::remove_var("ACT_WASMTIME_CACHE_DIR") },
+        }
+        // Without the override it sits in the platform cache dir, not the
+        // data dir where the store lives.
+        let mut dir = dirs::cache_dir().unwrap();
+        dir.extend(["act", "wasmtime"]);
+        assert_eq!(wasmtime_cache_dir().unwrap(), dir);
     }
 }

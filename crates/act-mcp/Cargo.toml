@@ -16,6 +16,6 @@ workspace = true
 [dependencies]
 act-runtime = { version = "0.14.4", path = "../act-runtime" }
 act-types.workspace = true
-rmcp = { version = "3.1", features = ["server", "schemars"] }
+rmcp = { version = "3.5", features = ["server", "schemars"] }
 serde_json.workspace = true
 base64.workspace = true

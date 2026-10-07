@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use wasmtime::component::{Component, Linker};
-use wasmtime::{Config, Engine};
+use wasmtime::{Cache, CacheConfig, Config, Engine};
 
 use crate::store::HostState;
 use crate::{credentials, fs_policy};
@@ -19,6 +19,26 @@ pub fn create_engine() -> Result<Engine> {
     // SPIKE: enable WasmGC so GC-backed guests (Kotlin/Wasm, future JVM/Dart) run.
     config.wasm_function_references(true);
     config.wasm_gc(true);
+    // Cache compiled components on disk, next to the component store, so a
+    // component is compiled once per machine rather than once per process.
+    // Without it every `act run`/`act call` repeats the same Cranelift
+    // compilation — the e2e suites spawn one process per test, which had 27
+    // of them compiling the same bytes in parallel. A cache that cannot be
+    // configured only costs compile time, so a failure here degrades to no
+    // cache with a warning rather than failing the engine.
+    match act_store::wasmtime_cache_dir() {
+        Ok(dir) => {
+            let mut cache_config = CacheConfig::new();
+            cache_config.with_directory(dir);
+            match Cache::new(cache_config) {
+                Ok(cache) => {
+                    config.cache(Some(cache));
+                }
+                Err(e) => tracing::warn!("wasmtime compilation cache disabled: {e}"),
+            }
+        }
+        Err(e) => tracing::warn!("wasmtime compilation cache disabled: {e}"),
+    }
     let engine = Engine::new(&config)
         .map_err(|e| anyhow::anyhow!("failed to create wasmtime engine: {e}"))?;
     Ok(engine)
