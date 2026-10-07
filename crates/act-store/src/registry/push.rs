@@ -21,6 +21,26 @@ pub fn push_scope(repository: &str) -> String {
     format!("repository:{repository}:pull,push")
 }
 
+/// The scheme for talking to a registry.
+///
+/// A loopback registry — a local zot or distribution spun up for testing —
+/// serves plain HTTP, and pointing `https://` at it fails before a single
+/// byte of protocol happens. Everything else is assumed to speak TLS. This
+/// mirrors oras' behaviour rather than Docker's: loopback is detected
+/// instead of needing an `--insecure-registry` flag to remember.
+fn base_url(registry: &str) -> &'static str {
+    // Strip a port (`localhost:5000`), then brackets (`[::1]:5000`).
+    let host = registry.split('/').next().unwrap_or(registry);
+    let host = host.rsplit_once(':').map_or(host, |(h, _)| h);
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let loopback = host == "localhost"
+        || host == "::1"
+        || host
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    if loopback { "http" } else { "https" }
+}
+
 /// Obtain a token for pushing, if the registry asks for one.
 ///
 /// A `401` on the upload endpoint is the normal first answer; anything else,
@@ -31,8 +51,10 @@ pub async fn push_token(
     creds: &super::auth::Credentials,
 ) -> Result<Option<String>, StoreError> {
     let probe = format!(
-        "https://{}/v2/{}/blobs/uploads/",
-        reg.registry, reg.repository
+        "{}://{}/v2/{}/blobs/uploads/",
+        base_url(&reg.registry),
+        reg.registry,
+        reg.repository
     );
     let resp = http.post(&probe).send().await.map_err(io)?;
     if resp.status().as_u16() != 401 {
@@ -72,6 +94,29 @@ fn bearer<'a>(
     }
 }
 
+/// Send `$build` and, on a `401`, mint a fresh token once and send again.
+///
+/// A bearer token is a short lease — zot's is five minutes — and a blob large
+/// enough to outlive it dies mid-chunked-upload without this: every PATCH
+/// after the TTL would carry a token minted before the first byte moved,
+/// which is exactly how a 120 MB servo layer from a CI runner failed at
+/// chunk 80 MB. The fresh token is written back through `$token` so every
+/// later request of the push inherits it; a second `401` surfaces as the
+/// ordinary HTTP error — one retry, not a backoff engine.
+///
+/// `$build` is evaluated once per attempt and must therefore not move its
+/// captures: body-carrying sites clone the payload into the builder.
+macro_rules! send_authed {
+    ($http:expr, $reg:expr, $creds:expr, $token:expr, $build:expr) => {{
+        let mut resp = bearer($build, $token.as_deref()).send().await.map_err(io)?;
+        if resp.status().as_u16() == 401 {
+            *$token = push_token($http, $reg, $creds).await?;
+            resp = bearer($build, $token.as_deref()).send().await.map_err(io)?;
+        }
+        resp
+    }};
+}
+
 /// Upload one blob, chunked when it is large enough to need it.
 ///
 /// Two requests — `POST` opening a session, one `PUT` carrying the bytes and
@@ -93,23 +138,30 @@ pub async fn push_blob(
     reg: &ParsedRef,
     digest: &str,
     bytes: Vec<u8>,
-    token: Option<&str>,
+    token: &mut Option<String>,
+    creds: &super::auth::Credentials,
 ) -> Result<(), StoreError> {
     let head_url = format!(
-        "https://{}/v2/{}/blobs/{digest}",
-        reg.registry, reg.repository
+        "{}://{}/v2/{}/blobs/{digest}",
+        base_url(&reg.registry),
+        reg.registry,
+        reg.repository
     );
-    if let Ok(r) = bearer(http.head(&head_url), token).send().await
+    // A `401` here just means "not present or not visible"; the upload path
+    // below does the token dance when the registry wants one.
+    if let Ok(r) = bearer(http.head(&head_url), token.as_deref()).send().await
         && r.status().is_success()
     {
         return Ok(());
     }
 
     let start = format!(
-        "https://{}/v2/{}/blobs/uploads/",
-        reg.registry, reg.repository
+        "{}://{}/v2/{}/blobs/uploads/",
+        base_url(&reg.registry),
+        reg.registry,
+        reg.repository
     );
-    let resp = bearer(http.post(&start), token).send().await.map_err(io)?;
+    let resp = send_authed!(http, reg, creds, token, http.post(&start));
     if !resp.status().is_success() {
         return Err(io(format!(
             "HTTP {} opening a blob upload on {}",
@@ -130,7 +182,7 @@ pub async fn push_blob(
     // registry already holds everything before the tail — a full-body PUT
     // after PATCHed chunks would double-count and fail the digest).
     let put_body = if bytes.len() > CHUNK_THRESHOLD {
-        push_chunked(http, reg, &mut url, &bytes, token).await?
+        push_chunked(http, reg, &mut url, &bytes, token, creds).await?
     } else {
         bytes
     };
@@ -138,15 +190,15 @@ pub async fn push_blob(
     let sep = if url.contains('?') { '&' } else { '?' };
     let put = format!("{url}{sep}digest={digest}");
 
-    let resp = bearer(
+    let resp = send_authed!(
+        http,
+        reg,
+        creds,
+        token,
         http.put(&put)
             .header("content-type", "application/octet-stream")
-            .body(hclient::RequestBody::Full(put_body.into())),
-        token,
-    )
-    .send()
-    .await
-    .map_err(io)?;
+            .body(hclient::RequestBody::Full(put_body.clone().into()))
+    );
     if !resp.status().is_success() {
         return Err(io(format!(
             "HTTP {} completing the blob upload of {digest}",
@@ -193,7 +245,8 @@ async fn push_chunked(
     reg: &ParsedRef,
     url: &mut String,
     bytes: &[u8],
-    token: Option<&str>,
+    token: &mut Option<String>,
+    creds: &super::auth::Credentials,
 ) -> Result<Vec<u8>, StoreError> {
     let ranges = chunk_ranges(bytes.len());
 
@@ -202,19 +255,21 @@ async fn push_chunked(
         let content_len = (end - start + 1).to_string();
         // `patch` takes the URL by reference: the loop rotates `url` in place
         // below, and hclient's AsRef<str> bound would move the &mut out of it.
-        let resp = bearer(
+        // The chunk body is re-sliced per attempt: `send_authed!` evaluates
+        // its builder twice when the token has to be re-minted.
+        let resp = send_authed!(
+            http,
+            reg,
+            creds,
+            token,
             http.patch(url.as_str())
                 .header("content-type", "application/octet-stream")
                 .header("content-range", &format!("{start}-{end}"))
                 .header("content-length", &content_len)
                 .body(hclient::RequestBody::Full(
-                    bytes[*start..=*end].to_vec().into(),
-                )),
-            token,
-        )
-        .send()
-        .await
-        .map_err(io)?;
+                    bytes[*start..=*end].to_vec().into()
+                ))
+        );
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             if first && (status == 405 || status == 501) {
@@ -254,20 +309,24 @@ pub async fn push_manifest(
     reference: &str,
     bytes: Vec<u8>,
     content_type: &str,
-    token: Option<&str>,
+    token: &mut Option<String>,
+    creds: &super::auth::Credentials,
 ) -> Result<String, StoreError> {
     let url = format!(
-        "https://{}/v2/{}/manifests/{reference}",
-        reg.registry, reg.repository
+        "{}://{}/v2/{}/manifests/{reference}",
+        base_url(&reg.registry),
+        reg.registry,
+        reg.repository
     );
-    let mut req = http
-        .put(&url)
-        .header("content-type", content_type)
-        .body(hclient::RequestBody::Full(bytes.into()));
-    if let Some(t) = token {
-        req = req.header("authorization", &format!("Bearer {t}"));
-    }
-    let resp = req.send().await.map_err(io)?;
+    let resp = send_authed!(
+        http,
+        reg,
+        creds,
+        token,
+        http.put(&url)
+            .header("content-type", content_type)
+            .body(hclient::RequestBody::Full(bytes.clone().into()))
+    );
     if !resp.status().is_success() {
         return Err(io(format!(
             "HTTP {} pushing manifest {}/{}:{reference}",
@@ -292,7 +351,7 @@ fn absolute(location: &str, registry: &str) -> String {
     if location.starts_with("http://") || location.starts_with("https://") {
         location.to_string()
     } else {
-        format!("https://{registry}{location}")
+        format!("{}://{registry}{location}", base_url(registry))
     }
 }
 
@@ -342,6 +401,139 @@ mod tests {
         assert_eq!(
             absolute("https://blobs.example/upload/abc", "reg.example"),
             "https://blobs.example/upload/abc"
+        );
+    }
+
+    #[test]
+    fn loopback_registries_speak_plain_http() {
+        // A local zot serves no TLS; `https://` against it fails before any
+        // protocol happens. Any 127/8 address, not just .1.
+        assert_eq!(base_url("localhost:5000"), "http");
+        assert_eq!(base_url("127.0.0.1:9001"), "http");
+        assert_eq!(base_url("127.9.9.9"), "http");
+        assert_eq!(base_url("[::1]:5000"), "http");
+        assert_eq!(base_url("actpkg.dev"), "https");
+        assert_eq!(base_url("ghcr.io"), "https");
+        assert_eq!(base_url("10.0.0.1:5000"), "https");
+    }
+
+    /// The registry expires its bearer tokens on a short TTL (zot: five
+    /// minutes), and a blob large enough to outlive that — servo's 120 MB is
+    /// measured at ~5 min from a CI runner — gets a `401` on some PATCH in
+    /// the middle of the chunked upload. The push must notice, mint a fresh
+    /// token, and carry on; giving up strands every large component.
+    #[tokio::test]
+    async fn an_expired_token_is_reminted_mid_upload() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+        /// `/token` answers with the next token each time; the last one
+        /// repeats so an unexpected third mint does not panic the responder.
+        struct Rotating(std::sync::Mutex<Vec<&'static str>>);
+        impl Respond for Rotating {
+            fn respond(&self, _request: &Request) -> ResponseTemplate {
+                let mut toks = self.0.lock().unwrap();
+                let t = if toks.len() > 1 {
+                    toks.remove(0)
+                } else {
+                    toks[0]
+                };
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "token": t }))
+            }
+        }
+
+        let server = MockServer::start().await;
+        let base = server.uri(); // http://127.0.0.1:{port}
+        let host_port = base.trim_start_matches("http://").to_string();
+        let reg = ParsedRef::parse(&format!("{host_port}/lib/x")).expect("parses");
+        let repo_path = "/v2/lib/x";
+
+        Mock::given(method("GET"))
+            .and(path("/token"))
+            .respond_with(Rotating(std::sync::Mutex::new(vec!["t1", "t2"])))
+            .mount(&server)
+            .await;
+
+        // An unauthenticated POST to the uploads endpoint is the token probe;
+        // it must always answer with the Bearer challenge.
+        let challenge = format!(
+            "Bearer realm=\"{base}/token\",service=\"reg\",scope=\"repository:lib/x:pull,push\""
+        );
+        Mock::given(method("POST"))
+            .and(path(format!("{repo_path}/blobs/uploads/")))
+            .respond_with(
+                ResponseTemplate::new(401).insert_header("www-authenticate", challenge.as_str()),
+            )
+            .with_priority(2)
+            .mount(&server)
+            .await;
+
+        // The one authenticated POST is the session opening; the Location is
+        // relative on purpose — that is the shape zot sends. Priority 1 beats
+        // the probe mock above, which otherwise also matches this request.
+        Mock::given(method("POST"))
+            .and(path(format!("{repo_path}/blobs/uploads/")))
+            .and(header("authorization", "Bearer t1"))
+            .respond_with(
+                ResponseTemplate::new(201).insert_header("location", "/v2/lib/x/blobs/uploads/s1"),
+            )
+            .with_priority(1)
+            .mount(&server)
+            .await;
+
+        let cs = CHUNK_SIZE;
+        let len = 10 * 1024 * 1024; // three chunks: 4 + 4 + 2 MiB
+        let bytes = vec![7u8; len];
+        let digest = format!("sha256:{}", crate::layout::sha256_hex(&bytes));
+
+        Mock::given(method("HEAD"))
+            .and(path(format!("{repo_path}/blobs/{digest}")))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        // Chunk 1 with the first token, then the registry expires it: chunk 2
+        // answers 401 to `t1` no matter what, and only accepts `t2` — so a
+        // retry that did not re-mint would 401 twice and fail the upload.
+        Mock::given(method("PATCH"))
+            .and(header("content-range", format!("0-{}", cs - 1)))
+            .and(header("authorization", "Bearer t1"))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(header("content-range", format!("{}-{}", cs, 2 * cs - 1)))
+            .and(header("authorization", "Bearer t1"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(header("content-range", format!("{}-{}", cs, 2 * cs - 1)))
+            .and(header("authorization", "Bearer t2"))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(header("content-range", format!("{}-{}", 2 * cs, len - 1)))
+            .and(header("authorization", "Bearer t2"))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("PUT"))
+            .and(path(format!("{repo_path}/blobs/uploads/s1")))
+            .and(header("authorization", "Bearer t2"))
+            .respond_with(ResponseTemplate::new(201))
+            .mount(&server)
+            .await;
+
+        let http = crate::fetch::compression_client().unwrap();
+        let creds = crate::registry::auth::Credentials::Anonymous;
+        let mut token = push_token(&http, &reg, &creds).await.unwrap();
+        let result = push_blob(&http, &reg, &digest, bytes, &mut token, &creds).await;
+        assert!(
+            result.is_ok(),
+            "the upload must survive the registry expiring its token: {result:?}"
         );
     }
 }

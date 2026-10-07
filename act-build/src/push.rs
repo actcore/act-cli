@@ -331,10 +331,13 @@ async fn run_async(wasm_path: &Path, reference: &str, opts: PushOptions) -> Resu
     let creds = crate::oci_auth::resolve(registry).context("resolving registry auth")?;
     let http = registry_client()?;
     let reg = oci_ref.clone();
-    // One token for the whole push: the blob uploads and the manifest PUT share
-    // it, and it is scoped `pull,push` because the manifest is read back after
-    // it is written.
-    let token = act_store::registry::push::push_token(&http, &reg, &creds)
+    // One token lease for the whole push: the blob uploads and the manifest PUT
+    // share it, and it is scoped `pull,push` because the manifest is read back
+    // after it is written. A large layer can outlive the registry's token TTL,
+    // so the requests re-mint the lease in place when a `401` arrives
+    // mid-upload (see `push::send_authed`) — which is why every call takes
+    // `&mut token` and later sends start from the latest one.
+    let mut token = act_store::registry::push::push_token(&http, &reg, &creds)
         .await
         .context("acquiring a push token")?;
 
@@ -347,7 +350,8 @@ async fn run_async(wasm_path: &Path, reference: &str, opts: PushOptions) -> Resu
         &reg,
         &layer_digest,
         wasm.clone(),
-        token.as_deref(),
+        &mut token,
+        &creds,
     )
     .await
     .with_context(|| format!("pushing layer blob for {reference}"))?;
@@ -356,7 +360,8 @@ async fn run_async(wasm_path: &Path, reference: &str, opts: PushOptions) -> Resu
         &reg,
         &config_digest,
         config_json.clone(),
-        token.as_deref(),
+        &mut token,
+        &creds,
     )
     .await
     .with_context(|| format!("pushing config blob for {reference}"))?;
@@ -366,7 +371,8 @@ async fn run_async(wasm_path: &Path, reference: &str, opts: PushOptions) -> Resu
         &reg.reference,
         manifest_bytes.clone(),
         &manifest_content_type,
-        token.as_deref(),
+        &mut token,
+        &creds,
     )
     .await
     .with_context(|| format!("pushing manifest for {reference}"))?;
@@ -404,7 +410,8 @@ async fn run_async(wasm_path: &Path, reference: &str, opts: PushOptions) -> Resu
             tag,
             manifest_bytes.clone(),
             &manifest_content_type,
-            token.as_deref(),
+            &mut token,
+            &creds,
         )
         .await
         .with_context(|| format!("tagging {tag_ref}"))?;

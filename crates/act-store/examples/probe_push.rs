@@ -20,16 +20,13 @@ async fn main() {
     let config = b"{}".to_vec();
     let config_digest = format!("sha256:{}", act_store::layout::sha256_hex(&config));
 
-    let token = push::push_token(
-        &http,
-        &reg,
-        &act_store::registry::auth::Credentials::Anonymous,
-    )
-    .await
-    .expect("token probe");
+    let creds = act_store::registry::auth::Credentials::Anonymous;
+    let mut token = push::push_token(&http, &reg, &creds)
+        .await
+        .expect("token probe");
     println!("token: {}", if token.is_some() { "yes" } else { "none" });
 
-    push::push_blob(&http, &reg, &layer_digest, wasm.clone(), token.as_deref())
+    push::push_blob(&http, &reg, &layer_digest, wasm.clone(), &mut token, &creds)
         .await
         .expect("layer");
     push::push_blob(
@@ -37,7 +34,8 @@ async fn main() {
         &reg,
         &config_digest,
         config.clone(),
-        token.as_deref(),
+        &mut token,
+        &creds,
     )
     .await
     .expect("config");
@@ -59,7 +57,8 @@ async fn main() {
         "0.0.1",
         manifest.into_bytes(),
         "application/vnd.oci.image.manifest.v1+json",
-        token.as_deref(),
+        &mut token,
+        &creds,
     )
     .await
     .expect("manifest");
