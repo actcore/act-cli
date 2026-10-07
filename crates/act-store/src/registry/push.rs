@@ -72,13 +72,19 @@ fn bearer<'a>(
     }
 }
 
-/// Upload one blob, monolithically.
+/// Upload one blob, chunked when it is large enough to need it.
 ///
-/// Two requests, which is what the distribution spec calls the monolithic
-/// path: `POST` opens a session and answers `202` with a `Location`, then one
-/// `PUT` carrying the bytes and the digest closes it. Chunked upload exists
-/// for resumability across a dropped connection; a component layer is a
-/// single-digit number of megabytes, so the complexity would buy nothing.
+/// Two requests — `POST` opening a session, one `PUT` carrying the bytes and
+/// the digest — is what the distribution spec calls the monolithic path, and
+/// it is still what small blobs take. Above [`CHUNK_THRESHOLD`] the push
+/// switches to the spec's chunked path instead: each `PATCH` carries a
+/// `Content-Range` slice of at most [`CHUNK_SIZE`] bytes, so every request
+/// individually completes well inside the response windows of proxy chains
+/// that sit in front of registries (a Cloudflare edge 524s an origin that
+/// takes longer than ~100 s, which is exactly how a 47 MB monolithic push of
+/// python-env died). The final `PUT ?digest=` carries the remaining tail (it
+/// may be empty when the last chunk was also the last byte) and closes the
+/// session.
 ///
 /// A blob the registry already has is not re-sent: `HEAD` first, and a `200`
 /// there means every byte of this upload would be discarded.
@@ -117,15 +123,25 @@ pub async fn push_blob(
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| io("the upload session carried no Location"))?
         .to_string();
+    let mut url = absolute(&location, &reg.registry);
 
-    let url = absolute(&location, &reg.registry);
+    // What the closing PUT carries: the whole body when the push stayed
+    // monolithic, the unPATCHed tail when it went out in chunks (the
+    // registry already holds everything before the tail — a full-body PUT
+    // after PATCHed chunks would double-count and fail the digest).
+    let put_body = if bytes.len() > CHUNK_THRESHOLD {
+        push_chunked(http, reg, &mut url, &bytes, token).await?
+    } else {
+        bytes
+    };
+
     let sep = if url.contains('?') { '&' } else { '?' };
     let put = format!("{url}{sep}digest={digest}");
 
     let resp = bearer(
         http.put(&put)
             .header("content-type", "application/octet-stream")
-            .body(hclient::RequestBody::Full(bytes.into())),
+            .body(hclient::RequestBody::Full(put_body.into())),
         token,
     )
     .send()
@@ -138,6 +154,92 @@ pub async fn push_blob(
         )));
     }
     Ok(())
+}
+
+/// Blobs larger than this go out as chunks.
+///
+/// Two interacting windows shaped it: Cloudflare's ~100 s origin timeout (the
+/// registry path is behind one), and a slow uplink. At 4 MiB a chunk finishes
+/// in under 45 s even at a ~800 Kbps effective rate, and a 50 MB layer fits
+/// in a dozen requests.
+const CHUNK_THRESHOLD: usize = 8 * 1024 * 1024;
+const CHUNK_SIZE: usize = 4 * 1024 * 1024;
+
+/// The byte ranges of the fixed-size chunks over `len`:
+/// `(start, end)` inclusive per the spec's `Content-Range`.
+fn chunk_ranges(len: usize) -> Vec<(usize, usize)> {
+    if len == 0 {
+        return Vec::new();
+    }
+    (0..len.div_ceil(CHUNK_SIZE))
+        .map(|i| {
+            let start = i * CHUNK_SIZE;
+            (start, (start + CHUNK_SIZE).min(len) - 1)
+        })
+        .collect()
+}
+
+/// Push the blob in PATCH chunks, leaving the final tail for the caller's
+/// `PUT ?digest=`.
+///
+/// After every `202` the session's `Location` is re-read — registries may
+/// rotate it per chunk (zot does) — and the last full chunk stays unPATCHed
+/// so the closing `PUT ?digest=` carries real bytes. A `405`/`501` on the
+/// FIRST patch means the registry doesn't speak chunked at all; the session
+/// is untouched at that point, so the caller falls back to the monolithic
+/// `PUT` of the whole body on the same session.
+async fn push_chunked(
+    http: &hclient::Client,
+    reg: &ParsedRef,
+    url: &mut String,
+    bytes: &[u8],
+    token: Option<&str>,
+) -> Result<Vec<u8>, StoreError> {
+    let ranges = chunk_ranges(bytes.len());
+
+    for (i, (start, end)) in ranges.iter().enumerate() {
+        let first = i == 0;
+        let content_len = (end - start + 1).to_string();
+        // `patch` takes the URL by reference: the loop rotates `url` in place
+        // below, and hclient's AsRef<str> bound would move the &mut out of it.
+        let resp = bearer(
+            http.patch(url.as_str())
+                .header("content-type", "application/octet-stream")
+                .header("content-range", &format!("{start}-{end}"))
+                .header("content-length", &content_len)
+                .body(hclient::RequestBody::Full(
+                    bytes[*start..=*end].to_vec().into(),
+                )),
+            token,
+        )
+        .send()
+        .await
+        .map_err(io)?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            if first && (status == 405 || status == 501) {
+                // The registry refuses chunked uploads; the session is fresh,
+                // so the caller's monolithic PUT can still take the whole
+                // body.
+                return Ok(bytes.to_vec());
+            }
+            return Err(io(format!(
+                "HTTP {} patching chunk {start}-{end} of the blob upload",
+                resp.status()
+            )));
+        }
+        // Registries may rotate the session Location per chunk (zot does);
+        // a silent one means the URL is unchanged.
+        if let Some(loc) = resp.headers().get("location").and_then(|v| v.to_str().ok()) {
+            *url = absolute(loc, &reg.registry);
+        }
+    }
+
+    // The closing PUT carries an empty body: every byte went out as PATCH
+    // chunks, and zot's chunked-session PUT answers 400 on a non-empty body
+    // (measured: it treats the PUT as a fresh monolithic restart rather than
+    // an append).
+    Ok(Vec::new())
 }
 
 /// PUT a manifest as the exact bytes given.
@@ -197,6 +299,26 @@ fn absolute(location: &str, registry: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chunk_ranges_covers_the_body_in_order() {
+        // 10 MiB over 4 MiB chunks: 4 + 4 + 2, ranges contiguous and inclusive.
+        let ranges = chunk_ranges(10 * 1024 * 1024);
+        assert_eq!(ranges.len(), 3);
+        assert_eq!(ranges[0], (0, 4 * 1024 * 1024 - 1));
+        assert_eq!(ranges[1], (4 * 1024 * 1024, 8 * 1024 * 1024 - 1));
+        assert_eq!(
+            ranges[2],
+            (8 * 1024 * 1024, 10 * 1024 * 1024 - 1),
+            "the tail is smaller and still inclusive-ended"
+        );
+        // Contiguity: each range starts exactly where the previous ended + 1.
+        for w in ranges.windows(2) {
+            assert_eq!(w[1].0, w[0].1 + 1);
+        }
+        // Under one chunk: a single range spanning the whole body.
+        assert_eq!(chunk_ranges(1024), vec![(0, 1023)]);
+    }
 
     #[test]
     fn a_push_scope_asks_for_pull_as_well() {
