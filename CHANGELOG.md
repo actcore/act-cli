@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.5] - 2026-10-07
+
+### Added
+
+- **Chunked blob uploads** — `act-build push` now sends layers over 8 MB as
+  4 MiB OCI chunked sessions instead of one monolithic request, so large
+  components (python-env at 47 MB) no longer die with a Cloudflare 524
+  behind proxies that time out long uploads. Registries without chunked
+  support fall back to the monolithic upload automatically.
+- **Wasmtime compilation cache** — compiled components are cached on disk
+  (`ACT_WASMTIME_CACHE_DIR`, default `~/.cache/act/wasmtime`), so a
+  component is compiled once per machine rather than once per process.
+  The cache is on by default; a failed cache only costs compile time and
+  degrades to a warning.
+
+### Changed
+
+- The whole hclient family bumped together (0.1.0-alpha.18 line) — brings
+  the `ErrorKind::Uri` / `ErrorKind::Body` classification the registry
+  push path relies on
+- rmcp 3.4.0 → 3.5.0; act-types 0.14.1 → 0.14.2
+
+### Fixed
+
+- Consent prompt no longer repeats the credential key when the summary
+  already names it
+
 ## [0.14.4] - 2026-10-03
 
 **Upgrade: the sandbox engine in 0.14.3 has twelve known vulnerabilities.**
