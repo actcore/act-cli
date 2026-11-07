@@ -33,6 +33,10 @@ futures-util = "0.3"
 http.workspace = true
 http-body = "1"
 http-body-util = "0.1"
+# Read-only mapping of the component file: `read_component_info` and the
+# wasmtime compile both consume the same mapping, so the file is never
+# copied onto the heap as a whole.
+memmap2 = "0.9"
 hyper = "1"
 path-clean = "1"
 # JSON Schema validation of what an agent sends, before it reaches a

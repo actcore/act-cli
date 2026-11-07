@@ -138,6 +138,19 @@ fn load_component_reports_the_digest_of_the_file_bytes() {
     assert_eq!(digest, crate::audit::sha256_hex(&bytes));
 }
 
+#[test]
+fn mmap_component_yields_the_same_bytes_and_digest_as_a_plain_read() {
+    let path = std::path::Path::new("tests/fixtures/ask-canary.wasm");
+    if !path.exists() {
+        // Fixture-dependent; skip rather than fail on a fresh checkout.
+        return;
+    }
+    let (mmap, digest) = mmap_component(path).expect("mmap");
+    let bytes = std::fs::read(path).expect("read fixture");
+    assert_eq!(&mmap[..], &bytes[..]);
+    assert_eq!(digest, crate::audit::sha256_hex(&bytes));
+}
+
 // ── act:credentials declared-slice contract ───────────────────────────
 
 use act_policy::grant::PolicyMode;

@@ -57,6 +57,23 @@ pub fn load_component(engine: &Engine, path: &std::path::Path) -> Result<(Compon
         .map_err(|e| anyhow::anyhow!("failed to load component from {}: {e}", path.display()))?;
     Ok((component, digest))
 }
+
+/// Map a .wasm component file read-only and report the SHA-256 of its bytes.
+///
+/// The mapping stands in for a full read: component info extraction, the
+/// wasmtime compile, and (in act-cli) the embedded skill archive all consume
+/// slices of it, so the file is never copied onto the heap as a whole. The
+/// digest is computed over the mapping and so identifies the same bytes
+/// [`load_component`] would report.
+pub fn mmap_component(path: &std::path::Path) -> Result<(memmap2::Mmap, String)> {
+    let file = std::fs::File::open(path)
+        .map_err(|e| anyhow::anyhow!("failed to open component {}: {e}", path.display()))?;
+    // SAFETY: a read-only mapping of an existing file, never written through.
+    let mmap = unsafe { memmap2::Mmap::map(&file) }
+        .map_err(|e| anyhow::anyhow!("failed to map component {}: {e}", path.display()))?;
+    let digest = crate::audit::sha256_hex(&mmap);
+    Ok((mmap, digest))
+}
 /// Create a linker with WASI bindings (both P2 and P3).
 pub fn create_linker(engine: &Engine) -> Result<Linker<HostState>> {
     let mut linker = Linker::new(engine);

@@ -63,7 +63,7 @@ pub use actor::{
     AuditContext, CallToolResult, ComponentHandle, Metadata, ToolProvider, instantiate_component,
     spawn_component_actor,
 };
-pub use engine::{create_engine, create_linker, load_component};
+pub use engine::{create_engine, create_linker, load_component, mmap_component};
 pub use info::{ComponentError, ComponentInfo, read_component_info};
 pub use resolve::ComponentRef;
 pub use runtime::{

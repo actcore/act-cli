@@ -133,8 +133,12 @@ impl ComponentRuntime {
         consent: ConsentConfig,
     ) -> Result<RunningComponent> {
         let path = crate::resolve::resolve(component, false).await?;
-        let wasm_bytes = std::fs::read(&path).context("reading component file")?;
-        let info = crate::read_component_info(&wasm_bytes)?;
+        // One read-only mapping feeds info extraction, the wasmtime compile
+        // below, and (in act-cli) the embedded skill archive — the file is
+        // never copied onto the heap as a whole.
+        let (wasm_mmap, digest) = crate::mmap_component(&path)?;
+        let wasm_bytes: &[u8] = &wasm_mmap;
+        let info = crate::read_component_info(wasm_bytes)?;
 
         // Mounts before instantiation: preopens are decided here, and the
         // provider registry computes the final ceiling from them.
@@ -153,7 +157,10 @@ impl ComponentRuntime {
             "Loading component"
         );
 
-        let (wasm, digest) = crate::load_component(&self.engine, &path)?;
+        let compiled = wasmtime::component::Component::from_binary(&self.engine, wasm_bytes)
+            .map_err(|e| {
+                anyhow::anyhow!("failed to load component from {}: {e}", path.display())
+            })?;
         let linker = crate::create_linker(&self.engine)?;
 
         // Built before instantiation so the instantiation audit header can
@@ -177,7 +184,7 @@ impl ComponentRuntime {
 
         let (instance, session_provider, store) = crate::instantiate_component(
             &self.engine,
-            &wasm,
+            &compiled,
             &linker,
             &preopens,
             &config.grants,
