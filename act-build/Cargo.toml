@@ -28,7 +28,7 @@ clap.workspace = true
 http.workspace = true
 ciborium.workspace = true
 dirs.workspace = true
-json-patch = "4"
+json-patch = "5"
 act-store = { version = "0.14.4", path = "../crates/act-store" }
 oci-spec = "0.10.0"
 # Canonical-JSON formatter: sorted keys, no insignificant whitespace, which is
@@ -49,8 +49,8 @@ toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 wasmparser.workspace = true
-wasm-encoder = "0.259.0"
-minijinja = "2"
+wasm-encoder = "0.263.0"
+minijinja = "3"
 walkdir = "2"
 include_dir = "0.7"
 

@@ -45,7 +45,7 @@ tracing-subscriber.workspace = true
 toml.workspace = true
 # Library only — the crate's default `cli` feature pulls in a full TUI stack
 # (ratatui, crossterm, syntect, arboard, tiktoken-rs) we don't need.
-toon-format = { version = "0.5", default-features = false }
+toon-format = { version = "0.7", default-features = false }
 dirs.workspace = true
 hclient.workspace = true
 hclient-native.workspace = true
@@ -57,7 +57,7 @@ tar.workspace = true
 url.workspace = true
 wasmparser.workspace = true
 http.workspace = true
-rmcp = { version = "3.5", features = ["server", "transport-io", "transport-streamable-http-server", "elicitation", "schemars"] }
+rmcp = { version = "3.9", features = ["server", "transport-io", "transport-streamable-http-server", "elicitation", "schemars"] }
 owo-colors = { version = "4.3.0", features = ["supports-colors"] }
 act-store = { version = "0.14.4", path = "../crates/act-store" }
 act-mcp = { version = "0.14.4", path = "../crates/act-mcp" }
@@ -86,4 +86,4 @@ insta = "1.48"
 # `stdout(...)`/`stderr(...)` assertions take.
 assert_cmd = "2.2"
 predicates = "3.1"
-rmcp = { version = "3.5", features = ["client", "transport-child-process"] }
+rmcp = { version = "3.9", features = ["client", "transport-child-process"] }
