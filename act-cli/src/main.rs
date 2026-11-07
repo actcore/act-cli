@@ -6,6 +6,7 @@ mod login_cmd;
 mod oauth;
 mod rmcp_bridge;
 mod secret_cmd;
+mod skill_mcp;
 mod tty;
 
 use act_types::cbor;
@@ -750,6 +751,8 @@ struct PreparedComponent {
     metadata: runtime::Metadata,
     /// Whether the component exports `act:sessions/session-provider`.
     has_sessions: bool,
+    /// The component's embedded Agent Skills package, when it has one.
+    skill: Option<Arc<skill_mcp::SkillArchive>>,
 }
 
 /// Resolve, load, and instantiate a component. Returns a running actor handle.
@@ -833,11 +836,19 @@ async fn prepare_component_with_consent(
     let rt = runtime::ComponentRuntime::new()?;
     let running = rt.load(component, &config, consent).await?;
 
+    // A component with an embedded skill serves it over the MCP Skills
+    // extension (SEP-2640) on both MCP transports; other transports ignore it.
+    let skill = skill_mcp::SkillArchive::open(running.path()).unwrap_or_else(|e| {
+        tracing::warn!("skill archive unreadable, serving without skill: {e:#}");
+        None
+    });
+
     Ok(PreparedComponent {
         info: running.info().clone(),
         handle: running.handle().clone(),
         metadata,
         has_sessions: running.has_sessions(),
+        skill,
     })
 }
 
@@ -922,6 +933,7 @@ async fn cmd_run(
             pc.metadata,
             pc.has_sessions,
             default_session_id,
+            pc.skill,
         )
         .await;
     }
@@ -953,6 +965,7 @@ async fn cmd_run(
             pc.metadata,
             pc.has_sessions,
             default_session_id,
+            pc.skill,
         )
         .await;
     }
@@ -1290,37 +1303,38 @@ async fn cmd_info(
 
 async fn cmd_skill(component: ComponentRef, output: Option<PathBuf>) -> Result<()> {
     let component_path = resolve::resolve(&component, false).await?;
-    let wasm_bytes = std::fs::read(&component_path).context("reading component file")?;
 
-    // Find act:skill custom section
-    let mut skill_data: Option<Vec<u8>> = None;
-    for payload in wasmparser::Parser::new(0).parse_all(&wasm_bytes) {
-        if let Ok(wasmparser::Payload::CustomSection(section)) = payload
-            && section.name() == "act:skill"
-        {
-            skill_data = Some(section.data().to_vec());
-            break;
-        }
-    }
-
-    let tar_bytes = skill_data.context("component does not contain an act:skill section")?;
+    // Map the file and index the embedded package; file bytes are written
+    // out of the mapping, so the component is never read onto the heap.
+    let archive = skill_mcp::SkillArchive::open(&component_path)
+        .context("reading skill archive")?
+        .context("component does not contain an act:skill section")?;
 
     // Determine output directory
-    let component_info = runtime::read_component_info(&wasm_bytes)?;
-    let out_dir = output.unwrap_or_else(|| {
-        PathBuf::from(".agents")
-            .join("skills")
-            .join(&component_info.std.name)
-    });
+    let out_dir = match output {
+        Some(p) => p,
+        None => {
+            let component_info = runtime::read_component_info(&std::fs::read(&component_path)?)?;
+            PathBuf::from(".agents")
+                .join("skills")
+                .join(&component_info.std.name)
+        }
+    };
 
     std::fs::create_dir_all(&out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
 
-    // Extract tar
-    let cursor = std::io::Cursor::new(tar_bytes);
-    let mut archive = tar::Archive::new(cursor);
-    archive
-        .unpack(&out_dir)
-        .with_context(|| format!("extracting skill to {}", out_dir.display()))?;
+    // Extract: every entry the archive indexed, written from its mapping.
+    for path in archive.paths() {
+        let bytes = archive
+            .file(path)
+            .context("indexed entry missing from mapping")?;
+        let target = out_dir.join(path);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        std::fs::write(&target, bytes).with_context(|| format!("writing {}", target.display()))?;
+    }
 
     println!("{}", out_dir.display());
     Ok(())

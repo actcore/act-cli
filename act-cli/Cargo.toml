@@ -66,6 +66,10 @@ act-runtime = { version = "0.14.4", path = "../crates/act-runtime" }
 act-credentials = { version = "0.14.4", path = "../crates/act-credentials" }
 async-trait = "0.1"
 bytesize = "2.3.1"
+# Read-only mapping of the component file: the `act:skill` tar is indexed
+# in place and file contents served as slices of the mapping, so a large
+# skill costs no heap and no read of the whole binary.
+memmap2 = "0.9"
 
 # Terminal echo control for the credential prompt (`tty.rs`). Named per
 # platform because the two APIs share nothing: `termios` on unix, the console
@@ -79,6 +83,9 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 
 [dev-dependencies]
 tempfile.workspace = true
+# Section framing for the skill-archive test fixtures — the same encoder
+# `act-build pack` uses, so fixtures match production bytes.
+wasm-encoder = "0.263"
 # Golden output for the `act info` renderers (`format::tests::golden`).
 insta = "1.48"
 # The integration tests drive the real binary. `assert_cmd` locates it and

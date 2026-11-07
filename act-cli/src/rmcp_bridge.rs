@@ -20,6 +20,9 @@ pub struct ActRmcpBridge {
     /// this id is forced into every call's `std:session-id` metadata,
     /// overriding any client-supplied value.
     pub default_session_id: Option<String>,
+    /// The component's embedded Agent Skills package (ACT-AGENTSKILLS),
+    /// served through the SEP-2640 Skills extension when present.
+    pub skill: Option<Arc<crate::skill_mcp::SkillArchive>>,
 }
 
 pub async fn run_stdio(
@@ -28,6 +31,7 @@ pub async fn run_stdio(
     metadata: runtime::Metadata,
     has_sessions: bool,
     default_session_id: Option<String>,
+    skill: Option<Arc<crate::skill_mcp::SkillArchive>>,
 ) -> anyhow::Result<()> {
     let bridge = ActRmcpBridge {
         handle,
@@ -35,6 +39,7 @@ pub async fn run_stdio(
         metadata,
         has_sessions,
         default_session_id,
+        skill,
     };
 
     let service = rmcp::serve_server(bridge, (tokio::io::stdin(), tokio::io::stdout()))
@@ -68,6 +73,7 @@ pub async fn run_http(
     metadata: runtime::Metadata,
     has_sessions: bool,
     default_session_id: Option<String>,
+    skill: Option<Arc<crate::skill_mcp::SkillArchive>>,
 ) -> anyhow::Result<()> {
     use rmcp::transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
@@ -81,6 +87,7 @@ pub async fn run_http(
                 metadata: metadata.clone(),
                 has_sessions,
                 default_session_id: default_session_id.clone(),
+                skill: skill.clone(),
             })
         },
         Arc::new(LocalSessionManager::default()),
@@ -124,11 +131,171 @@ fn list_tools_result(tools: Vec<rmcp::model::Tool>) -> rmcp::model::ListToolsRes
         .with_cache_scope(rmcp::model::CacheScope::Private)
 }
 
+/// Freshness hint for skill results (SEP-2549). The package is baked into
+/// the component binary at build time, so it cannot change while the process
+/// serves it — five minutes saves a client a round trip without risking
+/// staleness, and `Public` because the bytes are the same for every client
+/// of the same component (unlike tool lists, which depend on grants).
+const SKILL_TTL_MS: u64 = 300_000;
+
 impl ActRmcpBridge {
+    /// SEP-2640 `skills/list` body: the embedded skill, if any.
+    ///
+    /// A component without a skill section serves an empty list rather than
+    /// an error — the extension is only advertised when there is something
+    /// to serve, so a client that calls it anyway learns nothing new.
+    fn skills_list_result(&self) -> rmcp::model::ListSkillsResult {
+        let skills = self
+            .skill
+            .as_ref()
+            .map(|archive| vec![archive.skill().clone()])
+            .unwrap_or_default();
+        rmcp::model::ListSkillsResult::with_all_items(skills)
+            .with_ttl_ms(SKILL_TTL_MS)
+            .with_cache_scope(rmcp::model::CacheScope::Public)
+    }
+
+    /// SEP-2640 `skills/get` body: the manifest for one skill URI, or
+    /// `-32602` when this host does not serve that URI.
+    fn skill_get_result(
+        &self,
+        request: &rmcp::model::GetSkillRequestParams,
+    ) -> Result<rmcp::model::GetSkillResult, rmcp::ErrorData> {
+        let Some(archive) = self.skill.as_ref() else {
+            return Err(rmcp::model::ErrorData::invalid_params(
+                format!("no skill served; {request:?} names one"),
+                None,
+            ));
+        };
+        let skill = archive.skill();
+        if request.uri != skill.uri {
+            return Err(rmcp::model::ErrorData::invalid_params(
+                format!("unknown skill URI {} (served: {})", request.uri, skill.uri),
+                None,
+            ));
+        }
+        Ok(rmcp::model::GetSkillResult::new(skill.clone())
+            .with_ttl_ms(SKILL_TTL_MS)
+            .with_cache_scope(rmcp::model::CacheScope::Public))
+    }
+
+    /// `resources/read` body for `skill://` URIs: the file bytes straight
+    /// from the mmap, as text when the extension says text.
+    ///
+    /// A URI outside this skill (wrong scheme, wrong skill name, unknown
+    /// path) is `resource_not_found`, matching how MCP servers answer
+    /// reads of URIs they do not know.
+    fn skill_read_resource_result(
+        &self,
+        uri: &str,
+    ) -> Result<rmcp::model::ReadResourceResult, rmcp::ErrorData> {
+        const TEXT_MARKDOWN: &str = "text/markdown";
+        let Some(archive) = self.skill.as_ref() else {
+            return Err(rmcp::model::ErrorData::resource_not_found(
+                format!("no skill served; nothing answers {uri}"),
+                None,
+            ));
+        };
+        let prefix = format!("skill://{}/", archive.frontmatter_name());
+        let Some(path) = uri.strip_prefix(&prefix) else {
+            return Err(rmcp::model::ErrorData::resource_not_found(
+                format!("{uri} is not part of skill {}", archive.frontmatter_name()),
+                None,
+            ));
+        };
+        let Some(bytes) = archive.file(path) else {
+            return Err(rmcp::model::ErrorData::resource_not_found(
+                format!("skill file {uri} does not exist"),
+                None,
+            ));
+        };
+        let text = std::str::from_utf8(bytes)
+            .map(str::to_string)
+            .map_err(|_| {
+                rmcp::model::ErrorData::resource_not_found(
+                    format!("{uri} is not text; binary skill files are not served"),
+                    None,
+                )
+            })?;
+        let mime = if path.ends_with(".md") {
+            TEXT_MARKDOWN
+        } else {
+            "text/plain"
+        };
+        Ok(rmcp::model::ReadResourceResult::new(vec![
+            rmcp::model::ResourceContents::text(text, uri).with_mime_type(mime),
+        ]))
+    }
+
+    /// `resources/list` body: only the SKILL.md manifest, per SEP-2640 —
+    /// the file manifest itself is discoverable through `skills/get`.
+    fn skill_list_resources_result(&self) -> rmcp::model::ListResourcesResult {
+        let resources = self
+            .skill
+            .as_ref()
+            .map(|archive| {
+                let skill = archive.skill();
+                vec![
+                    rmcp::model::Resource::new(skill.uri.clone(), skill.frontmatter.name.clone())
+                        .with_description(skill.frontmatter.description.clone()),
+                ]
+            })
+            .unwrap_or_default();
+        rmcp::model::ListResourcesResult::with_all_items(resources)
+            .with_ttl_ms(SKILL_TTL_MS)
+            .with_cache_scope(rmcp::model::CacheScope::Public)
+    }
+
+    /// SEP-2640 `resources/directory/read` body: direct children of a
+    /// directory in the package, or `-32602` when the URI is not a
+    /// directory of this skill.
+    fn skill_read_directory_result(
+        &self,
+        uri: &str,
+    ) -> Result<rmcp::model::ReadResourceDirectoryResult, rmcp::ErrorData> {
+        let Some(archive) = self.skill.as_ref() else {
+            return Err(rmcp::model::ErrorData::invalid_params(
+                format!("no skill served; {uri} names no directory"),
+                None,
+            ));
+        };
+        let children = archive.directory_children(uri).ok_or_else(|| {
+            rmcp::model::ErrorData::invalid_params(
+                format!("{uri} is not a directory of the served skill"),
+                None,
+            )
+        })?;
+        Ok(rmcp::model::ListResourcesResult::with_all_items(children)
+            .with_ttl_ms(SKILL_TTL_MS)
+            .with_cache_scope(rmcp::model::CacheScope::Public))
+    }
+
     /// Whether session lifecycle ops are exposed to clients. False in
     /// session-of-1 mode (a default session is pre-opened and hidden).
     fn expose_sessions(&self) -> bool {
         self.has_sessions && self.default_session_id.is_none()
+    }
+
+    /// What this server can do, as advertised in the `initialize` response.
+    ///
+    /// The builder is typestate-chained, so the skill-bearing and skill-less
+    /// shapes are built on separate branches and unify on the finished
+    /// `ServerCapabilities`.
+    fn capabilities(&self) -> rmcp::model::ServerCapabilities {
+        let builder = rmcp::model::ServerCapabilities::builder().enable_tools();
+        if self.skill.is_some() {
+            // Skills ride on resources (SEP-2640): the manifest is advertised
+            // in `resources/list`, files are served through `resources/read`,
+            // and `directory_read` exposes package directories. The extension
+            // id is declared so clients can negotiate the capability
+            // explicitly.
+            builder
+                .enable_resources()
+                .enable_skills_with_directory_read()
+                .build()
+        } else {
+            builder.build()
+        }
     }
 
     /// Base metadata for non-call requests (list-tools, schema fetch).
@@ -325,15 +492,12 @@ impl ActRmcpBridge {
 
 impl rmcp::ServerHandler for ActRmcpBridge {
     fn get_info(&self) -> rmcp::model::ServerConfig {
-        rmcp::model::ServerConfig::new(
-            rmcp::model::ServerCapabilities::builder()
-                .enable_tools()
-                .build(),
+        rmcp::model::ServerConfig::new(self.capabilities()).with_server_info(
+            rmcp::model::Implementation::new(
+                self.info.std.name.clone(),
+                self.info.std.version.clone(),
+            ),
         )
-        .with_server_info(rmcp::model::Implementation::new(
-            self.info.std.name.clone(),
-            self.info.std.version.clone(),
-        ))
     }
 
     fn list_tools(
@@ -371,6 +535,53 @@ impl rmcp::ServerHandler for ActRmcpBridge {
         self.call_tool_impl(request, &context)
             .await
             .map(rmcp::model::CallToolResponse::Complete)
+    }
+
+    // ── SEP-2640 Skills extension ───────────────────────────────────────────
+    //
+    // All three hooks serve immutable bytes read straight from the component
+    // file's mmap — no guest involvement, no consent, no metadata folding:
+    // the package is compiled into the component, not a runtime state.
+
+    async fn list_skills(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListSkillsResult, rmcp::ErrorData> {
+        Ok(self.skills_list_result())
+    }
+
+    async fn get_skill(
+        &self,
+        request: rmcp::model::GetSkillRequestParams,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::GetSkillResult, rmcp::ErrorData> {
+        self.skill_get_result(&request)
+    }
+
+    async fn read_resource(
+        &self,
+        request: rmcp::model::ReadResourceRequestParams,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ReadResourceResponse, rmcp::ErrorData> {
+        self.skill_read_resource_result(&request.uri)
+            .map(rmcp::model::ReadResourceResponse::Complete)
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListResourcesResult, rmcp::ErrorData> {
+        Ok(self.skill_list_resources_result())
+    }
+
+    async fn read_resource_directory(
+        &self,
+        request: rmcp::model::ReadResourceDirectoryRequestParams,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ReadResourceDirectoryResult, rmcp::ErrorData> {
+        self.skill_read_directory_result(&request.uri)
     }
 }
 
@@ -726,20 +937,21 @@ mod tests {
         }
     }
 
-    fn fake_info() -> runtime::ComponentInfo {
+    pub(crate) fn fake_info() -> runtime::ComponentInfo {
         let mut info = runtime::ComponentInfo::default();
         info.std.name = "example".to_string();
         info.std.version = "1.2.3".to_string();
         info
     }
 
-    fn bridge_with_default(default: Option<&str>) -> ActRmcpBridge {
+    pub(crate) fn bridge_with_default(default: Option<&str>) -> ActRmcpBridge {
         ActRmcpBridge {
             handle: runtime::ComponentHandle::disconnected(),
             info: fake_info(),
             metadata: runtime::Metadata::default(),
             has_sessions: true,
             default_session_id: default.map(str::to_string),
+            skill: None,
         }
     }
 
@@ -852,6 +1064,7 @@ mod tests {
             metadata: runtime::Metadata::default(),
             has_sessions: false,
             default_session_id: None,
+            skill: None,
         };
         let info = rmcp::ServerHandler::get_info(&bridge);
         assert_eq!(info.server_info.name, "example");
@@ -1571,5 +1784,227 @@ mod consent_tests {
         let prompter = McpElicitationPrompter::new(current);
         assert!(!prompter.decide(&ask()).await, "no answer → deny");
         handler.await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod skill_tests {
+    use super::tests::fake_info;
+    use super::*;
+    use crate::skill_mcp::fixtures::skill_archive;
+
+    fn bridge_with_skill() -> ActRmcpBridge {
+        ActRmcpBridge {
+            handle: runtime::ComponentHandle::disconnected(),
+            info: fake_info(),
+            metadata: runtime::Metadata::default(),
+            has_sessions: false,
+            default_session_id: None,
+            skill: Some(skill_archive()),
+        }
+    }
+
+    fn skillless() -> ActRmcpBridge {
+        ActRmcpBridge {
+            handle: runtime::ComponentHandle::disconnected(),
+            info: fake_info(),
+            metadata: runtime::Metadata::default(),
+            has_sessions: false,
+            default_session_id: None,
+            skill: None,
+        }
+    }
+
+    #[test]
+    fn get_info_declares_skills_extension_only_when_a_skill_is_served() {
+        let with = rmcp::ServerHandler::get_info(&bridge_with_skill());
+        let extensions = with
+            .capabilities
+            .extensions
+            .as_ref()
+            .expect("skill-bearing bridge must declare extensions");
+        assert!(
+            extensions.contains_key(rmcp::model::SKILLS_EXTENSION_ID),
+            "SEP-2640 extension id must be advertised"
+        );
+        assert!(
+            with.capabilities.resources.is_some(),
+            "skills ride on resources: resources capability must be on"
+        );
+
+        let without = rmcp::ServerHandler::get_info(&skillless());
+        let extensions = without.capabilities.extensions.as_ref();
+        assert!(
+            extensions.is_none_or(|e| !e.contains_key(rmcp::model::SKILLS_EXTENSION_ID)),
+            "skill-less bridge must not advertise skills"
+        );
+        assert!(
+            without.capabilities.resources.is_none(),
+            "skill-less bridge serves no resources either"
+        );
+    }
+
+    #[test]
+    fn list_skills_serves_the_single_embedded_skill_with_cache_hints() {
+        let bridge = bridge_with_skill();
+        let result = bridge.skills_list_result();
+        assert_eq!(result.skills.len(), 1);
+        let skill = &result.skills[0];
+        assert_eq!(skill.frontmatter.name, "navigable");
+        assert_eq!(skill.frontmatter.description, "SQL navigation helpers");
+        assert_eq!(
+            result.ttl_ms,
+            Some(300_000),
+            "skill package is immutable: long TTL"
+        );
+        assert_eq!(
+            result.cache_scope,
+            Some(rmcp::model::CacheScope::Public),
+            "package bytes never change for a given component: publicly cacheable"
+        );
+    }
+
+    #[test]
+    fn list_skills_on_a_skillless_bridge_is_empty_not_an_error() {
+        let result = skillless().skills_list_result();
+        assert!(result.skills.is_empty());
+    }
+
+    #[test]
+    fn get_skill_returns_the_manifest_with_file_digests() {
+        let bridge = bridge_with_skill();
+        let request = rmcp::model::GetSkillRequestParams::new("skill://navigable/SKILL.md");
+        let result = bridge
+            .skill_get_result(&request)
+            .expect("served skill resolves");
+        let rmcp::model::SkillResources::Files(resources) = &result.skill.resources else {
+            panic!("manifest must list files, not claim dynamic resources");
+        };
+        let uris: Vec<&str> = resources.iter().map(|r| r.uri.as_str()).collect();
+        assert_eq!(
+            uris,
+            [
+                "skill://navigable/SKILL.md",
+                "skill://navigable/queries/basic.sql",
+                "skill://navigable/references/api.md"
+            ],
+            "manifest lists every package file with skill:// URIs"
+        );
+        let archive = skill_archive();
+        for resource in resources {
+            let path = resource
+                .uri
+                .strip_prefix("skill://navigable/")
+                .expect("skill URI");
+            let bytes = archive.file(path).expect("file present");
+            resource
+                .verify(bytes)
+                .expect("digest matches archive bytes");
+        }
+    }
+
+    #[test]
+    fn get_skill_with_a_foreign_uri_is_invalid_params() {
+        let bridge = bridge_with_skill();
+        let request = rmcp::model::GetSkillRequestParams::new("skill://other/SKILL.md");
+        let err = bridge
+            .skill_get_result(&request)
+            .expect_err("foreign URI must error");
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn read_resource_serves_package_files_from_the_mapping() {
+        let bridge = bridge_with_skill();
+        let result = bridge
+            .skill_read_resource_result("skill://navigable/queries/basic.sql")
+            .expect("package file resolves");
+        assert_eq!(result.contents.len(), 1);
+        match &result.contents[0] {
+            rmcp::model::ResourceContents::TextResourceContents { uri, text, .. } => {
+                assert_eq!(uri, "skill://navigable/queries/basic.sql");
+                assert_eq!(text, "SELECT 1;");
+            }
+            other => panic!("expected text contents, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_resource_markdown_files_declare_their_mime() {
+        let bridge = bridge_with_skill();
+        let result = bridge
+            .skill_read_resource_result("skill://navigable/references/api.md")
+            .expect("package file resolves");
+        match &result.contents[0] {
+            rmcp::model::ResourceContents::TextResourceContents { mime_type, .. } => {
+                assert_eq!(mime_type.as_deref(), Some("text/markdown"));
+            }
+            other => panic!("expected text contents, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_resource_of_an_unknown_uri_is_resource_not_found() {
+        let bridge = bridge_with_skill();
+        let err = bridge
+            .skill_read_resource_result("skill://navigable/nope.md")
+            .expect_err("unknown file must error");
+        assert_eq!(err.code, rmcp::model::ErrorCode::RESOURCE_NOT_FOUND);
+        let err = bridge
+            .skill_read_resource_result("file:///etc/passwd")
+            .expect_err("non-skill URI must error");
+        assert_eq!(err.code, rmcp::model::ErrorCode::RESOURCE_NOT_FOUND);
+    }
+
+    #[test]
+    fn list_resources_advertises_the_skill_manifest() {
+        let bridge = bridge_with_skill();
+        let result = bridge.skill_list_resources_result();
+        assert_eq!(result.resources.len(), 1, "only SKILL.md is advertised");
+        let resource = &result.resources[0];
+        assert_eq!(resource.uri, "skill://navigable/SKILL.md");
+        assert_eq!(resource.name, "navigable");
+        assert_eq!(
+            resource.description.as_deref(),
+            Some("SQL navigation helpers"),
+            "frontmatter description becomes the resource description"
+        );
+    }
+
+    #[test]
+    fn list_resources_on_a_skillless_bridge_is_empty() {
+        let result = skillless().skill_list_resources_result();
+        assert!(result.resources.is_empty());
+    }
+
+    #[test]
+    fn directory_read_lists_direct_children_of_the_root() {
+        let bridge = bridge_with_skill();
+        let result = bridge
+            .skill_read_directory_result("skill://navigable")
+            .expect("root is a directory");
+        let uris: Vec<&str> = result.resources.iter().map(|r| r.uri.as_str()).collect();
+        assert_eq!(
+            uris,
+            [
+                "skill://navigable/SKILL.md",
+                "skill://navigable/queries",
+                "skill://navigable/references"
+            ],
+            "direct children only; subdirectory contents stay below"
+        );
+    }
+
+    #[test]
+    fn directory_read_of_a_file_or_foreign_uri_is_invalid_params() {
+        let bridge = bridge_with_skill();
+        let err = bridge
+            .skill_read_directory_result("skill://navigable/SKILL.md")
+            .expect_err("file is not a directory");
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        let err = bridge
+            .skill_read_directory_result("skill://elsewhere")
+            .expect_err("foreign prefix must error");
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
     }
 }
