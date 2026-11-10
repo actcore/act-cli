@@ -889,8 +889,7 @@ dependencies = [
 [[package]]
 name = "cranelift-assembler-x64"
 version = "0.137.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80552083a2db143c5d951debe9f59a7d9f22084c70abe450fed5220060fa26c3"
+source = "git+https://github.com/GamePad64/wasmtime?branch=fix%2Fconcurrent-defer-caller-completion-50.0.x#9142c54771d6c8e283e4f9d7c38fe699894e16a3"
 dependencies = [
  "cranelift-assembler-x64-meta",
 ]
@@ -898,8 +897,7 @@ dependencies = [
 [[package]]
 name = "cranelift-assembler-x64-meta"
 version = "0.137.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cf84b7e5f0aa42cb0d55cabf01c520fdb70a50d8b572a841ee875083589d643"
+source = "git+https://github.com/GamePad64/wasmtime?branch=fix%2Fconcurrent-defer-caller-completion-50.0.x#9142c54771d6c8e283e4f9d7c38fe699894e16a3"
 dependencies = [
  "cranelift-srcgen",
 ]
@@ -907,8 +905,7 @@ dependencies = [
 [[package]]
 name = "cranelift-bforest"
 version = "0.137.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81d47ec2358cdbace0520ac212c003656b529f0c60e43fbbe9a331632cd9e8fc"
+source = "git+https://github.com/GamePad64/wasmtime?branch=fix%2Fconcurrent-defer-caller-completion-50.0.x#9142c54771d6c8e283e4f9d7c38fe699894e16a3"
 dependencies = [
  "cranelift-entity",
  "wasmtime-internal-core",
@@ -917,8 +914,7 @@ dependencies = [
 [[package]]
 name = "cranelift-bitset"
 version = "0.137.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eebb94b54db96b26e387bc8c698823d83d9254d551a6ed846a60cebf62ed7135"
+source = "git+https://github.com/GamePad64/wasmtime?branch=fix%2Fconcurrent-defer-caller-completion-50.0.x#9142c54771d6c8e283e4f9d7c38fe699894e16a3"
 dependencies = [
  "serde",
  "serde_derive",
@@ -928,8 +924,7 @@ dependencies = [
 [[package]]
 name = "cranelift-codegen"
 version = "0.137.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be81b89cb7b186a26cf2014c312aeb17737da988b4444d16a0cb3424d637d44e"
+source = "git+https://github.com/GamePad64/wasmtime?branch=fix%2Fconcurrent-defer-caller-completion-50.0.x#9142c54771d6c8e283e4f9d7c38fe699894e16a3"
 dependencies = [
  "bumpalo",
  "cranelift-assembler-x64",
@@ -959,8 +954,7 @@ dependencies = [
 [[package]]
 name = "cranelift-codegen-meta"
 version = "0.137.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb1b64a509c3814932fb9845ce8da835cd10d62c6c56dacfdcd9af389d3bf313"
+source = "git+https://github.com/GamePad64/wasmtime?branch=fix%2Fconcurrent-defer-caller-completion-50.0.x#9142c54771d6c8e283e4f9d7c38fe699894e16a3"
 dependencies = [
  "cranelift-assembler-x64-meta",
  "cranelift-codegen-shared",
@@ -972,14 +966,12 @@ dependencies = [
 [[package]]
 name = "cranelift-codegen-shared"
 version = "0.137.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e667a0e9ed3bbbed0e7e52cd2dea85a645745b39f547097e2fca0bf317cac9df"
+source = "git+https://github.com/GamePad64/wasmtime?branch=fix%2Fconcurrent-defer-caller-completion-50.0.x#9142c54771d6c8e283e4f9d7c38fe699894e16a3"
 
 [[package]]
 name = "cranelift-control"
 version = "0.137.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5fa7d5123705226a368b6b1c7b10f23036c35e8041ffdd5f6505790f5c31404"
+source = "git+https://github.com/GamePad64/wasmtime?branch=fix%2Fconcurrent-defer-caller-completion-50.0.x#9142c54771d6c8e283e4f9d7c38fe699894e16a3"
 dependencies = [
  "arbitrary",
 ]
@@ -987,8 +979,7 @@ dependencies = [
 [[package]]
 name = "cranelift-entity"
 version = "0.137.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1bffb83ac1d7052691d1710ca8eb334d4fcaad363e589f2b89d38d97bda5776"
+source = "git+https://github.com/GamePad64/wasmtime?branch=fix%2Fconcurrent-defer-caller-completion-50.0.x#9142c54771d6c8e283e4f9d7c38fe699894e16a3"
 dependencies = [
  "cranelift-bitset",
  "serde",
@@ -999,8 +990,7 @@ dependencies = [
 [[package]]
 name = "cranelift-frontend"
 version = "0.137.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1bc727c856bf57eae76c72ac4f9b1eaf49947a2b02f699798262fc8399557b7a"
+source = "git+https://github.com/GamePad64/wasmtime?branch=fix%2Fconcurrent-defer-caller-completion-50.0.x#9142c54771d6c8e283e4f9d7c38fe699894e16a3"
 dependencies = [
  "cranelift-codegen",
  "hashbrown 0.17.1",
@@ -1012,14 +1002,12 @@ dependencies = [
 [[package]]
 name = "cranelift-isle"
 version = "0.137.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a92e743f35915d55cd3d3178aab483661f78c2f9274aa704f29be69e3789c5bd"
+source = "git+https://github.com/GamePad64/wasmtime?branch=fix%2Fconcurrent-defer-caller-completion-50.0.x#9142c54771d6c8e283e4f9d7c38fe699894e16a3"
 
 [[package]]
 name = "cranelift-native"
 version = "0.137.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "127c50e5e2b2b97116d4e2c079db6ce29b07303cd1ab48a8bb4c2abbf16a7a68"
+source = "git+https://github.com/GamePad64/wasmtime?branch=fix%2Fconcurrent-defer-caller-completion-50.0.x#9142c54771d6c8e283e4f9d7c38fe699894e16a3"
 dependencies = [
  "cranelift-codegen",
  "libc",
@@ -1030,8 +1018,7 @@ dependencies = [
 [[package]]
 name = "cranelift-srcgen"
 version = "0.137.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f34b169b8cbbaed2b4995205f1d02d7eac4b2771df5479255fe5483e1334a39"
+source = "git+https://github.com/GamePad64/wasmtime?branch=fix%2Fconcurrent-defer-caller-completion-50.0.x#9142c54771d6c8e283e4f9d7c38fe699894e16a3"
 
 [[package]]
 name = "crc32fast"
@@ -1443,7 +1430,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2295,7 +2282,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3026,8 +3013,7 @@ dependencies = [
 [[package]]
 name = "pulley-interpreter"
 version = "50.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64c66a82a3d48db9b7c2ba1307e06fcb81a35ba82952f58bc1bfb218321f7c0b"
+source = "git+https://github.com/GamePad64/wasmtime?branch=fix%2Fconcurrent-defer-caller-completion-50.0.x#9142c54771d6c8e283e4f9d7c38fe699894e16a3"
 dependencies = [
  "cranelift-bitset",
  "log",
@@ -3038,8 +3024,7 @@ dependencies = [
 [[package]]
 name = "pulley-macros"
 version = "50.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "138a9a5997d9cba5e54c7c3b836d7164f2bfe0852c7e98d5835e1708d6efdf36"
+source = "git+https://github.com/GamePad64/wasmtime?branch=fix%2Fconcurrent-defer-caller-completion-50.0.x#9142c54771d6c8e283e4f9d7c38fe699894e16a3"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3061,7 +3046,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "socket2",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3325,7 +3310,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3391,7 +3376,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3911,10 +3896,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4545,8 +4530,7 @@ dependencies = [
 [[package]]
 name = "wasmtime"
 version = "50.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdfacce893df54d319b29720e79edb001cd1b48faaf78fdb3b9c608eaeeea29f"
+source = "git+https://github.com/GamePad64/wasmtime?branch=fix%2Fconcurrent-defer-caller-completion-50.0.x#9142c54771d6c8e283e4f9d7c38fe699894e16a3"
 dependencies = [
  "addr2line",
  "async-trait",
@@ -4598,8 +4582,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-environ"
 version = "50.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f79df81f2a5d7a1cb8b9eb35b4a2d7a8cb8e948bd3e5a1f79036c0094879275a"
+source = "git+https://github.com/GamePad64/wasmtime?branch=fix%2Fconcurrent-defer-caller-completion-50.0.x#9142c54771d6c8e283e4f9d7c38fe699894e16a3"
 dependencies = [
  "anyhow",
  "cpp_demangle",
@@ -4628,8 +4611,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-cache"
 version = "50.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee31304d6e33265ac43eb24966801900a28a8161c10e035f5582db3bccf2a7e6"
+source = "git+https://github.com/GamePad64/wasmtime?branch=fix%2Fconcurrent-defer-caller-completion-50.0.x#9142c54771d6c8e283e4f9d7c38fe699894e16a3"
 dependencies = [
  "base64 0.22.1",
  "directories-next",
@@ -4648,8 +4630,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-component-macro"
 version = "50.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61479c89e12c716cc7a962e68574c01f3cf8bfd27fbeb6fc477b27b5096b8350"
+source = "git+https://github.com/GamePad64/wasmtime?branch=fix%2Fconcurrent-defer-caller-completion-50.0.x#9142c54771d6c8e283e4f9d7c38fe699894e16a3"
 dependencies = [
  "anyhow",
  "proc-macro2",
@@ -4663,14 +4644,12 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-component-util"
 version = "50.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33c2836b127721e0abdc3490545cdc6d5269d1050a19a4057909901c16e1b781"
+source = "git+https://github.com/GamePad64/wasmtime?branch=fix%2Fconcurrent-defer-caller-completion-50.0.x#9142c54771d6c8e283e4f9d7c38fe699894e16a3"
 
 [[package]]
 name = "wasmtime-internal-core"
 version = "50.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e765a08b721bf2b2e5cbd3e9365a71b497d57fc5e8b2cf73ddf12d85d502d7fa"
+source = "git+https://github.com/GamePad64/wasmtime?branch=fix%2Fconcurrent-defer-caller-completion-50.0.x#9142c54771d6c8e283e4f9d7c38fe699894e16a3"
 dependencies = [
  "anyhow",
  "hashbrown 0.17.1",
@@ -4681,8 +4660,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-cranelift"
 version = "50.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25e8f190dd62c021d278ab0bd4afab06426844831d6a35dc369835754ad997d4"
+source = "git+https://github.com/GamePad64/wasmtime?branch=fix%2Fconcurrent-defer-caller-completion-50.0.x#9142c54771d6c8e283e4f9d7c38fe699894e16a3"
 dependencies = [
  "cranelift-codegen",
  "cranelift-control",
@@ -4707,8 +4685,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-fiber"
 version = "50.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6326d47c759c0478489a034f1282a6f516ce97594f9af785539697d03add17ec"
+source = "git+https://github.com/GamePad64/wasmtime?branch=fix%2Fconcurrent-defer-caller-completion-50.0.x#9142c54771d6c8e283e4f9d7c38fe699894e16a3"
 dependencies = [
  "cc",
  "libc",
@@ -4721,8 +4698,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-jit-debug"
 version = "50.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b78d046468d9aaf81e97954165369693084f43e313daad47f959b1169d596d3"
+source = "git+https://github.com/GamePad64/wasmtime?branch=fix%2Fconcurrent-defer-caller-completion-50.0.x#9142c54771d6c8e283e4f9d7c38fe699894e16a3"
 dependencies = [
  "cc",
  "object",
@@ -4733,8 +4709,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-jit-icache-coherence"
 version = "50.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac3e5f3cb3fdc12489163dc60741696dddb32c9ed0662ff59c8dfb177ffd7a07"
+source = "git+https://github.com/GamePad64/wasmtime?branch=fix%2Fconcurrent-defer-caller-completion-50.0.x#9142c54771d6c8e283e4f9d7c38fe699894e16a3"
 dependencies = [
  "libc",
  "wasmtime-internal-core",
@@ -4744,8 +4719,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-unwinder"
 version = "50.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbf9357720c1477c43f88dace11923737e8aa87abe5f46f90e23c93a2a0fb3fe"
+source = "git+https://github.com/GamePad64/wasmtime?branch=fix%2Fconcurrent-defer-caller-completion-50.0.x#9142c54771d6c8e283e4f9d7c38fe699894e16a3"
 dependencies = [
  "cranelift-codegen",
  "log",
@@ -4756,8 +4730,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-versioned-export-macros"
 version = "50.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce7c663ad018cc86ce824e21b35b8bed9877ee9ca6af8ef8672e28852450392e"
+source = "git+https://github.com/GamePad64/wasmtime?branch=fix%2Fconcurrent-defer-caller-completion-50.0.x#9142c54771d6c8e283e4f9d7c38fe699894e16a3"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4767,8 +4740,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-wit-bindgen"
 version = "50.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6df6397ebf5957c9d9c6001b7d9cd1586113f3556e7d1f9e0457c7166cf0a1da"
+source = "git+https://github.com/GamePad64/wasmtime?branch=fix%2Fconcurrent-defer-caller-completion-50.0.x#9142c54771d6c8e283e4f9d7c38fe699894e16a3"
 dependencies = [
  "anyhow",
  "bitflags 2.13.2",
@@ -4934,7 +4906,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
