@@ -126,19 +126,6 @@ fn a_request_id_is_always_available() {
 }
 
 #[test]
-fn load_component_reports_the_digest_of_the_file_bytes() {
-    let engine = create_engine().expect("engine");
-    let path = std::path::Path::new("tests/fixtures/ask-canary.wasm");
-    if !path.exists() {
-        // Fixture-dependent; skip rather than fail on a fresh checkout.
-        return;
-    }
-    let bytes = std::fs::read(path).expect("read fixture");
-    let (_component, digest) = load_component(&engine, path).expect("load");
-    assert_eq!(digest, crate::audit::sha256_hex(&bytes));
-}
-
-#[test]
 fn mmap_component_yields_the_same_bytes_and_digest_as_a_plain_read() {
     let path = std::path::Path::new("tests/fixtures/ask-canary.wasm");
     if !path.exists() {

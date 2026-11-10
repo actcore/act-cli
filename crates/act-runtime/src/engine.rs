@@ -1,7 +1,7 @@
 //! Engine construction, component loading, and the WASI linker.
 
 use anyhow::Result;
-use wasmtime::component::{Component, Linker};
+use wasmtime::component::Linker;
 use wasmtime::{Cache, CacheConfig, Config, Engine};
 
 use crate::store::HostState;
@@ -12,6 +12,15 @@ pub fn create_engine() -> Result<Engine> {
     let mut config = Config::new();
     config.wasm_component_model(true);
     config.wasm_component_model_async(true);
+    // Enable component-model threading so wasip3 guests built against the
+    // cooperative-threads sysroot can spawn threads (e.g. Servo's storage
+    // threads). Additive: guests that never spawn are unaffected, and
+    // cooperative threads stay confined to the guest's fibers.
+    config.wasm_component_model_threading(true);
+    // The coop sysroot's task-switching glue (__wasm_task_hook.S) emits
+    // stack-switching instructions (context.get/set with a context index),
+    // which component-model threading alone does not unlock.
+    config.wasm_stack_switching(true);
     // Enable wasm exception-handling so components carrying C++-exception
     // extensions run (e.g. numpy 2.x's pocketfft throws). Additive: components
     // without the exceptions proposal are unaffected.
@@ -43,28 +52,14 @@ pub fn create_engine() -> Result<Engine> {
         .map_err(|e| anyhow::anyhow!("failed to create wasmtime engine: {e}"))?;
     Ok(engine)
 }
-/// Load a .wasm component from a file path and report the SHA-256 of its
-/// bytes.
-///
-/// The digest identifies the exact artifact in the audit trail, so it is read
-/// from the file rather than inferred from the reference — a local path and an
-/// OCI cache entry are treated identically.
-pub fn load_component(engine: &Engine, path: &std::path::Path) -> Result<(Component, String)> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| anyhow::anyhow!("failed to read component {}: {e}", path.display()))?;
-    let digest = crate::audit::sha256_hex(&bytes);
-    let component = Component::from_binary(engine, &bytes)
-        .map_err(|e| anyhow::anyhow!("failed to load component from {}: {e}", path.display()))?;
-    Ok((component, digest))
-}
-
 /// Map a .wasm component file read-only and report the SHA-256 of its bytes.
 ///
 /// The mapping stands in for a full read: component info extraction, the
 /// wasmtime compile, and (in act-cli) the embedded skill archive all consume
 /// slices of it, so the file is never copied onto the heap as a whole. The
-/// digest is computed over the mapping and so identifies the same bytes
-/// [`load_component`] would report.
+/// digest is computed over the mapping and identifies the exact artifact in
+/// the audit trail — read from the file rather than inferred from the
+/// reference, so a local path and an OCI cache entry are treated identically.
 pub fn mmap_component(path: &std::path::Path) -> Result<(memmap2::Mmap, String)> {
     let file = std::fs::File::open(path)
         .map_err(|e| anyhow::anyhow!("failed to open component {}: {e}", path.display()))?;
