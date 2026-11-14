@@ -19,7 +19,14 @@ pub fn create_engine() -> Result<Engine> {
     config.wasm_component_model_threading(true);
     // The coop sysroot's task-switching glue (__wasm_task_hook.S) emits
     // stack-switching instructions (context.get/set with a context index),
-    // which component-model threading alone does not unlock.
+    // which component-model threading alone does not unlock. Only requested
+    // where the compiler can deliver: wasmtime refuses to build an engine
+    // asking for stack switching anywhere but x86_64 Linux or macOS, so an
+    // unconditional request made every engine creation fail on Windows and
+    // arm64 macOS — CI red without a single test running. Guests that need
+    // it (the scrape coop chain) are x86_64-Linux development artifacts;
+    // everywhere else the feature is silently absent, as it was before.
+    #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
     config.wasm_stack_switching(true);
     // Enable wasm exception-handling so components carrying C++-exception
     // extensions run (e.g. numpy 2.x's pocketfft throws). Additive: components
